@@ -5,7 +5,7 @@
 **A lightweight, bloat-free desktop download manager.**
 Written in Rust. Single portable executable — no installer, no runtime, no Java.
 
-[![Build](https://github.com/USUARIO/todo-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/USUARIO/todo-downloader/actions/workflows/build.yml)
+[![Build](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)
 ![egui](https://img.shields.io/badge/GUI-egui%200.28-blue)
@@ -92,7 +92,7 @@ sudo apt install libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
 > GTK is not required — file dialogs use the XDG Desktop Portal.
 
 ```bash
-git clone https://github.com/USUARIO/todo-downloader
+git clone https://github.com/AcidClawX41/todo-downloader
 cd todo-downloader
 cargo build --release
 ```

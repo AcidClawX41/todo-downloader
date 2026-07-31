@@ -6,7 +6,7 @@ description = "Todo Downloader - Lightweight, bloat-free download manager (JDown
 authors = ["Eric V. Gramunt"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/USUARIO/todo-downloader"
+repository = "https://github.com/AcidClawX41/todo-downloader"
 keywords = ["downloader", "tiktok", "yt-dlp", "gallery-dl", "gui"]
 categories = ["command-line-utilities", "multimedia"]
 

@@ -1,6 +1,6 @@
 name: Build
 
-# CI en cada push/PR, y publicación automática de binarios al crear un tag vX.Y.Z
+# CI on every push/PR, and automatic binary publishing when a vX.Y.Z tag is pushed
 on:
   push:
     branches: [main, master]
@@ -14,23 +14,23 @@ env:
 
 jobs:
   # ---------------------------------------------------------------
-  # Comprobaciones rápidas: formato, clippy y compilación
+  # Fast checks: formatting, clippy and a debug build
   # ---------------------------------------------------------------
   check:
-    name: Comprobar (fmt + clippy)
+    name: Check (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instalar toolchain de Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Dependencias de sistema (GUI)
+      - name: System dependencies (GUI)
         run: |
-          # egui/winit necesita X11, Wayland y OpenGL. GTK NO hace falta:
-          # los diálogos de archivo usan XDG Desktop Portal (rfd → ashpd).
+          # egui/winit needs X11, Wayland and OpenGL. GTK is NOT required:
+          # file dialogs go through the XDG Desktop Portal (rfd -> ashpd).
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
@@ -40,66 +40,65 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Formato
+      - name: Formatting
         run: cargo fmt --all -- --check
-        continue-on-error: true # informativo: no bloquea la compilación
+        continue-on-error: true # informational: does not block the build
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 
-      - name: Compilar (debug)
+      - name: Build (debug)
         run: cargo build --verbose
 
   # ---------------------------------------------------------------
-  # Binarios de release para los tres sistemas
+  # Release binaries for all three platforms
   # ---------------------------------------------------------------
   build:
-    name: ${{ matrix.nombre }}
+    name: ${{ matrix.name }}
     needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - nombre: Windows x86_64
+          - name: Windows x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            artefacto: todo-downloader-windows-x86_64.exe
-            binario: target/x86_64-pc-windows-msvc/release/todo-downloader.exe
+            artifact: todo-downloader-windows-x86_64.exe
+            binary: target/x86_64-pc-windows-msvc/release/todo-downloader.exe
 
-          - nombre: Linux x86_64
-            os: ubuntu-22.04 # glibc antigua = mayor compatibilidad
+          - name: Linux x86_64
+            os: ubuntu-22.04 # older glibc = wider compatibility
             target: x86_64-unknown-linux-gnu
-            artefacto: todo-downloader-linux-x86_64
-            binario: target/x86_64-unknown-linux-gnu/release/todo-downloader
+            artifact: todo-downloader-linux-x86_64
+            binary: target/x86_64-unknown-linux-gnu/release/todo-downloader
 
-          - nombre: macOS Apple Silicon
+          - name: macOS Apple Silicon
             os: macos-latest
             target: aarch64-apple-darwin
-            artefacto: todo-downloader-macos-aarch64
-            binario: target/aarch64-apple-darwin/release/todo-downloader
+            artifact: todo-downloader-macos-aarch64
+            binary: target/aarch64-apple-darwin/release/todo-downloader
 
-          - nombre: macOS Intel
+          - name: macOS Intel
             os: macos-latest
             target: x86_64-apple-darwin
-            artefacto: todo-downloader-macos-x86_64
-            binario: target/x86_64-apple-darwin/release/todo-downloader
+            artifact: todo-downloader-macos-x86_64
+            binary: target/x86_64-apple-darwin/release/todo-downloader
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instalar toolchain de Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # egui/eframe necesita GTK, X11/Wayland y OpenGL para compilar en Linux
-      - name: Dependencias de sistema (solo Linux)
+      - name: System dependencies (Linux only)
         if: runner.os == 'Linux'
         run: |
-          # egui/winit necesita X11, Wayland y OpenGL. GTK NO hace falta:
-          # los diálogos de archivo usan XDG Desktop Portal (rfd → ashpd).
+          # egui/winit needs X11, Wayland and OpenGL. GTK is NOT required:
+          # file dialogs go through the XDG Desktop Portal (rfd -> ashpd).
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
@@ -111,35 +110,35 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Compilar en modo release
+      - name: Build in release mode
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Preparar artefacto
+      - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p dist
-          cp "${{ matrix.binario }}" "dist/${{ matrix.artefacto }}"
+          cp "${{ matrix.binary }}" "dist/${{ matrix.artifact }}"
           cd dist
-          # Checksum para que cualquiera pueda verificar la descarga
+          # Checksum so anyone can verify their download
           if command -v sha256sum >/dev/null; then
-            sha256sum "${{ matrix.artefacto }}" > "${{ matrix.artefacto }}.sha256"
+            sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
           else
-            shasum -a 256 "${{ matrix.artefacto }}" > "${{ matrix.artefacto }}.sha256"
+            shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
           fi
           ls -lh
 
-      - name: Subir artefacto
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artefacto }}
+          name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
 
   # ---------------------------------------------------------------
-  # Publicar release cuando se empuja un tag vX.Y.Z
+  # Publish a release when a vX.Y.Z tag is pushed
   # ---------------------------------------------------------------
   release:
-    name: Publicar release
+    name: Publish release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -148,16 +147,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descargar todos los binarios
+      - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Listar lo que se va a publicar
+      - name: List what will be published
         run: ls -lh artifacts/
 
-      - name: Crear release en GitHub
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
@@ -166,22 +165,22 @@ jobs:
           body: |
             ## Todo Downloader ${{ github.ref_name }}
 
-            Binarios portables, sin instalador. Descarga el de tu sistema:
+            Portable binaries, no installer. Grab the one for your system:
 
-            | Sistema | Archivo |
+            | System | File |
             |---|---|
-            | Windows 10/11 (64 bits) | `todo-downloader-windows-x86_64.exe` |
+            | Windows 10/11 (64-bit) | `todo-downloader-windows-x86_64.exe` |
             | Linux (x86_64) | `todo-downloader-linux-x86_64` |
             | macOS Apple Silicon (M1/M2/M3…) | `todo-downloader-macos-aarch64` |
             | macOS Intel | `todo-downloader-macos-x86_64` |
 
-            Cada archivo lleva su `.sha256` para verificar la descarga.
+            Each file ships with a `.sha256` so you can verify your download.
 
-            **Linux/macOS**: dale permiso de ejecución con `chmod +x todo-downloader-*`.
+            **Linux/macOS**: make it executable with `chmod +x todo-downloader-*`.
 
-            **Windows**: SmartScreen o tu antivirus pueden avisar porque el binario
-            no está firmado digitalmente. Es un falso positivo por reputación;
-            puedes verificar el hash y revisar el código fuente completo aquí.
+            **Windows**: SmartScreen or your antivirus may warn about the binary
+            because it is not code-signed. It is a reputation-based false
+            positive — you can verify the hash and read the full source here.
 
-            Los motores (yt-dlp, gallery-dl, ffmpeg) se instalan desde la propia
-            aplicación con un clic — no hacen falta Python ni dependencias.
+            The engines (yt-dlp, gallery-dl, ffmpeg) install from inside the
+            application with one click — no Python, no dependencies.

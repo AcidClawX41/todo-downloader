@@ -1,39 +1,39 @@
-# Seguridad — Todo Downloader
+# Security — Todo Downloader
 
-Resumen de la auditoría de seguridad de la v1.0.0 y del modelo de amenazas de la aplicación.
+Summary of the v1.0.0 security audit and the application's threat model.
 
-## Canales de comunicación
+## Communication channels
 
-Todo el tráfico de red usa **HTTPS con rustls** (implementación TLS en Rust puro, sin OpenSSL del sistema). No hay opción de aceptar certificados inválidos en el código. Cualquier enlace `http://` añadido a la cola se **reescribe automáticamente a `https://`** antes de descargarse: la aplicación nunca transmite en claro. Los motores auxiliares se descargan exclusivamente de URLs fijas de GitHub Releases (`github.com/yt-dlp`, `github.com/mikf/gallery-dl`) sobre TLS.
+All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation — no system OpenSSL). There is no code path that accepts invalid certificates. Any `http://` link added to the queue is **automatically rewritten to `https://`** before downloading: the application never transmits in the clear. Helper engines are downloaded exclusively from fixed GitHub Releases URLs (`github.com/yt-dlp/yt-dlp`, `github.com/gdl-org/builds`, `github.com/yt-dlp/FFmpeg-Builds`) over TLS.
 
-## Superficie de ataque y mitigaciones
+## Attack surface and mitigations
 
-**Inyección de comandos**: yt-dlp y gallery-dl se invocan con `Command` + argumentos como array — nunca pasa nada por un shell, por lo que no existe inyección de shell. Contra la *inyección de argumentos* (una "URL" maliciosa que empiece por `-` e intente colarse como flag, p. ej. `--exec`), toda URL se pasa tras el separador `--`, que cierra la lista de opciones. Además, solo se aceptan cadenas que empiecen por `http`.
+**Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing ever goes through a shell, so shell injection is impossible. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
 
-**Path traversal**: todos los nombres de archivo y carpetas de autor pasan por `sanitize()`, que elimina separadores de ruta, caracteres de control y comodines, recorta puntos finales y neutraliza los nombres de dispositivo reservados de Windows (CON, NUL, COM1…). Un título de vídeo malicioso no puede escribir fuera de la carpeta de destino.
+**Path traversal**: all filenames and author folder names go through `sanitize()`, which strips path separators, control characters and wildcards, trims trailing dots, and neutralizes Windows reserved device names (CON, NUL, COM1…). A malicious video title cannot write outside the destination folder.
 
-**Binarios descargados (cadena de suministro)**: tras descargar yt-dlp, gallery-dl o ffmpeg se ejecuta una verificación (`--version` / `-version`); si el binario no responde correctamente se **elimina** y se notifica. En el caso de ffmpeg, que llega como archivo comprimido, se extraen **únicamente** `ffmpeg.exe` y `ffprobe.exe` filtrando por ruta exacta (`*/bin/ffmpeg.exe`); ningún otro contenido del paquete se escribe a disco, y el zip temporal se borra al terminar. El origen es el build oficial que mantiene el propio equipo de yt-dlp. Se escriben primero como `.part` y se renombran de forma atómica. Limitación conocida: no se verifica firma criptográfica del release (GitHub no publica firmas uniformes para estos proyectos); la confianza recae en TLS + github.com. Mantén Windows Defender/AV activo como capa adicional.
+**Downloaded binaries (supply chain)**: after downloading yt-dlp, gallery-dl or ffmpeg, a verification run is performed (`--version` / `-version`); if the binary does not respond correctly it is **deleted** and the user is notified. ffmpeg arrives as an archive, and **only** `ffmpeg.exe` and `ffprobe.exe` are extracted, filtered by exact path (`*/bin/ffmpeg.exe`); no other archive entry is written to disk, and the temporary zip is removed afterwards. The source is the official build maintained by the yt-dlp team itself. Files are written as `.part` first and renamed atomically. Known limitation: release signatures are not verified (GitHub does not publish uniform signatures for these projects); trust rests on TLS + github.com. Keep Windows Defender or your AV enabled as an additional layer.
 
-**Portapapeles (LinkGrabber)**: se lee localmente cada 900 ms *solo si está activado*. Únicamente se extraen URLs de sitios conocidos (o cualquiera, si el usuario lo habilita expresamente); el contenido del portapapeles **nunca se registra, persiste ni transmite**. Se puede desactivar en Ajustes.
+**Clipboard (LinkGrabber)**: read locally every 900 ms, *only when enabled*. Only URLs from known sites are extracted (or any URL, if the user explicitly allows it); clipboard content is **never logged, persisted or transmitted**. It can be turned off in Settings.
 
-**Cookies del navegador**: función *opt-in*. Las cookies las leen yt-dlp/gallery-dl directamente y viajan solo hacia el sitio de destino sobre TLS; esta aplicación nunca las toca, guarda ni reenvía.
+**Browser cookies**: opt-in feature. Cookies are read by yt-dlp/gallery-dl directly and travel only to the destination site over TLS; this application never touches, stores or forwards them.
 
-**Datos en reposo**: los ajustes persistidos no contienen secretos (rutas, booleanos, nombre de navegador). No se almacenan credenciales ni tokens.
+**Data at rest**: persisted settings contain no secrets (paths, booleans, browser name). No credentials or tokens are stored.
 
-**Receptor local (captura desde el navegador)**: la función Click'n'Load abre un endpoint HTTP mínimo con estas restricciones — bind **exclusivo a 127.0.0.1** (inalcanzable desde la red, ni siquiera desde otra máquina de la LAN), desactivable desde Ajustes, cuerpo limitado a 8 MiB, y **solo se aceptan cadenas `http://` o `https://`**: cualquier otra (`javascript:`, `file:`, rutas locales) se descarta. Lo recibido únicamente se encola como descarga; nunca se ejecuta ni se evalúa. La cabecera CORS es permisiva por necesidad — el navegador debe poder enviar desde tiktok.com o douyin.com — lo cual es aceptable porque el endpoint no es alcanzable fuera de la máquina y su única acción posible es añadir una URL a la cola. Riesgo residual: una web maliciosa abierta en el navegador podría encolar descargas no deseadas mientras el receptor esté activo; se ven en la cola y no se inician solas salvo que actives el autoarranque.
+**Local receiver (browser capture)**: the Click'n'Load feature opens a minimal HTTP endpoint with these restrictions — bound **exclusively to 127.0.0.1** (unreachable from the network, not even from another machine on the LAN), disableable from Settings, request body capped at 8 MiB, and **only `http://` or `https://` strings are accepted**: anything else (`javascript:`, `file:`, local paths) is discarded. Received data is only queued as a download; it is never executed or evaluated. The CORS header is permissive out of necessity — the browser must be able to post from tiktok.com or douyin.com — which is acceptable because the endpoint is unreachable from outside the machine and its only possible action is adding a URL to the queue. Residual risk: a malicious page open in the browser could queue unwanted downloads while the receiver is active; they are visible in the queue and do not start on their own unless auto-start is enabled.
 
-**Recursos**: concurrencia limitada (1–8), reintentos acotados con backoff, análisis de perfil limitado a 2000 entradas, timeout de conexión de 15 s.
+**Resources**: bounded concurrency (1–8), capped retries with backoff, profile analysis limited to 2000 entries, 15 s connection timeout.
 
-## Lo que esta aplicación NO hace
+## What this application does NOT do
 
-No tiene telemetría ni analítica, no ejecuta contenido descargado, no se auto-actualiza en silencio, no toca el registro de Windows y no requiere privilegios de administrador. El único puerto de escucha es el receptor local descrito arriba, siempre limitado a 127.0.0.1 y desactivable.
+No telemetry, no analytics. It does not execute downloaded content, does not silently self-update, does not touch the Windows registry, and does not require administrator privileges. The only listening port is the local receiver described above, always bound to 127.0.0.1 and disableable.
 
-## Limitaciones conocidas
+## Known limitations
 
-- Pausar una tarea de yt-dlp/gallery-dl en curso no mata el subproceso (termina su descarga actual).
-- Los archivos descargados de sitios arbitrarios son responsabilidad del usuario; la app no los analiza (usa tu AV).
-- Sin verificación de firma de los binarios auxiliares (ver arriba).
+- Pausing a running yt-dlp/gallery-dl task does not kill the subprocess (it finishes the file in progress).
+- Files downloaded from arbitrary sites are the user's responsibility; the app does not scan them (use your AV).
+- No signature verification of the helper binaries (see above).
 
-## Reporte de vulnerabilidades
+## Reporting a vulnerability
 
-Abre un issue privado en el repositorio o contacta al autor. — *By Eric V. Gramunt*
+Open a private issue on the repository or contact the author. — *By Eric V. Gramunt*
