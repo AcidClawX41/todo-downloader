@@ -1,0 +1,10 @@
+# Rust
+/target
+*.part
+
+# Binario compilado local
+Todo Downloader.exe
+
+# IDE
+/.idea
+/.vscode

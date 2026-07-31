@@ -1,0 +1,32 @@
+[package]
+name = "todo-downloader"
+version = "1.0.0"
+edition = "2021"
+description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"
+authors = ["Eric V. Gramunt"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/USUARIO/todo-downloader"
+keywords = ["downloader", "tiktok", "yt-dlp", "gallery-dl", "gui"]
+categories = ["command-line-utilities", "multimedia"]
+
+[dependencies]
+eframe = { version = "0.28", features = ["persistence"] }
+egui_extras = "0.28"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "process", "io-util", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.14"
+arboard = "3"
+regex = "1"
+open = "5"
+anyhow = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
