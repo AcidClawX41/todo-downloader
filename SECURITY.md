@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.1.0.
+Summary of the security audit and the application's threat model. Last reviewed for v1.3.0.
 
 ## Communication channels
 
@@ -11,6 +11,12 @@ All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation �
 **Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing ever goes through a shell, so shell injection is impossible. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
 
 **Path traversal**: all filenames and author folder names go through `sanitize()`, which strips path separators, control characters and wildcards, trims trailing dots, and neutralizes Windows reserved device names (CON, NUL, COM1…). A malicious video title cannot write outside the destination folder.
+
+**Native file-host resolvers**: Pixeldrain, GoFile and MediaFire are resolved in-process with reqwest — no external binary. Only official API endpoints and the hoster's own page are contacted, all over HTTPS. Resolved links are downloaded through the same native HTTP path as everything else (which only ever *writes* the response to disk, never executes it). GoFile requires a per-download cookie (a guest-account token); it is obtained fresh from GoFile's API, sent only to GoFile's own CDN, and never persisted. The MediaFire resolver parses HTML with fixed regexes and decodes an optional base64 link — it does not evaluate any script from the page.
+
+**BitTorrent engine (librqbit)**: embedded as a Rust library, not a subprocess. It opens a listening port and participates in DHT and the swarm, which is inherently more network-exposed than the rest of the app — this is intrinsic to how BitTorrent works, not a flaw. Its session is created **lazily**, only when you add the first torrent, so if you never use the tab no port is opened and no DHT traffic occurs. Downloading a torrent also **uploads** (seeds) to peers; the tab states this plainly, since it is both a bandwidth and a legal consideration. Torrents download to a dedicated `Torrents/` subfolder. As with any download, content is written to disk and never executed.
+
+**Optional cyberdrop-dl engine**: opt-in from Settings, off by default. It is the only component that pulls in Python: installation runs the official `uv` installer (`astral.sh`) followed by `uv tool install cyberdrop-dl-patched`. If you never enable it, no Python is downloaded and nothing changes. When enabled, it runs as a subprocess under the same pause/kill-tree control as the other engines.
 
 **Downloaded binaries (supply chain)**: after downloading yt-dlp, gallery-dl or ffmpeg, a verification run is performed (`--version` / `-version`); if the binary does not respond correctly it is **deleted** and the user is notified. ffmpeg arrives as an archive, and **only** `ffmpeg.exe` and `ffprobe.exe` are extracted, filtered by exact path (`*/bin/ffmpeg.exe`); no other archive entry is written to disk, and the temporary zip is removed afterwards. The source is the official build maintained by the yt-dlp team itself. Files are written as `.part` first and renamed atomically. Known limitation: release signatures are not verified (GitHub does not publish uniform signatures for these projects); trust rests on TLS + github.com. Keep Windows Defender or your AV enabled as an additional layer.
 
@@ -26,7 +32,7 @@ All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation �
 
 **Resources**: bounded concurrency (1–8), capped retries with backoff, profile analysis limited to 2000 entries, 15 s connection timeout.
 
-**User control over subprocesses**: Pause sets a cancellation flag that native HTTP downloads check between chunks and that engine subprocesses are polled against every 150 ms; on cancellation the **entire process tree** is terminated. The tree matters: yt-dlp and gallery-dl ship as PyInstaller "onefile" bundles, so the process you spawn is a bootloader that runs the real Python interpreter in a *grandchild*. Terminating only the bootloader leaves that grandchild orphaned and still downloading — which is exactly what happened before v1.1.0, where the flag was honoured by native downloads only. Not a privilege or disclosure issue, but a loss of user control and a violation of the resource bounds claimed above.
+**User control over subprocesses**: Pause sets a cancellation flag that native HTTP downloads check between chunks and that engine subprocesses are polled against every 150 ms; on cancellation the **entire process tree** is terminated. The tree matters: yt-dlp and gallery-dl ship as PyInstaller "onefile" bundles, so the process you spawn is a bootloader that runs the real Python interpreter in a *grandchild*. Terminating only the bootloader leaves that grandchild orphaned and still downloading — which is exactly what happened before v1.1.0, where the flag was honoured by native downloads only. On Windows the whole tree is killed via `taskkill /T`; on Linux and macOS each engine is spawned in its own process group (`process_group(0)`) and cancellation signals the entire group (SIGKILL to `-pid`), so the Python grandchild is reached on every platform. Not a privilege or disclosure issue, but a loss of user control and a violation of the resource bounds claimed above.
 
 ## What this application does NOT do
 

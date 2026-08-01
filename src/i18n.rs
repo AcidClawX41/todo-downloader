@@ -355,6 +355,66 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
 
         "side.cookies_on" => entry!("● cookies activas", "● cookies enabled"),
         "side.cookies_off" => entry!("○ sin cookies", "○ no cookies"),
+        "side.cyberdrop_active" => entry!("● cyberdrop-dl activo", "● cyberdrop-dl active"),
+
+        "status.resolving_host" => entry!("Resolviendo…", "Resolving…"),
+
+        // ---------- BitTorrent ----------
+        "nav.torrents" => entry!("Torrent", "Torrent"),
+        "torrent.title" => entry!("Descargas por Torrent", "Torrent downloads"),
+        "torrent.subtitle" => entry!(
+            "Pega un enlace magnet o un archivo .torrent. Motor BitTorrent nativo (DHT, sin proceso externo).",
+            "Paste a magnet link or a .torrent file. Native BitTorrent engine (DHT, no external process)."
+        ),
+        "torrent.add_label" => entry!("MAGNET O ARCHIVO .TORRENT", "MAGNET OR .TORRENT FILE"),
+        "torrent.pick_file" => entry!("📄 Archivo…", "📄 File…"),
+        "torrent.add_btn" => entry!("➕ Añadir torrent", "➕ Add torrent"),
+        "torrent.adding" => entry!("Iniciando sesión BitTorrent…", "Starting BitTorrent session…"),
+        "torrent.added" => entry!("Torrent añadido", "Torrent added"),
+        "torrent.empty" => entry!("No hay torrents activos", "No active torrents"),
+        "torrent.remove" => entry!("Quitar de la lista (conserva archivos)", "Remove from list (keeps files)"),
+        "torrent.state_init" => entry!("Conectando…", "Connecting…"),
+        "torrent.state_down" => entry!("Descargando", "Downloading"),
+        "torrent.state_seeding" => entry!("Compartiendo", "Seeding"),
+        "torrent.legal" => entry!(
+            "⚠ Al descargar por torrent también compartes (subes) el contenido. Úsalo solo con material legal.",
+            "⚠ Downloading via torrent also shares (uploads) the content. Use only with legal material."
+        ),
+        "torrent.options" => entry!("⚙  Carpeta y velocidad", "⚙  Folder & speed"),
+        "torrent.folder_label" => entry!("CARPETA DE DESTINO", "DOWNLOAD FOLDER"),
+        "torrent.limits_label" => entry!("LÍMITES DE VELOCIDAD", "SPEED LIMITS"),
+        "torrent.down_limit" => entry!("Descarga:", "Download:"),
+        "torrent.up_limit" => entry!("Subida:", "Upload:"),
+        "torrent.limit_zero" => entry!("0 = sin límite", "0 = unlimited"),
+        "torrent.peers_tip" => entry!(
+            "Peers conectados ahora mismo (BitTorrent no separa seeders de leechers a nivel agregado)",
+            "Peers connected right now (BitTorrent doesn't split seeders from leechers at aggregate level)"
+        ),
+        "torrent.limit_restart" => entry!(
+            "Los límites se aplican al iniciar la sesión; si ya hay torrents, reinicia la app para cambiarlos.",
+            "Limits apply when the session starts; if torrents are already running, restart the app to change them."
+        ),
+
+        // ---------- Hosters de archivos ----------
+        "err.need_cyberdrop" => entry!(
+            "Este hoster necesita el motor cyberdrop-dl: instálalo en Ajustes (requiere Python)",
+            "This host needs the cyberdrop-dl engine: install it in Settings (requires Python)"
+        ),
+        "eng.cyberdrop" => entry!("MOTOR CYBERDROP-DL (HOSTERS DIFÍCILES)", "CYBERDROP-DL ENGINE (HARD HOSTS)"),
+        "eng.cyberdrop_ok" => entry!("cyberdrop-dl: instalado ✓", "cyberdrop-dl: installed ✓"),
+        "eng.cyberdrop_missing" => entry!(
+            "cyberdrop-dl: no instalado — opcional, para Bunkr, Cyberdrop y similares",
+            "cyberdrop-dl: not installed — optional, for Bunkr, Cyberdrop and similar"
+        ),
+        "eng.install_cyberdrop" => entry!("⬇  Instalar cyberdrop-dl", "⬇  Install cyberdrop-dl"),
+        "eng.cyberdrop_downloading" => entry!(
+            "Instalando cyberdrop-dl vía uv (descarga Python, tarda un poco)…",
+            "Installing cyberdrop-dl via uv (downloads Python, takes a while)…"
+        ),
+        "eng.cyberdrop_note" => entry!(
+            "Opcional. Usa Python gestionado por uv (~astral.sh). Solo hace falta para hosters que se defienden de los scrapers; Pixeldrain, GoFile y MediaFire NO lo necesitan.",
+            "Optional. Uses Python managed by uv (~astral.sh). Only needed for hosts that fight scrapers; Pixeldrain, GoFile and MediaFire do NOT need it."
+        ),
 
         "side.ffmpeg_active" => entry!("● ffmpeg activo", "● ffmpeg active"),
         "side.ffmpeg_missing" => entry!("● ffmpeg ausente", "● ffmpeg missing"),
@@ -461,6 +521,20 @@ pub fn clip_captured(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("📋 {n} enlaces capturados del portapapeles"),
         Lang::En => format!("📋 {n} links captured from the clipboard"),
+    }
+}
+
+pub fn host_resolved(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es => format!("🔗 {n} archivo(s) resueltos del hoster"),
+        Lang::En => format!("🔗 {n} file(s) resolved from the host"),
+    }
+}
+
+pub fn torrent_error(lang: Lang, e: &str) -> String {
+    match lang {
+        Lang::Es => format!("Error de torrent: {e}"),
+        Lang::En => format!("Torrent error: {e}"),
     }
 }
 

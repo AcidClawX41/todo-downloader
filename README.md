@@ -26,6 +26,8 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 ### Downloading
 
 - **Universal**: direct file links over native HTTP, and pages from 1000+ sites (YouTube, TikTok, Instagram, X, Reddit, Twitch, Weibo, Bilibili…) through the built-in engines.
+- **File hosts, resolved natively.** Pixeldrain, GoFile and MediaFire links are resolved to their real CDN URLs in pure Rust — no extra binary, no Python — and then downloaded through the native HTTP engine with full resume. A folder link expands into one row per file. For hosts that actively fight scrapers (Bunkr, Cyberdrop…), an **optional** cyberdrop-dl engine can be installed from Settings; it's the only thing here that pulls in Python, and only if you choose to.
+- **Native BitTorrent** (magnet + `.torrent`) in its own **Torrent** tab, built on the embedded [librqbit](https://github.com/ikatson/rqbit) engine (Rust, Apache-2.0): DHT so magnets work trackerless, UDP/HTTP trackers, uTP, PEX and UPnP port-forwarding. No external client, no Java, no daemon — it compiles into the single binary. Each torrent shows live progress, download speed, connected peers, ETA and uploaded amount; you can set a **per-download folder** and **download/upload speed limits**, and pause/resume/remove. Downloading via torrent also seeds, so the tab carries a clear legal reminder.
 - **Always maximum quality.** For ByteDance images (TikTok/Douyin) it detects the CDN's `~tplv-` processing template — which applies watermarks and downscaling — and requests the unprocessed original first. The difference is real: from a recompressed thumbnail to **2160×2880, watermark-free**.
 - **Adaptive video quality**: with ffmpeg installed it merges separate video and audio streams (1080p+ on YouTube); without it, it falls back to the best pre-merged file instead of failing.
 - **Bilibili tuned for maximum bitrate.** Bilibili publishes every resolution twice — once in AVC, once in HEVC — and the AVC stream often carries far more bitrate (4174k vs 2503k at 1080p). The format sorter prefers resolution, then fps, then bitrate, ignoring the default codec preference. Note that 720p and above require cookies, and 4K / 1080p60 additionally require a premium (大会员) account.
@@ -50,6 +52,9 @@ All three install **with one click from Settings**, downloading the official bin
 | **yt-dlp** | Video pages (1000+ sites) | `github.com/yt-dlp/yt-dlp` |
 | **gallery-dl** | Galleries, carousels and image profiles | `github.com/gdl-org/builds` |
 | **ffmpeg** | Merging video+audio for maximum quality | `github.com/yt-dlp/FFmpeg-Builds` |
+| **cyberdrop-dl** *(optional)* | Hard file hosts: Bunkr, Cyberdrop… | installed via `uv` (needs Python) |
+
+Pixeldrain, GoFile and MediaFire need **no engine at all** — they're resolved natively in Rust. cyberdrop-dl is the only optional, Python-based engine, off by default.
 
 Each binary is verified by running it after download; if it doesn't respond, it's deleted.
 
@@ -117,6 +122,9 @@ The binary lands in `target/release/`. On Windows you can also double-click `Com
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
+| Download a torrent / magnet | **Torrent** tab → paste the magnet or pick a `.torrent` |
+| Grab a Pixeldrain / GoFile / MediaFire link | Just paste it — resolved natively, folders expand into individual files |
+| Grab from Bunkr / Cyberdrop | Install cyberdrop-dl once in **Settings**, then paste the link |
 | Queue a list of links | **Add links** or **Import TXT/JSON** |
 
 ### About cookies
@@ -144,6 +152,8 @@ Being upfront about these:
 - **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
 - The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
+- The Torrent tab shows **connected peers**, not a swarm seeder/leecher split — librqbit's aggregate stats don't expose that cleanly, and per-peer inspection isn't worth the fragility. Peer GeoIP (countries) is intentionally omitted: it needs a multi-MB database and is unreliable behind VPNs.
+- BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
 - **Bilibili requires ffmpeg**, always — it only serves DASH, so video and audio arrive as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast; requests are spaced out to avoid it.
 
 ## Architecture
@@ -151,6 +161,8 @@ Being upfront about these:
 ```
 src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
+├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)
+├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
 ├── receiver.rs   Local HTTP receiver (Click'n'Load), 127.0.0.1 only
 └── scripts.rs    Browser console scripts for TikTok and Douyin, with an on-page HUD

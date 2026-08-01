@@ -31,12 +31,13 @@ jobs:
         run: |
           # egui/winit needs X11, Wayland and OpenGL. GTK is NOT required:
           # file dialogs go through the XDG Desktop Portal (rfd -> ashpd).
+          # libssl-dev: librqbit (BitTorrent) pulls in native-tls -> OpenSSL.
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
-            pkg-config
+            libssl-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
@@ -99,12 +100,21 @@ jobs:
         run: |
           # egui/winit needs X11, Wayland and OpenGL. GTK is NOT required:
           # file dialogs go through the XDG Desktop Portal (rfd -> ashpd).
+          # libssl-dev: librqbit (BitTorrent) pulls in native-tls -> OpenSSL.
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
-            pkg-config
+            libssl-dev pkg-config
+
+      # macOS: point openssl-sys at the Homebrew OpenSSL that librqbit needs.
+      - name: OpenSSL (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          PREFIX="$(brew --prefix openssl@3)"
+          echo "OPENSSL_DIR=$PREFIX" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:

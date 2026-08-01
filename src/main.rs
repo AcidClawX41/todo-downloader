@@ -14,9 +14,11 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod hosters;
 mod i18n;
 mod receiver;
 mod scripts;
+mod torrents;
 use i18n::{t, Lang};
 
 use std::path::PathBuf;
@@ -90,6 +92,8 @@ impl Status {
             Status::Downloading => t(lang, "status.downloading").into(),
             Status::Resolving => match engine {
                 Engine::GalleryDl => "gallery-dl".into(),
+                Engine::FileHost => t(lang, "status.resolving_host").into(),
+                Engine::Cyberdrop => "cyberdrop-dl".into(),
                 _ => t(lang, "status.resolving").into(),
             },
             Status::Paused => t(lang, "status.paused").into(),
@@ -137,6 +141,15 @@ struct Row {
     cancel: Arc<AtomicBool>,
     /// URL de la portada del post; vacía si el origen no la proporcionó
     thumb_url: String,
+    /// Cookie de descarga (GoFile la exige); vacía si no aplica
+    dl_cookie: String,
+}
+
+/// Un archivo resuelto por un hoster, para expandir la fila origen en varias
+struct HostItem {
+    url: String,
+    filename: String,
+    cookie: String,
 }
 
 // Algunas variantes solo se emiten en Windows (instalador de ffmpeg)
@@ -164,6 +177,16 @@ enum Ev {
     ProfileError(String),
     /// Miniatura descargada y decodificada, lista para subir a la GPU
     Thumb(u64, egui::ColorImage),
+    /// Un hoster resolvió su URL en estos archivos directos: se expande la fila
+    FileHostResolved(u64, Vec<HostItem>),
+    Cyberdrop(Option<String>),
+    CyberdropProgress(f32),
+    CyberdropError(String),
+    /// La sesión BitTorrent quedó lista (creada de forma perezosa al 1er torrent)
+    TorrentClientReady(Arc<torrents::Client>),
+    /// Torrent añadido: id de la app, handle de librqbit, nombre provisional
+    TorrentAdded(u64, Arc<librqbit::ManagedTorrent>, String),
+    TorrentError(String),
 }
 
 /// Motor de descarga por tarea
@@ -172,6 +195,8 @@ enum Engine {
     Http,      // enlace directo a archivo (CDN)
     YtDlp,     // página de vídeo (TikTok, YouTube, Instagram, X…)
     GalleryDl, // post de imágenes (TikTok /photo/, Douyin /note/)
+    FileHost,  // hoster con API abierta resuelto en Rust (Pixeldrain, GoFile, MediaFire)
+    Cyberdrop, // motor opcional para hosters difíciles (Bunkr, Cyberdrop…): necesita Python
 }
 
 /// Entrada detectada al analizar un perfil
@@ -189,6 +214,9 @@ const KNOWN_SITES: &[&str] = &[
     "tiktok.com", "douyin.com", "youtube.com", "youtu.be", "instagram.com",
     "twitter.com", "x.com", "reddit.com", "twitch.tv", "vimeo.com",
     "facebook.com", "bilibili.com", "b23.tv", "soundcloud.com", "dailymotion.com",
+    // Hosters de archivos (grupo 2)
+    "pixeldrain.com", "gofile.io", "mediafire.com", "bunkr.", "cyberdrop.",
+    "saint.to", "saint2.su", "pixl.li",
 ];
 
 /// ¿Es un enlace directo a archivo (descargable por HTTP puro)?
@@ -262,7 +290,32 @@ fn is_douyin_profile(url: &str) -> bool {
     u.contains("douyin.com") && (u.contains("/user/") || !u.contains("/video/"))
 }
 
+/// Hosters "difíciles" (ofuscación cambiante, guerra de scrapers) que solo
+/// cubre el motor opcional cyberdrop-dl. No se resuelven de forma nativa porque
+/// cambian cada semana a propósito para romper a los descargadores.
+const CYBERDROP_SITES: &[&str] = &[
+    "bunkr.", "cyberdrop.me", "cyberdrop.to", "cyberfile.me", "pixl.li",
+    "jpg.church", "jpg5.su", "saint.to", "saint2.su", "gofile.io/d/",
+];
+
+/// ¿La URL la maneja el motor opcional cyberdrop-dl? (excluye lo que ya
+/// resolvemos de forma nativa, que tiene prioridad).
+fn is_cyberdrop_site(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    if hosters::is_filehost(&u) {
+        return false;
+    }
+    CYBERDROP_SITES.iter().any(|s| u.contains(s))
+}
+
 fn engine_for_url(url: &str) -> Engine {
+    // Hosters con API abierta (Pixeldrain, GoFile, MediaFire): resolución nativa
+    if hosters::is_filehost(url) {
+        return Engine::FileHost;
+    }
+    if is_cyberdrop_site(url) {
+        return Engine::Cyberdrop;
+    }
     if is_gallery_site(url) {
         return Engine::GalleryDl;
     }
@@ -341,6 +394,26 @@ fn url_extension(url: &str) -> Option<String> {
     }
 }
 
+/// Decodifica %XX y '+' (espacios) de un valor de query, para el `dn=` del magnet
+fn urldecode_plus(s: &str) -> String {
+    let s = s.replace('+', " ");
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Hash corto y estable de la URL, para nombrar archivos sin identificador
 fn short_hash(url: &str) -> String {
     use std::hash::{Hash, Hasher};
@@ -361,6 +434,7 @@ enum View {
     Downloads,
     Profile,
     Capture,
+    Torrents,
     Done,
     Failed,
     Settings,
@@ -381,6 +455,12 @@ struct Settings {
     lang: Lang,
     receiver_enabled: bool,
     receiver_port: u16,
+    /// Carpeta de destino de los torrents (vacío = <dest>/Torrents)
+    torrent_dir: String,
+    /// Límite de descarga de torrents en KiB/s (0 = sin límite)
+    torrent_down_kbps: u32,
+    /// Límite de subida de torrents en KiB/s (0 = sin límite)
+    torrent_up_kbps: u32,
 }
 
 impl Default for Settings {
@@ -398,6 +478,20 @@ impl Default for Settings {
             lang: Lang::detect(),
             receiver_enabled: true,
             receiver_port: 9777,
+            torrent_dir: String::new(),
+            torrent_down_kbps: 0,
+            torrent_up_kbps: 0,
+        }
+    }
+}
+
+impl Settings {
+    /// Carpeta efectiva de torrents: la elegida, o <dest>/Torrents por defecto.
+    fn torrent_folder(&self) -> PathBuf {
+        if self.torrent_dir.trim().is_empty() {
+            PathBuf::from(&self.dest).join("Torrents")
+        } else {
+            PathBuf::from(self.torrent_dir.trim())
         }
     }
 }
@@ -469,6 +563,23 @@ fn fmt_size(b: f64) -> String {
     unreachable!()
 }
 
+/// Tiempo restante en formato compacto (12s, 4m, 1h 20m, 2d)
+fn fmt_eta(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "—".into();
+    }
+    let s = secs as u64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86_400 {
+        format!("{}h {}m", s / 3600, (s % 3600) / 60)
+    } else {
+        format!("{}d {}h", s / 86_400, (s % 86_400) / 3600)
+    }
+}
+
 // ============================= App =============================
 
 struct App {
@@ -495,6 +606,9 @@ struct App {
     ffmpeg_cmd: Option<String>,
     ffmpeg_installing: bool,
     ffmpeg_progress: f32,
+    cyberdrop_cmd: Option<String>,
+    cyberdrop_installing: bool,
+    cyberdrop_progress: f32,
     profile_url: String,
     profile_want_videos: bool,
     profile_want_images: bool,
@@ -510,6 +624,14 @@ struct App {
     thumbs: std::collections::HashMap<u64, egui::TextureHandle>,
     /// Ids con descarga de miniatura en curso (o fallida: no se reintenta)
     thumbs_pending: std::collections::HashSet<u64>,
+    // ---- BitTorrent ----
+    torrent_client: Option<Arc<torrents::Client>>,
+    torrents: Vec<torrents::Handle>,
+    next_torrent_id: u64,
+    torrent_input: String,
+    torrent_adding: bool,
+    /// Cálculo de velocidad por torrent: (bytes previos, instante, velocidad)
+    torrent_speed: std::collections::HashMap<u64, (u64, Instant, f64)>,
     /// Ancla del desplazamiento automático con el botón central del ratón
     autoscroll: Option<egui::Pos2>,
 }
@@ -571,6 +693,7 @@ impl App {
         spawn_ytdlp_check(tx.clone());
         spawn_galdl_check(tx.clone());
         spawn_ffmpeg_check(tx.clone());
+        spawn_cyberdrop_check(tx.clone());
 
         Self {
             rows: Vec::new(),
@@ -596,6 +719,9 @@ impl App {
             ffmpeg_cmd: None,
             ffmpeg_installing: false,
             ffmpeg_progress: 0.0,
+            cyberdrop_cmd: None,
+            cyberdrop_installing: false,
+            cyberdrop_progress: 0.0,
             profile_url: String::new(),
             profile_want_videos: true,
             profile_want_images: true,
@@ -609,8 +735,66 @@ impl App {
             toast_until: None,
             thumbs: std::collections::HashMap::new(),
             thumbs_pending: std::collections::HashSet::new(),
+            torrent_client: None,
+            torrents: Vec::new(),
+            next_torrent_id: 0,
+            torrent_input: String::new(),
+            torrent_adding: false,
+            torrent_speed: std::collections::HashMap::new(),
             autoscroll: None,
         }
+    }
+
+    /// Añade un magnet / URL .torrent / ruta local a la sesión BitTorrent,
+    /// creando la sesión de forma perezosa la primera vez.
+    fn add_torrent(&mut self, source: String) {
+        let src = source.trim().to_string();
+        if src.is_empty() {
+            return;
+        }
+        self.torrent_adding = true;
+        let id = self.next_torrent_id;
+        self.next_torrent_id += 1;
+        // Nombre provisional: el `dn=` del magnet, si lo trae
+        let provisional = Regex::new(r"[?&]dn=([^&]+)")
+            .ok()
+            .and_then(|re| re.captures(&src).map(|c| urldecode_plus(&c[1])))
+            .unwrap_or_else(|| "torrent".into());
+
+        let existing = self.torrent_client.clone();
+        let folder = self.settings.torrent_folder();
+        let limits = torrents::Limits {
+            download_kbps: self.settings.torrent_down_kbps,
+            upload_kbps: self.settings.torrent_up_kbps,
+        };
+        // La carpeta base la fija la sesión (creada una vez). Como destino de
+        // ESTE torrent se pasa también la carpeta actual, así respeta cambios.
+        let out = folder.to_string_lossy().into_owned();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let client = match existing {
+                Some(c) => c,
+                None => match torrents::Client::new(folder, limits).await {
+                    Ok(c) => {
+                        let a = Arc::new(c);
+                        let _ = tx.send(Ev::TorrentClientReady(a.clone()));
+                        a
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Ev::TorrentError(e.to_string()));
+                        return;
+                    }
+                },
+            };
+            match client.add(&src, Some(out)).await {
+                Ok(h) => {
+                    let _ = tx.send(Ev::TorrentAdded(id, h, provisional));
+                }
+                Err(e) => {
+                    let _ = tx.send(Ev::TorrentError(e.to_string()));
+                }
+            }
+        });
     }
 
     /// Desplazamiento automático estilo navegador: clic central para anclar,
@@ -697,7 +881,6 @@ impl App {
         if url.is_empty() || self.rows.iter().any(|r| r.url == url) {
             return;
         }
-        self.next_id += 1;
         let engine = engine_for_url(url);
 
         // Identificador del post: el que envía el capturador, el de la URL,
@@ -738,8 +921,28 @@ impl App {
                 format!("{stem} {}", i18n::t(self.settings.lang, "label.gallery"))
             }
             Engine::YtDlp => format!("{stem}.mp4"),
+            // Se resuelve al iniciar; el nombre real llega con cada archivo.
+            Engine::FileHost => format!("{} ({})", stem, hosters::host_name(url)),
+            Engine::Cyberdrop => format!("{stem} (cyberdrop-dl)"),
         };
 
+        self.push_row(url, page_url, author, engine, filename, thumb, "");
+    }
+
+    /// Inserta una fila en la cola. `cookie` solo lo usan los enlaces directos
+    /// resueltos por un hoster (GoFile). Centralizado para no repetir el struct.
+    #[allow(clippy::too_many_arguments)]
+    fn push_row(
+        &mut self,
+        url: &str,
+        page_url: &str,
+        author: &str,
+        engine: Engine,
+        filename: String,
+        thumb: &str,
+        cookie: &str,
+    ) {
+        self.next_id += 1;
         self.rows.push(Row {
             id: self.next_id,
             filename,
@@ -755,6 +958,7 @@ impl App {
             error_full: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             thumb_url: if thumb.starts_with("http") { thumb.to_string() } else { String::new() },
+            dl_cookie: cookie.to_string(),
         });
     }
 
@@ -844,14 +1048,16 @@ impl App {
             ffmpeg: self.ffmpeg_cmd.clone(),
             cancel: row.cancel.clone(),
             lang: self.settings.lang,
+            cookie: row.dl_cookie.clone(),
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
         let tx = self.tx.clone();
         let ytdlp = self.ytdlp_cmd.clone();
         let galdl = self.galdl_cmd.clone();
+        let cyberdrop = self.cyberdrop_cmd.clone();
         self.rt.spawn(async move {
-            download_task(client, spec, sem, tx, ytdlp, galdl).await;
+            download_task(client, spec, sem, tx, ytdlp, galdl, cyberdrop).await;
         });
     }
 
@@ -1035,6 +1241,58 @@ impl App {
                     );
                     self.thumbs.insert(id, tex);
                 }
+                Ev::FileHostResolved(id, items) => {
+                    // La fila del hoster se sustituye por una fila HTTP por
+                    // archivo resuelto; se heredan autor y carpeta de la origen.
+                    let (author, page_url) = match self.idx(id) {
+                        Some(i) => (self.rows[i].author.clone(), self.rows[i].page_url.clone()),
+                        None => continue,
+                    };
+                    self.rows.retain(|r| r.id != id);
+                    let n = items.len();
+                    let mut new_ids = Vec::new();
+                    for it in items {
+                        // Evitar duplicados si ya estaba en cola
+                        if self.rows.iter().any(|r| r.url == it.url) {
+                            continue;
+                        }
+                        let name = sanitize(&it.filename, 150);
+                        self.push_row(&it.url, &page_url, &author, Engine::Http, name, "", &it.cookie);
+                        new_ids.push(self.next_id);
+                    }
+                    // Arrancar de inmediato lo resuelto (el usuario ya dio a iniciar)
+                    for id in new_ids {
+                        if let Some(i) = self.idx(id) {
+                            self.start_row(i);
+                        }
+                    }
+                    self.toast(i18n::host_resolved(self.settings.lang, n));
+                }
+                Ev::Cyberdrop(cmd) => {
+                    self.cyberdrop_cmd = cmd;
+                    self.cyberdrop_installing = false;
+                }
+                Ev::CyberdropProgress(p) => {
+                    self.cyberdrop_installing = true;
+                    self.cyberdrop_progress = p;
+                }
+                Ev::CyberdropError(e) => {
+                    self.cyberdrop_installing = false;
+                    let msg = i18n::install_error(self.settings.lang, "cyberdrop-dl", &e);
+                    self.toast(msg);
+                }
+                Ev::TorrentClientReady(c) => {
+                    self.torrent_client = Some(c);
+                }
+                Ev::TorrentAdded(id, handle, name) => {
+                    self.torrent_adding = false;
+                    self.torrents.push(torrents::Handle { id, inner: handle, name });
+                    self.toast(t(self.settings.lang, "torrent.added"));
+                }
+                Ev::TorrentError(e) => {
+                    self.torrent_adding = false;
+                    self.toast(i18n::torrent_error(self.settings.lang, &e));
+                }
             }
         }
         if !clip_batch.is_empty() {
@@ -1067,8 +1325,11 @@ struct DlSpec {
     ffmpeg: Option<String>,
     cancel: Arc<AtomicBool>,
     lang: Lang,
+    /// Cookie de descarga (GoFile); vacía si no aplica
+    cookie: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_task(
     client: reqwest::Client,
     spec: DlSpec,
@@ -1076,6 +1337,7 @@ async fn download_task(
     tx: UnboundedSender<Ev>,
     ytdlp: Option<String>,
     galdl: Option<String>,
+    cyberdrop: Option<String>,
 ) {
     let Ok(_permit) = sem.acquire_owned().await else { return };
     if spec.cancel.load(Ordering::Relaxed) {
@@ -1090,6 +1352,14 @@ async fn download_task(
         }
         Engine::GalleryDl => {
             run_gallerydl(&spec, &spec.url.clone(), &tx, galdl.as_deref()).await;
+            return;
+        }
+        Engine::FileHost => {
+            run_filehost(&client, &spec, &tx).await;
+            return;
+        }
+        Engine::Cyberdrop => {
+            run_cyberdrop(&spec, &spec.url.clone(), &tx, cyberdrop.as_deref()).await;
             return;
         }
         Engine::Http => {}
@@ -1221,6 +1491,10 @@ async fn try_http(
     if !referer.is_empty() {
         req = req.header(reqwest::header::REFERER, referer);
     }
+    // Cookie de descarga que exige el hoster (GoFile: accountToken=…)
+    if !spec.cookie.is_empty() {
+        req = req.header(reqwest::header::COOKIE, &spec.cookie);
+    }
     if offset > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
     }
@@ -1301,7 +1575,21 @@ async fn kill_tree(child: &mut tokio::process::Child) {
             let _ = k.status().await;
         }
     }
-    // Respaldo (y vía única en Unix)
+    // Unix: como el hijo lidera su propio grupo (process_group(0) al lanzar),
+    // un PID negativo envía SIGKILL a TODO el grupo, alcanzando también al
+    // intérprete de Python que PyInstaller ejecuta como proceso nieto. Sin
+    // esto, matar solo al bootloader dejaba al nieto descargando huérfano.
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // -9 (SIGKILL) a «-pid» = a todo el grupo. Más portable que -KILL.
+            let _ = tokio::process::Command::new("kill")
+                .args(["-9", &format!("-{pid}")])
+                .status()
+                .await;
+        }
+    }
+    // Respaldo directo al proceso
     let _ = child.start_kill();
 }
 
@@ -1348,6 +1636,12 @@ async fn ytdlp_exec(
     #[cfg(windows)]
     {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    // Unix: el hijo lidera su propio grupo de procesos, para poder matar el
+    // árbol entero (incluido el nieto de Python de PyInstaller) al pausar.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
     }
 
     let mut child = cmd.spawn()?;
@@ -1586,6 +1880,11 @@ async fn galdl_exec(
     {
         cmd.creation_flags(0x0800_0000);
     }
+    // Unix: grupo de procesos propio (ver ytdlp_exec) para matar el árbol.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take();
@@ -1746,6 +2045,75 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
         }
         Err(e) => {
             let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("gallery-dl: {e}"))));
+        }
+    }
+}
+
+/// Motor de hosters nativos (Pixeldrain, GoFile, MediaFire): resuelve la URL
+/// de página a enlaces directos y los emite para que se conviertan en filas
+/// HTTP normales, que ya saben reanudar por Range.
+async fn run_filehost(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSender<Ev>) {
+    let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
+    match hosters::resolve(client, &spec.url).await {
+        Ok(items) => {
+            let mapped: Vec<HostItem> = items
+                .into_iter()
+                .map(|r| HostItem {
+                    url: r.url,
+                    filename: r.filename,
+                    cookie: r.cookie.unwrap_or_default(),
+                })
+                .collect();
+            // La expansión (crear filas hijas y arrancarlas) la hace el hilo de
+            // UI, que es quien puede tocar la cola.
+            let _ = tx.send(Ev::FileHostResolved(spec.id, mapped));
+        }
+        Err(e) => {
+            let msg = format!("{}: {e}", hosters::host_name(&spec.url));
+            let _ = tx.send(Ev::ErrorDetail(spec.id, msg.clone()));
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.chars().take(60).collect())));
+        }
+    }
+}
+
+/// Motor opcional cyberdrop-dl para hosters difíciles (Bunkr, Cyberdrop…).
+/// Requiere que el usuario lo haya instalado desde Ajustes (necesita Python).
+async fn run_cyberdrop(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: Option<&str>) {
+    let Some(program) = program else {
+        let msg = i18n::t(spec.lang, "err.need_cyberdrop");
+        let _ = tx.send(Ev::ErrorDetail(spec.id, msg.into()));
+        let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.chars().take(60).collect())));
+        return;
+    };
+    let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
+    throttle().await;
+
+    let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    // cyberdrop-dl baja a su propia estructura; se le fija la carpeta de destino.
+    let args: Vec<String> = vec![
+        "--download-folder".into(),
+        dir.to_string_lossy().into_owned(),
+        "--disable-progress-bar".into(),
+        "--no-ui".into(),
+        url.to_string(),
+    ];
+
+    // Reutiliza el ejecutor de gallery-dl: misma mecánica (cuenta líneas de
+    // stdout como archivos, mata el árbol al pausar).
+    match galdl_exec(program, &args, spec.id, tx, &spec.cancel).await {
+        Ok(r) if r.killed => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        }
+        Ok(r) if r.ok => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Done));
+        }
+        Ok(r) => {
+            let last = r.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error cyberdrop-dl");
+            let _ = tx.send(Ev::ErrorDetail(spec.id, r.stderr.clone()));
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("cyberdrop-dl: {e}"))));
         }
     }
 }
@@ -2033,6 +2401,155 @@ fn spawn_ffmpeg_check(tx: UnboundedSender<Ev>) {
         let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
         let _ = tx.send(Ev::Ffmpeg(if ok { Some("ffmpeg".into()) } else { None }));
     });
+}
+
+/// Detecta cyberdrop-dl en el PATH. A diferencia de yt-dlp/gallery-dl, no se
+/// distribuye como binario suelto: se instala con `uv tool install` y queda
+/// accesible por PATH (o en ~/.local/bin).
+fn spawn_cyberdrop_check(tx: UnboundedSender<Ev>) {
+    std::thread::spawn(move || {
+        for cand in cyberdrop_candidates() {
+            let mut cmd = std::process::Command::new(&cand);
+            cmd.arg("--version");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
+                let _ = tx.send(Ev::Cyberdrop(Some(cand)));
+                return;
+            }
+        }
+        let _ = tx.send(Ev::Cyberdrop(None));
+    });
+}
+
+/// Rutas candidatas del ejecutable de cyberdrop-dl
+fn cyberdrop_candidates() -> Vec<String> {
+    let mut v = vec!["cyberdrop-dl".to_string()];
+    if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        let bin = PathBuf::from(home).join(".local").join("bin");
+        let exe = bin.join(if cfg!(windows) { "cyberdrop-dl.exe" } else { "cyberdrop-dl" });
+        v.push(exe.to_string_lossy().into_owned());
+    }
+    v
+}
+
+/// Instala cyberdrop-dl mediante `uv` (que a su vez trae un Python gestionado).
+/// Es la vía oficial del proyecto; no hay binario autónomo. Todo el proceso se
+/// hace en segundo plano y se informa del resultado.
+async fn install_cyberdrop(tx: UnboundedSender<Ev>) {
+    let _ = tx.send(Ev::CyberdropProgress(0.1));
+
+    // 1) Asegurar uv. Si no está, instalarlo con el script oficial.
+    let uv = match ensure_uv(&tx).await {
+        Ok(u) => u,
+        Err(e) => {
+            let _ = tx.send(Ev::CyberdropError(e));
+            return;
+        }
+    };
+    let _ = tx.send(Ev::CyberdropProgress(0.5));
+
+    // 2) uv tool install cyberdrop-dl-patched (el paquete mantenido en PyPI)
+    let mut cmd = tokio::process::Command::new(&uv);
+    cmd.args([
+        "tool", "install", "--managed-python", "-p", "<3.14",
+        "--force", "cyberdrop-dl-patched>=10.0,<11.0",
+    ]);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.output().await {
+        Ok(o) if o.status.success() => {
+            let _ = tx.send(Ev::CyberdropProgress(0.95));
+            // Verificar que quedó accesible
+            for cand in cyberdrop_candidates() {
+                if verify_tool(&PathBuf::from(&cand)).await {
+                    let _ = tx.send(Ev::Cyberdrop(Some(cand)));
+                    return;
+                }
+            }
+            let _ = tx.send(Ev::CyberdropError(
+                "instalado, pero no se encontró en el PATH; reinicia la app".into(),
+            ));
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("uv falló");
+            let _ = tx.send(Ev::CyberdropError(last.chars().take(200).collect()));
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::CyberdropError(e.to_string()));
+        }
+    }
+}
+
+/// Devuelve la ruta a `uv`, instalándolo con el script oficial si falta.
+async fn ensure_uv(tx: &UnboundedSender<Ev>) -> Result<String, String> {
+    // ¿Ya está?
+    for cand in uv_candidates() {
+        let mut c = tokio::process::Command::new(&cand);
+        c.arg("--version");
+        #[cfg(windows)]
+        {
+            c.creation_flags(0x0800_0000);
+        }
+        if matches!(c.output().await, Ok(o) if o.status.success()) {
+            return Ok(cand);
+        }
+    }
+
+    let _ = tx.send(Ev::CyberdropProgress(0.25));
+
+    // Instalar uv con el script oficial de astral.sh
+    #[cfg(windows)]
+    let install = {
+        let mut c = tokio::process::Command::new("powershell");
+        c.args([
+            "-NoProfile", "-ExecutionPolicy", "ByPass", "-c",
+            "irm https://astral.sh/uv/install.ps1 | iex",
+        ]);
+        c.creation_flags(0x0800_0000);
+        c.status().await
+    };
+    #[cfg(not(windows))]
+    let install = {
+        tokio::process::Command::new("sh")
+            .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+            .status()
+            .await
+    };
+
+    match install {
+        Ok(s) if s.success() => {
+            for cand in uv_candidates() {
+                let mut c = tokio::process::Command::new(&cand);
+                c.arg("--version");
+                #[cfg(windows)]
+                {
+                    c.creation_flags(0x0800_0000);
+                }
+                if matches!(c.output().await, Ok(o) if o.status.success()) {
+                    return Ok(cand);
+                }
+            }
+            Err("uv se instaló pero no se encuentra; reinicia la app".into())
+        }
+        Ok(_) => Err("no se pudo instalar uv (gestor de Python)".into()),
+        Err(e) => Err(format!("no se pudo instalar uv: {e}")),
+    }
+}
+
+fn uv_candidates() -> Vec<String> {
+    let mut v = vec!["uv".to_string()];
+    if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        let bin = PathBuf::from(home).join(".local").join("bin");
+        v.push(bin.join(if cfg!(windows) { "uv.exe" } else { "uv" }).to_string_lossy().into_owned());
+    }
+    v
 }
 
 /// Descarga el zip oficial y extrae SOLO ffmpeg y ffprobe (el resto del
@@ -2495,6 +3012,9 @@ impl eframe::App for App {
                 if nav_item(ui, self.view == View::Capture, "🧲", t(lang, "nav.capture"), 0) {
                     self.view = View::Capture;
                 }
+                if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
+                    self.view = View::Torrents;
+                }
                 if nav_item(ui, self.view == View::Done, "✅", t(lang, "nav.completed"), n_done) {
                     self.view = View::Done;
                 }
@@ -2528,6 +3048,10 @@ impl eframe::App for App {
                     } else {
                         ui.label(RichText::new(t(lang, "side.ffmpeg_missing")).size(11.5).color(AMBER))
                             .on_hover_text(t(lang, "side.ffmpeg_tip"));
+                    }
+                    // cyberdrop-dl es opcional: solo se anuncia si está presente
+                    if self.cyberdrop_cmd.is_some() {
+                        ui.label(RichText::new(t(lang, "side.cyberdrop_active")).size(11.5).color(GREEN));
                     }
                     if self.settings.clipboard_watch {
                         ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN));
@@ -2567,6 +3091,11 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| self.capture_ui(ui));
+                    }
+                    View::Torrents => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.torrents_ui(ui));
                     }
                     _ => self.queue_ui(ui, n_active, n_done, n_failed, global_speed),
                 }
@@ -2700,7 +3229,7 @@ impl App {
                         self.retry_failed();
                     }
                 }
-                View::Settings | View::Profile | View::Capture => {}
+                View::Settings | View::Profile | View::Capture | View::Torrents => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_sized(
@@ -2722,7 +3251,7 @@ impl App {
                 View::Downloads => r.status != Status::Done && !matches!(r.status, Status::Error(_)),
                 View::Done => r.status == Status::Done,
                 View::Failed => matches!(r.status, Status::Error(_)),
-                View::Settings | View::Profile | View::Capture => false,
+                View::Settings | View::Profile | View::Capture | View::Torrents => false,
             })
             .filter(|(_, r)| {
                 search.is_empty()
@@ -3219,6 +3748,269 @@ impl App {
         });
     }
 
+    // ---------------- Vista de torrents ----------------
+
+    fn torrents_ui(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.lang;
+        ui.label(RichText::new(t(lang, "torrent.title")).size(24.0).strong().color(Color32::WHITE));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t(lang, "torrent.subtitle")).color(MUTED));
+        ui.add_space(14.0);
+
+        // Alta de torrent
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(760.0));
+            ui.label(RichText::new(t(lang, "torrent.add_label")).size(11.0).color(MUTED).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [440.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.torrent_input)
+                        .hint_text("magnet:?xt=…   ·   https://…/archivo.torrent"),
+                );
+                if soft_button(ui, t(lang, "btn.paste")).clicked() {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if let Ok(txt) = cb.get_text() {
+                            self.torrent_input = txt.trim().to_string();
+                        }
+                    }
+                }
+                if soft_button(ui, t(lang, "torrent.pick_file")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("torrent", &["torrent"]).pick_file() {
+                        self.torrent_input = p.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            if self.torrent_adding {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(t(lang, "torrent.adding")).color(CYAN));
+                });
+            } else if primary_button(ui, t(lang, "torrent.add_btn")).clicked() {
+                let src = std::mem::take(&mut self.torrent_input);
+                self.add_torrent(src);
+            }
+            ui.label(RichText::new(t(lang, "torrent.legal")).size(11.0).color(AMBER));
+        });
+        ui.add_space(12.0);
+
+        // Ajustes (carpeta + velocidad) plegados por defecto: no saturan y
+        // quedan a un clic cuando hacen falta.
+        let session_live = self.torrent_client.is_some();
+        egui::CollapsingHeader::new(RichText::new(t(lang, "torrent.options")).size(12.5).color(MUTED))
+            .id_source("torrent_opts")
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new(t(lang, "torrent.folder_label")).size(11.0).color(MUTED).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let shown = self.settings.torrent_folder().to_string_lossy().into_owned();
+                    let mut dir = if self.settings.torrent_dir.trim().is_empty() { shown } else { self.settings.torrent_dir.clone() };
+                    if ui.add_sized([380.0, 28.0], egui::TextEdit::singleline(&mut dir)).changed() {
+                        self.settings.torrent_dir = dir;
+                    }
+                    if soft_button(ui, t(lang, "btn.browse")).clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            self.settings.torrent_dir = d.to_string_lossy().into_owned();
+                        }
+                    }
+                    if soft_button(ui, t(lang, "btn.open")).clicked() {
+                        let _ = open::that(self.settings.torrent_folder());
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("↓ {}", t(lang, "torrent.down_limit"))).size(12.0).color(MUTED));
+                    ui.add(egui::DragValue::new(&mut self.settings.torrent_down_kbps).suffix(" KiB/s").range(0..=1_000_000));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(format!("↑ {}", t(lang, "torrent.up_limit"))).size(12.0).color(MUTED));
+                    ui.add(egui::DragValue::new(&mut self.settings.torrent_up_kbps).suffix(" KiB/s").range(0..=1_000_000));
+                    ui.label(RichText::new(t(lang, "torrent.limit_zero")).size(11.0).color(MUTED));
+                });
+                if session_live && (self.settings.torrent_down_kbps > 0 || self.settings.torrent_up_kbps > 0) {
+                    ui.label(RichText::new(t(lang, "torrent.limit_restart")).size(11.0).color(AMBER));
+                }
+            });
+        ui.add_space(10.0);
+
+        if self.torrents.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("🌀").size(42.0));
+                ui.add_space(6.0);
+                ui.label(RichText::new(t(lang, "torrent.empty")).size(15.0).color(MUTED));
+            });
+            return;
+        }
+
+        // Chip compacto (icono + valor) con fondo tenue del color dado
+        fn chip(ui: &mut egui::Ui, text: String, color: Color32) {
+            egui::Frame::none()
+                .fill(color.gamma_multiply(0.14))
+                .rounding(Rounding::same(7.0))
+                .inner_margin(Margin::symmetric(8.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(text).size(11.5).color(color));
+                });
+        }
+
+        // Acciones diferidas (fuera del préstamo de la lista)
+        enum TAct {
+            Pause(usize),
+            Resume(usize),
+            Remove(usize, bool),
+        }
+        let mut acts: Vec<TAct> = Vec::new();
+
+        for (idx, h) in self.torrents.iter().enumerate() {
+            let snap = h.snapshot();
+            // Velocidad estimada por delta de bytes
+            let now = Instant::now();
+            let speed = {
+                let e = self.torrent_speed.entry(h.id).or_insert((snap.downloaded, now, 0.0));
+                let dt = now.duration_since(e.1).as_secs_f64();
+                if dt >= 0.5 {
+                    let db = snap.downloaded.saturating_sub(e.0) as f64;
+                    e.2 = db / dt;
+                    e.0 = snap.downloaded;
+                    e.1 = now;
+                }
+                e.2
+            };
+            // ETA a partir de la velocidad actual
+            let eta = if speed > 1.0 && !snap.finished {
+                fmt_eta((snap.total.saturating_sub(snap.downloaded)) as f64 / speed)
+            } else {
+                "—".into()
+            };
+
+            egui::Frame::none()
+                .fill(CARD)
+                .rounding(Rounding::same(12.0))
+                .inner_margin(Margin::symmetric(16.0, 12.0))
+                .stroke(Stroke::new(1.0f32, CARD_HOVER))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width().min(880.0));
+
+                    // Cabecera: nombre + acciones a la derecha
+                    ui.horizontal(|ui| {
+                        let name: String = h.display_name().chars().take(72).collect();
+                        ui.label(RichText::new(name).size(14.0).color(TEXT).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("🗑").on_hover_text(t(lang, "torrent.remove")).clicked() {
+                                acts.push(TAct::Remove(idx, false));
+                            }
+                            if snap.state == self::torrents::State::Paused {
+                                if ui.small_button("▶").on_hover_text(t(lang, "tip.start")).clicked() {
+                                    acts.push(TAct::Resume(idx));
+                                }
+                            } else if !snap.finished
+                                && ui.small_button("⏸").on_hover_text(t(lang, "tip.pause")).clicked()
+                            {
+                                acts.push(TAct::Pause(idx));
+                            }
+                            // Porcentaje grande a la derecha del nombre
+                            ui.label(
+                                RichText::new(format!("{:.0}%", snap.progress * 100.0))
+                                    .size(13.0)
+                                    .strong()
+                                    .color(if snap.finished { GREEN } else { CYAN }),
+                            );
+                        });
+                    });
+
+                    ui.add_space(6.0);
+                    // Barra de progreso fina
+                    ui.add(
+                        egui::ProgressBar::new(snap.progress)
+                            .desired_height(7.0)
+                            .fill(if snap.finished { GREEN } else { ACCENT }),
+                    );
+                    ui.add_space(8.0);
+
+                    // Fila de stats con chips
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+
+                        // Estado
+                        let (state_txt, state_col) = match snap.state {
+                            self::torrents::State::Initializing if snap.downloaded > 0 => (t(lang, "torrent.state_down"), CYAN),
+                            self::torrents::State::Initializing => (t(lang, "torrent.state_init"), MUTED),
+                            self::torrents::State::Live if snap.finished => (t(lang, "torrent.state_seeding"), GREEN),
+                            self::torrents::State::Live => (t(lang, "torrent.state_down"), CYAN),
+                            self::torrents::State::Paused => (t(lang, "status.paused"), AMBER),
+                            self::torrents::State::Error => (t(lang, "status.error"), RED),
+                        };
+                        chip(ui, state_txt.to_string(), state_col);
+
+                        if speed > 0.0 && !snap.finished {
+                            chip(ui, format!("↓ {}/s", fmt_size(speed)), CYAN);
+                        }
+                        let peer_col = if snap.peers > 0 { CYAN } else { MUTED };
+                        let r = ui.scope(|ui| chip(ui, format!("👥 {}", snap.peers), peer_col)).response;
+                        r.on_hover_text(t(lang, "torrent.peers_tip"));
+
+                        if snap.state == self::torrents::State::Live && !snap.finished {
+                            chip(ui, format!("⏱ {eta}"), MUTED);
+                        }
+                        if snap.uploaded > 0 {
+                            chip(ui, format!("↑ {}", fmt_size(snap.uploaded as f64)), MUTED);
+                        }
+
+                        // Tamaño a la derecha
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} / {}",
+                                    fmt_size(snap.downloaded as f64),
+                                    fmt_size(snap.total as f64)
+                                ))
+                                .size(11.5)
+                                .color(MUTED),
+                            );
+                        });
+                    });
+
+                    if let Some(err) = &snap.error {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(err).size(11.0).color(RED));
+                    }
+                });
+            ui.add_space(10.0);
+        }
+
+        // Aplicar acciones
+        for a in acts {
+            match a {
+                TAct::Pause(i) => {
+                    if let (Some(c), Some(h)) = (self.torrent_client.clone(), self.torrents.get(i)) {
+                        let inner = h.inner.clone();
+                        self.rt.spawn(async move { c.pause(&inner).await });
+                    }
+                }
+                TAct::Resume(i) => {
+                    if let (Some(c), Some(h)) = (self.torrent_client.clone(), self.torrents.get(i)) {
+                        let inner = h.inner.clone();
+                        self.rt.spawn(async move { c.resume(&inner).await });
+                    }
+                }
+                TAct::Remove(i, del) => {
+                    if let (Some(c), Some(h)) = (self.torrent_client.clone(), self.torrents.get(i)) {
+                        let inner = h.inner.clone();
+                        self.rt.spawn(async move { c.remove(&inner, del).await });
+                        let id = h.id;
+                        self.torrent_speed.remove(&id);
+                        self.torrents.remove(i);
+                    }
+                }
+            }
+        }
+
+        // Repintar en vivo mientras haya torrents activos
+        ui.ctx().request_repaint_after(Duration::from_millis(700));
+    }
+
     // ---------------- Vista de ajustes ----------------
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -3508,6 +4300,34 @@ impl App {
                     self.rt.spawn(install_ffmpeg(client, tx));
                 }
                 ui.label(RichText::new(t(lang, "eng.ffmpeg_note")).size(11.5).color(MUTED));
+            }
+        });
+        ui.add_space(12.0);
+
+        // ---- cyberdrop-dl (opcional, hosters difíciles) ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "eng.cyberdrop")).size(11.0).color(MUTED).strong());
+            ui.add_space(4.0);
+            if self.cyberdrop_installing {
+                ui.add(
+                    egui::ProgressBar::new(self.cyberdrop_progress)
+                        .fill(CYAN)
+                        .show_percentage(),
+                );
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_downloading")).color(MUTED));
+            } else if let Some(cmd) = self.cyberdrop_cmd.clone() {
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_ok")).color(GREEN));
+                ui.label(RichText::new(cmd).size(11.5).color(MUTED));
+            } else {
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_missing")).color(AMBER));
+                if primary_button(ui, t(lang, "eng.install_cyberdrop")).clicked() {
+                    self.cyberdrop_installing = true;
+                    self.cyberdrop_progress = 0.0;
+                    let tx = self.tx.clone();
+                    self.rt.spawn(install_cyberdrop(tx));
+                }
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_note")).size(11.5).color(MUTED));
             }
         });
         ui.add_space(12.0);
