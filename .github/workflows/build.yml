@@ -156,31 +156,13 @@ jobs:
       - name: List what will be published
         run: ls -lh artifacts/
 
-      - name: Create GitHub release
+      # Attaches the binaries to the release for this tag.
+      # No `body` and no `generate_release_notes` on purpose: if the release
+      # was already written by hand, those would overwrite the notes.
+      # If the release does not exist yet, the action creates it with the
+      # tag name as title and an empty body.
+      - name: Attach binaries to the release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          generate_release_notes: true
           draft: false
-          body: |
-            ## Todo Downloader ${{ github.ref_name }}
-
-            Portable binaries, no installer. Grab the one for your system:
-
-            | System | File |
-            |---|---|
-            | Windows 10/11 (64-bit) | `todo-downloader-windows-x86_64.exe` |
-            | Linux (x86_64) | `todo-downloader-linux-x86_64` |
-            | macOS Apple Silicon (M1/M2/M3…) | `todo-downloader-macos-aarch64` |
-            | macOS Intel | `todo-downloader-macos-x86_64` |
-
-            Each file ships with a `.sha256` so you can verify your download.
-
-            **Linux/macOS**: make it executable with `chmod +x todo-downloader-*`.
-
-            **Windows**: SmartScreen or your antivirus may warn about the binary
-            because it is not code-signed. It is a reputation-based false
-            positive — you can verify the hash and read the full source here.
-
-            The engines (yt-dlp, gallery-dl, ffmpeg) install from inside the
-            application with one click — no Python, no dependencies.
