@@ -333,6 +333,29 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Build oficial del equipo de yt-dlp (github.com/yt-dlp/FFmpeg-Builds). Solo se extraen ffmpeg y ffprobe.",
             "Official build by the yt-dlp team (github.com/yt-dlp/FFmpeg-Builds). Only ffmpeg and ffprobe are extracted."
         ),
+        // ---------- Historial de gallery-dl ----------
+        "set.history" => entry!("HISTORIAL DE GALERÍAS", "GALLERY HISTORY"),
+        "set.history_note" => entry!(
+            "gallery-dl anota lo ya descargado para que «Reintentar» continúe donde se cortó \
+             en vez de empezar de cero. Vacíalo si quieres volver a bajar algo que ya tenías.",
+            "gallery-dl records what it already downloaded so that “Retry” resumes where it \
+             stopped instead of starting over. Clear it if you want to re-download something."
+        ),
+        "btn.clear_history" => entry!("🧹  Vaciar historial", "🧹  Clear history"),
+        "toast.history_cleared" => entry!("Historial vaciado", "History cleared"),
+        "toast.history_empty" => entry!("El historial ya estaba vacío", "History was already empty"),
+
+        // ---------- Errores con explicación ----------
+        "err.instagram_login" => entry!(
+            "Instagram exige sesión para listar el perfil entero: activa las cookies en Ajustes \
+             (Firefox, o un archivo cookies.txt) y pulsa Reintentar",
+            "Instagram requires a signed-in session to list a full profile: enable cookies in \
+             Settings (Firefox, or a cookies.txt file) and press Retry"
+        ),
+
+        "side.cookies_on" => entry!("● cookies activas", "● cookies enabled"),
+        "side.cookies_off" => entry!("○ sin cookies", "○ no cookies"),
+
         "side.ffmpeg_active" => entry!("● ffmpeg activo", "● ffmpeg active"),
         "side.ffmpeg_missing" => entry!("● ffmpeg ausente", "● ffmpeg missing"),
         "side.ffmpeg_tip" => entry!(

@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the v1.0.0 security audit and the application's threat model.
+Summary of the security audit and the application's threat model. Last reviewed for v1.1.0.
 
 ## Communication channels
 
@@ -18,11 +18,15 @@ All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation �
 
 **Browser cookies**: opt-in feature. Cookies are read by yt-dlp/gallery-dl directly and travel only to the destination site over TLS; this application never touches, stores or forwards them.
 
-**Data at rest**: persisted settings contain no secrets (paths, booleans, browser name). No credentials or tokens are stored.
+**Data at rest**: persisted settings contain no secrets (paths, booleans, browser name). No credentials or tokens are stored. The gallery-dl download archive (`descargados.sqlite3`, in the application's own data folder) holds only opaque per-site identifiers of already-fetched items, so retries can resume; it contains no URLs, credentials or file contents, and can be deleted at any time from Settings.
+
+**Thumbnails**: cover images are fetched over HTTPS with the same per-domain Referer logic as downloads, capped at 6 MiB, decoded off the async pool, and kept **in memory only** — never written to disk. Decoding is delegated to the `image` crate; a malformed or hostile image simply fails to decode and the row shows no thumbnail. At most 512 are held at once.
 
 **Local receiver (browser capture)**: the Click'n'Load feature opens a minimal HTTP endpoint with these restrictions — bound **exclusively to 127.0.0.1** (unreachable from the network, not even from another machine on the LAN), disableable from Settings, request body capped at 8 MiB, and **only `http://` or `https://` strings are accepted**: anything else (`javascript:`, `file:`, local paths) is discarded. Received data is only queued as a download; it is never executed or evaluated. The CORS header is permissive out of necessity — the browser must be able to post from tiktok.com or douyin.com — which is acceptable because the endpoint is unreachable from outside the machine and its only possible action is adding a URL to the queue. Residual risk: a malicious page open in the browser could queue unwanted downloads while the receiver is active; they are visible in the queue and do not start on their own unless auto-start is enabled.
 
 **Resources**: bounded concurrency (1–8), capped retries with backoff, profile analysis limited to 2000 entries, 15 s connection timeout.
+
+**User control over subprocesses**: Pause sets a cancellation flag that native HTTP downloads check between chunks and that engine subprocesses are polled against every 150 ms; on cancellation the **entire process tree** is terminated. The tree matters: yt-dlp and gallery-dl ship as PyInstaller "onefile" bundles, so the process you spawn is a bootloader that runs the real Python interpreter in a *grandchild*. Terminating only the bootloader leaves that grandchild orphaned and still downloading — which is exactly what happened before v1.1.0, where the flag was honoured by native downloads only. Not a privilege or disclosure issue, but a loss of user control and a violation of the resource bounds claimed above.
 
 ## What this application does NOT do
 
@@ -30,7 +34,7 @@ No telemetry, no analytics. It does not execute downloaded content, does not sil
 
 ## Known limitations
 
-- Pausing a running yt-dlp/gallery-dl task does not kill the subprocess (it finishes the file in progress).
+- Pause terminates the engine process tree, but a partially written file may remain on disk.
 - Files downloaded from arbitrary sites are the user's responsibility; the app does not scan them (use your AV).
 - No signature verification of the helper binaries (see above).
 

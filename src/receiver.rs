@@ -24,6 +24,8 @@ pub struct Incoming {
     pub title: String,
     pub page_url: String,
     pub id: String,
+    /// URL de la portada (opcional): se usa solo para la miniatura de la cola
+    pub thumb: String,
 }
 
 /// Arranca el receptor. `on_items` se invoca con cada lote recibido.
@@ -122,12 +124,18 @@ fn parse_body(body: &str) -> Vec<Incoming> {
                 if !is_http(&url) {
                     continue;
                 }
+                // La miniatura también debe ser http(s); si no, se descarta
+                let thumb = {
+                    let t = g("thumb");
+                    if is_http(&t) { t } else { String::new() }
+                };
                 out.push(Incoming {
                     url,
                     author: g("author"),
                     title: g("title"),
                     page_url: g("pageUrl"),
                     id: g("id"),
+                    thumb,
                 });
             }
             return out;
@@ -144,6 +152,7 @@ fn parse_body(body: &str) -> Vec<Incoming> {
                 title: String::new(),
                 page_url: String::new(),
                 id: String::new(),
+                thumb: String::new(),
             });
         }
     }

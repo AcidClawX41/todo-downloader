@@ -28,9 +28,11 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Universal**: direct file links over native HTTP, and pages from 1000+ sites (YouTube, TikTok, Instagram, X, Reddit, Twitch, Weibo, Bilibili…) through the built-in engines.
 - **Always maximum quality.** For ByteDance images (TikTok/Douyin) it detects the CDN's `~tplv-` processing template — which applies watermarks and downscaling — and requests the unprocessed original first. The difference is real: from a recompressed thumbnail to **2160×2880, watermark-free**.
 - **Adaptive video quality**: with ffmpeg installed it merges separate video and audio streams (1080p+ on YouTube); without it, it falls back to the best pre-merged file instead of failing.
+- **Bilibili tuned for maximum bitrate.** Bilibili publishes every resolution twice — once in AVC, once in HEVC — and the AVC stream often carries far more bitrate (4174k vs 2503k at 1080p). The format sorter prefers resolution, then fps, then bitrate, ignoring the default codec preference. Note that 720p and above require cookies, and 4K / 1080p60 additionally require a premium (大会员) account.
 - Queue with **concurrent downloads** (1–8), per-file and global progress and speed.
-- **Real pause and resume** using HTTP Range over `.part` files.
-- Exponential backoff retries and request spacing to avoid triggering rate limits.
+- **Real pause and resume** using HTTP Range over `.part` files. Pause also terminates engine subprocesses and their whole process tree — yt-dlp and gallery-dl are PyInstaller bundles that run Python in a grandchild process, so killing only what you spawned leaves an orphan downloading.
+- **Resumable galleries.** gallery-dl keeps an archive of what it already fetched, so when a site cuts you off halfway through a 400-post profile, *Retry* picks up where it stopped instead of starting over and hitting the same wall forever. Clearable from Settings.
+- Exponential backoff retries and per-site request spacing — Instagram gets 6–12 s between requests, everything else 1.5 s.
 
 ### Capturing links
 
@@ -54,9 +56,12 @@ Each binary is verified by running it after download; if it doesn't respond, it'
 ### Interface
 
 - Dark theme, sidebar navigation, stat cards and an animated *gloss* hover effect.
+- **Thumbnails in the queue.** Posts captured from TikTok or Douyin show their cover art next to the filename, fetched lazily and only for rows actually on screen.
+- **Middle-click autoscroll**, like a browser: click the wheel to anchor, then distance from the anchor sets direction and speed.
+- **Live cookie indicator** in the sidebar. The app disables unreadable cookies automatically, and without this you had no way of knowing you were downloading anonymously.
+- Errors explain themselves: a raw `401 Unauthorized` from Instagram becomes *"enable cookies in Settings and press Retry"*, with the original message underneath.
 - **English and Spanish**, with automatic system-language detection and hot switching.
 - CJK font support: Chinese, Japanese and Korean titles render correctly.
-- Browser cookies (Firefox recommended) or a `cookies.txt` file.
 
 ## Installation
 
@@ -111,18 +116,23 @@ The binary lands in `target/release/`. On Windows you can also double-click `Com
 | Grab a TikTok profile | **Profile** tab → analyze → select → download |
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
+| Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
 | Queue a list of links | **Add links** or **Import TXT/JSON** |
 
 ### About cookies
 
-Some sites (Douyin, Instagram, Weibo, age-restricted content) require a signed-in session.
+Some sites (Instagram, Douyin, Weibo, Bilibili above 480p, age-restricted content) require a signed-in session. **Instagram in particular will not list a full profile without one** — it serves the first few dozen posts anonymously and then returns `401 Unauthorized`.
 
 > ⚠️ **Chrome 127+, Edge, Brave and Opera encrypt cookies with App-Bound Encryption**: no external tool can read them, not even with the browser closed. This is not a bug in this application.
 
 Two alternatives that do work:
 
-1. **Firefox** — not affected. Sign in there and select it in Settings.
-2. **A `cookies.txt` file** (most reliable) — export it with an extension like *Get cookies.txt LOCALLY* and select it in Settings.
+1. **Firefox** — not affected. Sign in there, then Settings → Cookies → `firefox`.
+2. **A `cookies.txt` file** (most reliable) — export it with an extension like *Get cookies.txt LOCALLY* and select it in Settings. Works with any browser, ignores the encryption entirely, and takes priority over browser extraction.
+
+Check the sidebar: it reads **● cookies enabled** or **○ no cookies**. If it flips back to grey on its own, the cookies could not be read.
+
+If a site still rejects a valid session, check whether a **VPN** is involved. Sign in and download from the same IP — Instagram invalidates sessions that jump between addresses.
 
 ## Known limitations
 
@@ -130,9 +140,11 @@ Being upfront about these:
 
 - **Douyin profiles cannot be enumerated** by yt-dlp or gallery-dl — no profile extractor exists for that site. That is precisely why the **Capture** tab exists: it solves the case from inside the browser.
 - Direct CDN links **expire within hours**. If you capture thousands of files, the earliest ones may expire before their turn comes. Download in batches.
-- Pausing a yt-dlp or gallery-dl task doesn't kill the subprocess; it finishes the file in progress.
+- Pause terminates the engine subprocess tree within ~150 ms, so a half-written file may be left behind. For galleries the archive records what completed, so resuming continues cleanly.
+- **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
 - The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
+- **Bilibili requires ffmpeg**, always — it only serves DASH, so video and audio arrive as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast; requests are spaced out to avoid it.
 
 ## Architecture
 

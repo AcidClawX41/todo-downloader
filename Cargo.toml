@@ -1,6 +1,6 @@
 [package]
 name = "todo-downloader"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"
 authors = ["Eric V. Gramunt"]
@@ -23,6 +23,8 @@ regex = "1"
 open = "5"
 anyhow = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Decodificación de miniaturas (portadas de vídeo/imagen en la cola)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [profile.release]
 opt-level = 3

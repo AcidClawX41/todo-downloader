@@ -132,7 +132,11 @@ function add(it) {{
     let url = q.length ? q[0].u : (v.playAddr || v.downloadAddr || '');
     if (!url) return;
     if (url.startsWith('http://')) url = 'https://' + url.slice(7);
-    items.set(it.id, {{ id: it.id, author, title: it.desc || '', url,
+    // Portada para la miniatura de la cola: en TikTok web suele ser un string,
+    // pero en algunas respuestas es un objeto {{url_list}} — se cubren ambos.
+    const cov = v.cover || v.originCover || v.dynamicCover || '';
+    const thumb = typeof cov === 'string' ? cov : ((cov && cov.url_list && cov.url_list[0]) || '');
+    items.set(it.id, {{ id: it.id, author, title: it.desc || '', url, thumb,
         pageUrl: `https://www.tiktok.com/@${{author}}/video/${{it.id}}` }});
 }}
 
@@ -261,7 +265,10 @@ function collect(aw) {{
             const key = id + '_' + n;
             if (seen.has(key)) return;
             seen.add(key);
-            items.push({{ id: key, author, title, url: u, pageUrl: `https://www.douyin.com/note/${{id}}` }});
+            // Miniatura: la última entrada de url_list suele ser la vista previa
+            // webp ligera (la original iría por download_url_list)
+            const thumb = (img.url_list && img.url_list[img.url_list.length - 1]) || '';
+            items.push({{ id: key, author, title, url: u, thumb, pageUrl: `https://www.douyin.com/note/${{id}}` }});
             imgs++;
         }});
         return;
@@ -275,7 +282,8 @@ function collect(aw) {{
         if (!u || seen.has(id)) return;
         seen.add(id);
         if (u.startsWith('http://')) u = 'https://' + u.slice(7);
-        items.push({{ id, author, title, url: u, pageUrl: `https://www.douyin.com/video/${{id}}` }});
+        const thumb = (aw.video.cover && aw.video.cover.url_list && aw.video.cover.url_list[0]) || '';
+        items.push({{ id, author, title, url: u, thumb, pageUrl: `https://www.douyin.com/video/${{id}}` }});
         vids++;
     }}
 }}

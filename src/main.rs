@@ -135,6 +135,8 @@ struct Row {
     gal_files: u64,
     error_full: String,
     cancel: Arc<AtomicBool>,
+    /// URL de la portada del post; vacía si el origen no la proporcionó
+    thumb_url: String,
 }
 
 // Algunas variantes solo se emiten en Windows (instalador de ffmpeg)
@@ -160,6 +162,8 @@ enum Ev {
     FfmpegError(String),
     ProfileEntries(Vec<ProfileEntry>),
     ProfileError(String),
+    /// Miniatura descargada y decodificada, lista para subir a la GPU
+    Thumb(u64, egui::ColorImage),
 }
 
 /// Motor de descarga por tarea
@@ -184,7 +188,7 @@ struct ProfileEntry {
 const KNOWN_SITES: &[&str] = &[
     "tiktok.com", "douyin.com", "youtube.com", "youtu.be", "instagram.com",
     "twitter.com", "x.com", "reddit.com", "twitch.tv", "vimeo.com",
-    "facebook.com", "bilibili.com", "soundcloud.com", "dailymotion.com",
+    "facebook.com", "bilibili.com", "b23.tv", "soundcloud.com", "dailymotion.com",
 ];
 
 /// ¿Es un enlace directo a archivo (descargable por HTTP puro)?
@@ -313,6 +317,10 @@ fn referer_for(url: &str) -> &'static str {
         "https://weibo.com/"
     } else if u.contains("cdninstagram") || u.contains("instagram") {
         "https://www.instagram.com/"
+    // Bilibili: sus CDN (upos-…bilivideo.com, hdslb.com) rechazan cualquier
+    // petición sin Referer del propio sitio (anti-hotlink estricto).
+    } else if u.contains("bilibili") || u.contains("bilivideo") || u.contains("hdslb") {
+        "https://www.bilibili.com/"
     } else if u.contains("tiktok") || u.contains("bytecdn") || u.contains("ibyteimg") {
         "https://www.tiktok.com/"
     } else {
@@ -498,6 +506,12 @@ struct App {
     search: String,
     toast: String,
     toast_until: Option<Instant>,
+    /// Texturas de miniatura ya subidas a la GPU, por id de fila
+    thumbs: std::collections::HashMap<u64, egui::TextureHandle>,
+    /// Ids con descarga de miniatura en curso (o fallida: no se reintenta)
+    thumbs_pending: std::collections::HashSet<u64>,
+    /// Ancla del desplazamiento automático con el botón central del ratón
+    autoscroll: Option<egui::Pos2>,
 }
 
 impl App {
@@ -593,7 +607,69 @@ impl App {
             search: String::new(),
             toast: String::new(),
             toast_until: None,
+            thumbs: std::collections::HashMap::new(),
+            thumbs_pending: std::collections::HashSet::new(),
+            autoscroll: None,
         }
+    }
+
+    /// Desplazamiento automático estilo navegador: clic central para anclar,
+    /// luego el desplazamiento va en la dirección y a la velocidad que marque
+    /// la distancia del ratón al ancla. Otro clic, o Esc, lo cancela.
+    ///
+    /// Se implementa inyectando delta de scroll en la entrada del frame, antes
+    /// de pintar nada: así lo consume el área de scroll que esté bajo el ratón,
+    /// sea la tabla, los ajustes o la vista de perfil.
+    fn handle_autoscroll(&mut self, ctx: &egui::Context) {
+        let (middle, other, esc, pos) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.pointer.button_pressed(egui::PointerButton::Primary)
+                    || i.pointer.button_pressed(egui::PointerButton::Secondary),
+                i.key_pressed(egui::Key::Escape),
+                i.pointer.hover_pos(),
+            )
+        });
+
+        if middle {
+            self.autoscroll = if self.autoscroll.is_some() { None } else { pos };
+        } else if (other || esc) && self.autoscroll.is_some() {
+            self.autoscroll = None;
+        }
+
+        let (Some(anchor), Some(p)) = (self.autoscroll, pos) else { return };
+
+        // Zona muerta: sin ella el más mínimo temblor de mano ya desplaza
+        const DEAD: f32 = 14.0;
+        let dy = p.y - anchor.y;
+        if dy.abs() > DEAD {
+            // Ratón por debajo del ancla → bajar (delta de scroll negativo)
+            let step = ((dy.abs() - DEAD) / 4.0).min(90.0) * -dy.signum();
+            ctx.input_mut(|i| {
+                i.smooth_scroll_delta.y += step;
+                i.raw_scroll_delta.y += step;
+            });
+        }
+
+        // Indicador del ancla, por encima de todo
+        let painter =
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("__autoscroll")));
+        painter.circle_filled(anchor, 16.0, Color32::from_black_alpha(170));
+        painter.circle_stroke(anchor, 16.0, Stroke::new(1.5f32, CYAN));
+        for dir in [-1.0f32, 1.0] {
+            let base = anchor.y + dir * 4.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(anchor.x, base + dir * 6.0),
+                    egui::pos2(anchor.x - 4.5, base),
+                    egui::pos2(anchor.x + 4.5, base),
+                ],
+                CYAN,
+                Stroke::NONE,
+            ));
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ctx.request_repaint(); // movimiento continuo mientras esté activo
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -607,7 +683,8 @@ impl App {
 
     // -------------------- Alta de tareas --------------------
 
-    fn add_url(&mut self, url: &str, author: &str, title: &str, page_url: &str, vid_id: &str) {
+    #[allow(clippy::too_many_arguments)]
+    fn add_url(&mut self, url: &str, author: &str, title: &str, page_url: &str, vid_id: &str, thumb: &str) {
         let trimmed = url.trim();
         // Canal seguro: forzar HTTPS en cualquier enlace http:// (TLS obligatorio)
         let upgraded;
@@ -629,6 +706,9 @@ impl App {
         let vid = if !vid_id.is_empty() {
             vid_id.to_string()
         } else if let Some(m) = Regex::new(r"/(?:video|note|photo)/(\d+)").unwrap().captures(url) {
+            m[1].to_string()
+        // Bilibili usa IDs alfanuméricos (BV1xx…): sin esto caía al hash opaco
+        } else if let Some(m) = Regex::new(r"/(BV[0-9A-Za-z]{8,12})").unwrap().captures(url) {
             m[1].to_string()
         } else {
             short_hash(url)
@@ -674,6 +754,7 @@ impl App {
             gal_files: 0,
             error_full: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            thumb_url: if thumb.starts_with("http") { thumb.to_string() } else { String::new() },
         });
     }
 
@@ -682,7 +763,7 @@ impl App {
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with("http") {
-                self.add_url(line, "", "", "", "");
+                self.add_url(line, "", "", "", "", "");
                 n += 1;
             }
         }
@@ -709,7 +790,7 @@ impl App {
                             if url.is_empty() {
                                 continue;
                             }
-                            self.add_url(&url, &g("author"), &g("title"), &g("pageUrl"), &g("id"));
+                            self.add_url(&url, &g("author"), &g("title"), &g("pageUrl"), &g("id"), &g("thumb"));
                             n += 1;
                         }
                     }
@@ -762,6 +843,7 @@ impl App {
             extra_args: cookie_args(&self.settings),
             ffmpeg: self.ffmpeg_cmd.clone(),
             cancel: row.cancel.clone(),
+            lang: self.settings.lang,
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
@@ -821,7 +903,7 @@ impl App {
 
     // -------------------- Eventos --------------------
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context) {
         let mut clip_batch: Vec<String> = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
@@ -855,7 +937,7 @@ impl App {
                 Ev::Received(items) => {
                     let before = self.rows.len();
                     for it in &items {
-                        self.add_url(&it.url, &it.author, &it.title, &it.page_url, &it.id);
+                        self.add_url(&it.url, &it.author, &it.title, &it.page_url, &it.id, &it.thumb);
                     }
                     let added = self.rows.len() - before;
                     if added > 0 {
@@ -944,12 +1026,21 @@ impl App {
                     let msg = i18n::profile_error(self.settings.lang, &e);
                     self.toast(msg);
                 }
+                Ev::Thumb(id, img) => {
+                    self.thumbs_pending.remove(&id);
+                    let tex = ctx.load_texture(
+                        format!("thumb_{id}"),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.thumbs.insert(id, tex);
+                }
             }
         }
         if !clip_batch.is_empty() {
             let before = self.rows.len();
             for l in &clip_batch {
-                self.add_url(l, "", "", "", "");
+                self.add_url(l, "", "", "", "", "");
             }
             let added = self.rows.len() - before;
             if added > 0 {
@@ -975,6 +1066,7 @@ struct DlSpec {
     extra_args: Vec<String>,
     ffmpeg: Option<String>,
     cancel: Arc<AtomicBool>,
+    lang: Lang,
 }
 
 async fn download_task(
@@ -1075,6 +1167,46 @@ enum HttpOutcome {
     Expired(u16),
 }
 
+/// Descarga y decodifica una miniatura. Silenciosa ante cualquier fallo: una
+/// portada caída jamás debe generar ruido; la fila simplemente queda sin imagen.
+async fn fetch_thumb(client: reqwest::Client, id: u64, url: String, tx: UnboundedSender<Ev>) {
+    const MAX_THUMB: usize = 6 * 1024 * 1024;
+
+    let mut req = client.get(&url);
+    let referer = referer_for(&url);
+    if !referer.is_empty() {
+        req = req.header(reqwest::header::REFERER, referer);
+    }
+    let Ok(resp) = req.send().await else { return };
+    if !resp.status().is_success() {
+        return;
+    }
+    let Ok(bytes) = resp.bytes().await else { return };
+    if bytes.is_empty() || bytes.len() > MAX_THUMB {
+        return;
+    }
+
+    // Decodificar y reescalar fuera del pool async (trabajo de CPU)
+    let img = tokio::task::spawn_blocking(move || {
+        let im = image::load_from_memory(&bytes).ok()?;
+        // 96 px de lado mayor: nítido en la tabla y ligero en la GPU (~37 KB)
+        let im = im.thumbnail(96, 96);
+        let rgba = im.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            rgba.as_raw(),
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(img) = img {
+        let _ = tx.send(Ev::Thumb(id, img));
+    }
+}
+
 async fn try_http(
     client: &reqwest::Client,
     spec: &DlSpec,
@@ -1141,14 +1273,72 @@ async fn try_http(
     Ok(HttpOutcome::Done)
 }
 
+/// Resultado de ejecutar un motor externo
+struct ExecOutcome {
+    ok: bool,
+    stderr: String,
+    /// El usuario pulsó Pausa y se mató el subproceso
+    killed: bool,
+}
+
+/// Mata el proceso **y toda su descendencia**.
+///
+/// Imprescindible: yt-dlp y gallery-dl se distribuyen como binarios PyInstaller
+/// «onefile». Lo que se lanza es un bootloader que se descomprime en `_MEIxxxx`
+/// y arranca el intérprete de Python real **en un proceso hijo aparte**.
+/// `TerminateProcess` sobre el bootloader deja vivo a ese nieto, que sigue
+/// descargando huérfano — exactamente el síntoma de «pulso Pausa y no para».
+///
+/// En Windows se delega en `taskkill /T`, que recorre el árbol. En Unix basta
+/// con la señal al hijo, que se propaga por el grupo de procesos.
+async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            let mut k = tokio::process::Command::new("taskkill");
+            k.args(["/F", "/T", "/PID", &pid.to_string()]);
+            k.creation_flags(0x0800_0000); // sin ventana de consola
+            let _ = k.status().await;
+        }
+    }
+    // Respaldo (y vía única en Unix)
+    let _ = child.start_kill();
+}
+
+/// Espera a que termine el hijo, **vigilando la cancelación**.
+///
+/// Antes se hacía `child.wait().await` a secas: pulsar Pausa marcaba el flag
+/// pero nadie se lo decía a los motores, que seguían descargando el perfil
+/// entero. Ahora se sondea cada 150 ms y se mata el árbol de procesos.
+///
+/// Se sondea con `try_wait()` en vez de `tokio::select!` a propósito: select
+/// necesitaría prestar `child` mutablemente en dos ramas a la vez.
+async fn wait_or_kill(
+    child: &mut tokio::process::Child,
+    cancel: &Arc<AtomicBool>,
+) -> std::io::Result<(std::process::ExitStatus, bool)> {
+    let mut killed = false;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, killed));
+        }
+        if !killed && cancel.load(Ordering::Relaxed) {
+            kill_tree(child).await;
+            killed = true;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 /// Lanza yt-dlp leyendo su salida en streaming para reportar progreso real.
-/// Devuelve (éxito, stderr completo).
+/// Se detiene de inmediato si el usuario pulsa Pausa.
 async fn ytdlp_exec(
     program: &str,
     args: &[String],
     id: u64,
     tx: &UnboundedSender<Ev>,
-) -> std::io::Result<(bool, String)> {
+    cancel: &Arc<AtomicBool>,
+) -> std::io::Result<ExecOutcome> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut cmd = tokio::process::Command::new(program);
@@ -1188,19 +1378,30 @@ async fn ytdlp_exec(
         }
     });
 
-    // Recoger stderr completo (mensajes de error)
-    let mut err_buf = String::new();
-    if let Some(e) = stderr {
-        let mut lines = BufReader::new(e).lines();
-        while let Ok(Some(l)) = lines.next_line().await {
-            err_buf.push_str(&l);
-            err_buf.push('\n');
+    // stderr en su propia tarea: hay que drenar la tubería mientras esperamos,
+    // o el hijo se bloquearía al llenarla.
+    let err_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(e) = stderr {
+            let mut lines = BufReader::new(e).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                buf.push_str(&l);
+                buf.push('\n');
+            }
         }
-    }
+        buf
+    });
 
-    let status = child.wait().await?;
+    let (status, killed) = wait_or_kill(&mut child, cancel).await?;
     let _ = progress_task.await;
-    Ok((status.success(), err_buf))
+    let stderr = err_task.await.unwrap_or_default();
+    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed })
+}
+
+/// ¿La URL pertenece a Bilibili? (incluye el acortador b23.tv)
+fn is_bilibili(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("bilibili.com") || u.contains("b23.tv")
 }
 
 async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: Option<&str>) {
@@ -1211,6 +1412,17 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         ));
         return;
     };
+
+    // Bilibili solo sirve DASH (vídeo y audio SIEMPRE separados): sin ffmpeg
+    // no hay forma de obtener un archivo completo. Mejor un error claro ahora
+    // que el críptico «Requested merging of multiple formats» de yt-dlp.
+    if is_bilibili(url) && spec.ffmpeg.is_none() {
+        let msg = "Bilibili necesita ffmpeg (Ajustes → instalar ffmpeg)";
+        let _ = tx.send(Ev::ErrorDetail(spec.id, msg.into()));
+        let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.into())));
+        return;
+    }
+
     let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
 
     let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -1245,6 +1457,15 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         "--no-warnings".into(),
     ];
 
+    // Bilibili publica cada resolución en dos códecs (AVC y HEVC) y el AVC
+    // suele llevar bastante más bitrate (p. ej. 4174k vs 2503k a 1080p).
+    // Este orden de preferencia elige resolución > fps > bitrate, ignorando
+    // la preferencia de códec por defecto: máxima calidad real.
+    if is_bilibili(url) {
+        base.push("-S".into());
+        base.push("res,fps,hdr,tbr".into());
+    }
+
     // Indicar a yt-dlp dónde está nuestro ffmpeg integrado
     if let Some(ff) = &spec.ffmpeg {
         if let Some(dir) = std::path::Path::new(ff).parent() {
@@ -1261,9 +1482,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     args.push("--".into()); // fin de opciones: la URL nunca se interpreta como flag
     args.push(url.to_string());
 
-    let first = ytdlp_exec(program, &args, spec.id, tx).await;
-
-    let (ok, err) = match first {
+    let first = match ytdlp_exec(program, &args, spec.id, tx, &spec.cancel).await {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
@@ -1271,10 +1490,17 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         }
     };
 
-    if ok {
+    // Pausa del usuario: no es un fallo, es una parada solicitada
+    if first.killed {
+        let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        return;
+    }
+    if first.ok {
         let _ = tx.send(Ev::Status(spec.id, Status::Done));
         return;
     }
+
+    let err = first.stderr;
 
     // Cookies ilegibles (App-Bound Encryption, DB bloqueada…): reintentar sin ellas
     if is_cookie_error(&err) && !spec.extra_args.is_empty() {
@@ -1285,14 +1511,18 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         retry_args.push("--".into());
         retry_args.push(url.to_string());
 
-        match ytdlp_exec(program, &retry_args, spec.id, tx).await {
-            Ok((true, _)) => {
+        match ytdlp_exec(program, &retry_args, spec.id, tx, &spec.cancel).await {
+            Ok(r) if r.killed => {
+                let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+            }
+            Ok(r) if r.ok => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Done));
             }
-            Ok((false, e2)) => {
-                let last = e2.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error yt-dlp");
-                let _ = tx.send(Ev::ErrorDetail(spec.id, e2.clone()));
-                let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
+            Ok(r) => {
+                let last = r.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error yt-dlp");
+                let short: String = last.chars().take(60).collect();
+                let _ = tx.send(Ev::ErrorDetail(spec.id, r.stderr));
+                let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
             }
             Err(e) => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
@@ -1338,13 +1568,14 @@ fn spawn_clipboard_watcher(tx: UnboundedSender<Ev>, enabled: Arc<AtomicBool>, gr
 }
 
 /// Lanza gallery-dl contando en vivo los archivos descargados (una línea = un archivo).
-/// Devuelve (éxito, stderr completo).
+/// Se detiene de inmediato si el usuario pulsa Pausa.
 async fn galdl_exec(
     program: &str,
     args: &[String],
     id: u64,
     tx: &UnboundedSender<Ev>,
-) -> std::io::Result<(bool, String)> {
+    cancel: &Arc<AtomicBool>,
+) -> std::io::Result<ExecOutcome> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut cmd = tokio::process::Command::new(program);
@@ -1374,18 +1605,67 @@ async fn galdl_exec(
         }
     });
 
-    let mut err_buf = String::new();
-    if let Some(e) = stderr {
-        let mut lines = BufReader::new(e).lines();
-        while let Ok(Some(l)) = lines.next_line().await {
-            err_buf.push_str(&l);
-            err_buf.push('\n');
+    // stderr en su propia tarea: hay que drenar la tubería mientras esperamos
+    let err_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(e) = stderr {
+            let mut lines = BufReader::new(e).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                buf.push_str(&l);
+                buf.push('\n');
+            }
         }
-    }
+        buf
+    });
 
-    let status = child.wait().await?;
+    let (status, killed) = wait_or_kill(&mut child, cancel).await?;
     let _ = counter.await;
-    Ok((status.success(), err_buf))
+    let stderr = err_task.await.unwrap_or_default();
+    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed })
+}
+
+/// Historial de archivos ya descargados por gallery-dl.
+///
+/// Sin esto, «Reintentar» un perfil que se cortó en el archivo 54 vuelve a
+/// empezar por el 1 y se estrella siempre en el mismo punto: nunca terminaría.
+/// Con el historial, cada reintento avanza.
+fn galdl_archive_path() -> PathBuf {
+    ytdlp_dir().join("descargados.sqlite3")
+}
+
+/// Espaciado entre peticiones según el sitio. Instagram es el más agresivo
+/// cortando sesiones, así que se le da mucho más aire que al resto.
+fn galdl_pacing(url: &str) -> &'static str {
+    if url.to_ascii_lowercase().contains("instagram.com") {
+        "6.0-12.0" // gallery-dl acepta rangos: elige un valor aleatorio
+    } else {
+        "1.5"
+    }
+}
+
+/// Argumentos comunes de gallery-dl para una descarga
+fn galdl_base_args(dir: &std::path::Path, url: &str) -> Vec<String> {
+    vec![
+        "-D".into(),
+        dir.to_string_lossy().into_owned(),
+        "--sleep-request".into(),
+        galdl_pacing(url).into(),
+        "--download-archive".into(),
+        galdl_archive_path().to_string_lossy().into_owned(),
+    ]
+}
+
+/// Traduce errores crípticos de gallery-dl a algo accionable.
+/// Devuelve `None` si no hay nada mejor que decir que el mensaje original.
+fn galdl_hint(lang: Lang, url: &str, err: &str) -> Option<&'static str> {
+    let u = url.to_ascii_lowercase();
+    let e = err.to_ascii_lowercase();
+    if u.contains("instagram.com")
+        && (e.contains("401") || e.contains("unauthorized") || e.contains("login"))
+    {
+        return Some(i18n::t(lang, "err.instagram_login"));
+    }
+    None
 }
 
 /// Descarga un post de imágenes (TikTok /photo/, Douyin /note/) con gallery-dl
@@ -1403,97 +1683,66 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
 
     let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
 
-    // Primer intento con streaming: gallery-dl imprime una ruta por archivo
-    // descargado, así que contamos líneas para dar feedback en vivo.
-    let mut args: Vec<String> = vec![
-        "-D".into(), dir.to_string_lossy().into_owned(),
-        "--sleep-request".into(), "1.5".into(),
-    ];
+    /// Publica el fallo con una explicación útil cuando la hay
+    fn report(spec: &DlSpec, url: &str, err: String, tx: &UnboundedSender<Ev>) {
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("error gallery-dl");
+        match galdl_hint(spec.lang, url, &err) {
+            Some(hint) => {
+                // El consejo va primero en el tooltip; el error crudo, debajo
+                let _ = tx.send(Ev::ErrorDetail(spec.id, format!("{hint}\n\n{err}")));
+                let _ = tx.send(Ev::Status(spec.id, Status::Error(hint.chars().take(60).collect())));
+            }
+            None => {
+                let _ = tx.send(Ev::ErrorDetail(spec.id, err.clone()));
+                let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
+            }
+        }
+    }
+
+    // gallery-dl imprime una ruta por archivo descargado: contamos líneas
+    // para dar progreso en vivo.
+    let mut args = galdl_base_args(&dir, url);
     args.extend(spec.extra_args.iter().cloned());
     args.push("--".into());
     args.push(url.to_string());
 
-    if let Ok((ok, err)) = galdl_exec(program, &args, spec.id, tx).await {
-        if ok {
-            let _ = tx.send(Ev::Status(spec.id, Status::Done));
-            return;
+    match galdl_exec(program, &args, spec.id, tx, &spec.cancel).await {
+        // Pausa del usuario: parada solicitada, no un fallo. Lo ya descargado
+        // queda anotado en el historial, así que Reanudar continúa desde ahí.
+        Ok(r) if r.killed => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Paused));
         }
-        // Cookies ilegibles: reintentar sin ellas (sirve para perfiles públicos)
-        if is_cookie_error(&err) && !spec.extra_args.is_empty() {
-            let _ = tx.send(Ev::CookieFallback);
-            let _ = tx.send(Ev::DisableCookies);
-            let retry: Vec<String> = vec![
-                "-D".into(), dir.to_string_lossy().into_owned(),
-                "--sleep-request".into(), "1.5".into(),
-                "--".into(), url.to_string(),
-            ];
-            match galdl_exec(program, &retry, spec.id, tx).await {
-                Ok((true, _)) => {
-                    let _ = tx.send(Ev::Status(spec.id, Status::Done));
-                }
-                Ok((false, e2)) => {
-                    let last = e2.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error gallery-dl");
-                    let _ = tx.send(Ev::ErrorDetail(spec.id, e2.clone()));
-                    let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
-                }
-                Err(e) => {
-                    let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("gallery-dl: {e}"))));
-                }
-            }
-            return;
-        }
-        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error gallery-dl");
-        let short: String = last.chars().take(60).collect();
-        let _ = tx.send(Ev::ErrorDetail(spec.id, err));
-        let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
-        return;
-    }
-
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(["-D", &dir.to_string_lossy(), "--", url]);
-    #[cfg(windows)]
-    {
-        cmd.creation_flags(0x0800_0000);
-    }
-
-    match cmd.output().await {
-        Ok(out) if out.status.success() => {
+        Ok(r) if r.ok => {
             let _ = tx.send(Ev::Status(spec.id, Status::Done));
         }
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).to_string();
-
-            // Cookies ilegibles: reintentar sin ellas (sirve para perfiles públicos)
-            if is_cookie_error(&err) && !spec.extra_args.is_empty() {
+        Ok(r) => {
+            // Cookies ilegibles (App-Bound Encryption, BD bloqueada…): se
+            // reintenta sin ellas, que basta para los perfiles públicos.
+            if is_cookie_error(&r.stderr) && !spec.extra_args.is_empty() {
                 let _ = tx.send(Ev::CookieFallback);
                 let _ = tx.send(Ev::DisableCookies);
-                let mut retry = tokio::process::Command::new(program);
-                retry.args(["-D", &dir.to_string_lossy(), "--sleep-request", "1.5", "--", url]);
-                #[cfg(windows)]
-                {
-                    retry.creation_flags(0x0800_0000);
-                }
-                match retry.output().await {
-                    Ok(o) if o.status.success() => {
+                let mut retry = galdl_base_args(&dir, url);
+                retry.push("--".into());
+                retry.push(url.to_string());
+                match galdl_exec(program, &retry, spec.id, tx, &spec.cancel).await {
+                    Ok(r2) if r2.killed => {
+                        let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+                    }
+                    Ok(r2) if r2.ok => {
                         let _ = tx.send(Ev::Status(spec.id, Status::Done));
                     }
-                    Ok(o) => {
-                        let e2 = String::from_utf8_lossy(&o.stderr).to_string();
-                        let last = e2.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error gallery-dl");
-                        let _ = tx.send(Ev::ErrorDetail(spec.id, e2.clone()));
-                        let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
-                    }
+                    Ok(r2) => report(spec, url, r2.stderr, tx),
                     Err(e) => {
                         let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("gallery-dl: {e}"))));
                     }
                 }
-                return;
+            } else {
+                report(spec, url, r.stderr, tx);
             }
-
-            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error gallery-dl");
-            let short: String = last.chars().take(60).collect();
-            let _ = tx.send(Ev::ErrorDetail(spec.id, err));
-            let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
         }
         Err(e) => {
             let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("gallery-dl: {e}"))));
@@ -1527,7 +1776,12 @@ async fn run_analyze(
     extra_args: &[String],
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(["--flat-playlist", "-J", "--no-warnings", "--playlist-end", "2000"]);
+    // --sleep-requests: Bilibili responde 412 (bloqueo temporal) si las
+    // peticiones de paginación van demasiado seguidas; espaciarlas lo evita.
+    cmd.args([
+        "--flat-playlist", "-J", "--no-warnings", "--playlist-end", "2000",
+        "--sleep-requests", "1", "--retries", "3", "--retry-sleep", "exp=2:30",
+    ]);
     for a in extra_args {
         cmd.arg(a);
     }
@@ -2175,7 +2429,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        self.drain_events(ctx);
+        // Antes de pintar: el delta inyectado debe llegar al área de scroll
+        self.handle_autoscroll(ctx);
 
         // Drag & drop de TXT/JSON
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -2275,6 +2531,14 @@ impl eframe::App for App {
                     }
                     if self.settings.clipboard_watch {
                         ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN));
+                    }
+                    // Estado real de las cookies: la app las desactiva sola si
+                    // resultan ilegibles, y sin este aviso no había forma de
+                    // saber que se estaba descargando sin sesión.
+                    if !cookie_args(&self.settings).is_empty() {
+                        ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN));
+                    } else {
+                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED));
                     }
                 });
             });
@@ -2485,6 +2749,14 @@ impl App {
 
         // Tabla
         let mut actions: Vec<(usize, RowAction)> = Vec::new();
+
+        // Miniaturas: se sacan los campos como locales para poder mutar el set
+        // de pendientes dentro del closure de la tabla sin pelear con el borrow
+        // checker (self queda prestado inmutablemente por rows/thumbs).
+        let mut thumbs_pending = std::mem::take(&mut self.thumbs_pending);
+        let thumb_client = self.client.clone();
+        let thumb_tx = self.tx.clone();
+        let rt_handle = self.rt.handle().clone();
         // Margen derecho reducido: deja hueco a la barra de scroll para que no
         // se coma la última columna (los botones de acción) al estrechar la ventana.
         egui::Frame::none()
@@ -2497,13 +2769,16 @@ impl App {
                 bottom: 12.0,
             })
             .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                // Reservar siempre el ancho de la barra: evita saltos de layout
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                .show(ui, |ui| {
                 TableBuilder::new(ui)
                     .striped(true)
+                    // La tabla gestiona su propio scroll. Antes iba envuelta en
+                    // un ScrollArea externo: dos áreas de scroll anidadas hacían
+                    // que la fila superior se cortara por la mitad.
+                    .auto_shrink([false, false])
+                    // egui_extras limita la tabla a 800 px de alto por defecto;
+                    // en pantalla completa eso dejaba medio panel vacío.
+                    .max_scroll_height(f32::INFINITY)
+                    .min_scrolled_height(0.0)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     // clip(true): los nombres largos se recortan en vez de empujar
                     // al resto de columnas fuera de la vista
@@ -2522,10 +2797,36 @@ impl App {
                         }
                     })
                     .body(|body| {
-                        body.rows(34.0, visible.len(), |mut row| {
+                        body.rows(46.0, visible.len(), |mut row| {
                             let i = visible[row.index()];
                             let r = &self.rows[i];
                             row.col(|ui| {
+                                // Miniatura de la portada, si el origen la proporcionó.
+                                // La descarga se lanza de forma perezosa: solo para las
+                                // filas que llegan a pintarse (la tabla es virtual).
+                                if let Some(tex) = self.thumbs.get(&r.id) {
+                                    let ts = tex.size_vec2();
+                                    let h = 38.0f32;
+                                    let w = (ts.x / ts.y.max(1.0) * h).clamp(21.0, 68.0);
+                                    ui.add(
+                                        egui::Image::new(egui::load::SizedTexture::new(
+                                            tex.id(),
+                                            egui::vec2(w, h),
+                                        ))
+                                        .rounding(Rounding::same(5.0)),
+                                    );
+                                } else if !r.thumb_url.is_empty()
+                                    && !thumbs_pending.contains(&r.id)
+                                    && self.thumbs.len() + thumbs_pending.len() < 512
+                                {
+                                    thumbs_pending.insert(r.id);
+                                    rt_handle.spawn(fetch_thumb(
+                                        thumb_client.clone(),
+                                        r.id,
+                                        r.thumb_url.clone(),
+                                        thumb_tx.clone(),
+                                    ));
+                                }
                                 ui.label(RichText::new(&r.filename).color(TEXT))
                                     .on_hover_text(&r.url);
                             });
@@ -2608,8 +2909,10 @@ impl App {
                             });
                         });
                     });
-            });
         });
+
+        // Devolver el set de pendientes (se sacó como local para el closure)
+        self.thumbs_pending = thumbs_pending;
 
         // Aplicar acciones fuera del préstamo de la tabla
         let mut to_remove: Vec<usize> = Vec::new();
@@ -2629,6 +2932,8 @@ impl App {
         }
         to_remove.sort_unstable_by(|a, b| b.cmp(a));
         for i in to_remove {
+            let id = self.rows[i].id;
+            self.thumbs.remove(&id); // liberar la textura de la GPU
             self.rows.remove(i);
         }
     }
@@ -2650,7 +2955,7 @@ impl App {
                 ui.add_sized(
                     [420.0, 30.0],
                     egui::TextEdit::singleline(&mut self.profile_url)
-                        .hint_text("https://www.tiktok.com/@usuario  ·  https://www.douyin.com/user/…"),
+                        .hint_text("https://www.tiktok.com/@usuario  ·  space.bilibili.com/UID  ·  weibo.com/u/…"),
                 );
                 if soft_button(ui, t(lang, "btn.paste")).clicked() {
                     if let Ok(mut cb) = arboard::Clipboard::new() {
@@ -2703,7 +3008,7 @@ impl App {
                             })
                             .unwrap_or_default();
                         let before = self.rows.len();
-                        self.add_url(&url, &author, "", &url, "");
+                        self.add_url(&url, &author, "", &url, "", "");
                         // Arrancar de inmediato: en estos sitios no hay lista previa
                         // que revisar, así que esperar a "Iniciar" solo confunde.
                         if self.rows.len() > before {
@@ -2792,7 +3097,7 @@ impl App {
                         .collect();
                     let n = to_add.len();
                     for (url, title, id) in to_add {
-                        self.add_url(&url, &author, &title, &url, &id);
+                        self.add_url(&url, &author, &title, &url, &id, "");
                     }
                     self.toast(i18n::added_to_queue(lang, n));
                     self.view = View::Downloads;
@@ -3076,6 +3381,33 @@ impl App {
             if !self.settings.cookies_file.is_empty() {
                 ui.label(RichText::new(t(lang, "set.cookies_file_note")).size(11.5).color(MUTED));
             }
+        });
+        ui.add_space(12.0);
+
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.history")).size(11.0).color(MUTED).strong());
+            ui.add_space(4.0);
+            let archive = galdl_archive_path();
+            let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+            ui.label(
+                RichText::new(if size > 0 {
+                    format!("{}  ·  {}", archive.display(), fmt_size(size as f64))
+                } else {
+                    archive.display().to_string()
+                })
+                .size(11.0)
+                .color(MUTED),
+            );
+            if soft_button(ui, t(lang, "btn.clear_history")).clicked() {
+                let msg = if std::fs::remove_file(&archive).is_ok() {
+                    t(lang, "toast.history_cleared")
+                } else {
+                    t(lang, "toast.history_empty")
+                };
+                self.toast(msg);
+            }
+            ui.label(RichText::new(t(lang, "set.history_note")).size(11.5).color(MUTED));
         });
         ui.add_space(12.0);
 
