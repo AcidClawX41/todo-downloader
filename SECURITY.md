@@ -4,11 +4,11 @@ Summary of the security audit and the application's threat model. Last reviewed 
 
 ## Communication channels
 
-All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation — no system OpenSSL). There is no code path that accepts invalid certificates. Any `http://` link added to the queue is **automatically rewritten to `https://`** before downloading: the application never transmits in the clear. Helper engines are downloaded exclusively from fixed GitHub Releases URLs (`github.com/yt-dlp/yt-dlp`, `github.com/gdl-org/builds`, `github.com/yt-dlp/FFmpeg-Builds`) over TLS.
+All web traffic handled by the native HTTP client uses **HTTPS with rustls** (a pure-Rust TLS implementation — no system OpenSSL). There is no code path that accepts invalid TLS certificates. Any `http://` link added to the regular download queue is **automatically rewritten to `https://`** before downloading. Helper engines are downloaded exclusively from fixed GitHub Releases URLs (`github.com/yt-dlp/yt-dlp`, `github.com/gdl-org/builds`, `github.com/yt-dlp/FFmpeg-Builds`) over TLS. BitTorrent traffic is the exception: DHT, uTP, peer connections and UDP/HTTP trackers use the protocols required by BitTorrent.
 
 ## Attack surface and mitigations
 
-**Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing ever goes through a shell, so shell injection is impossible. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
+**Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing is passed through a shell, preventing conventional shell-command injection. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
 
 **Path traversal**: all filenames and author folder names go through `sanitize()`, which strips path separators, control characters and wildcards, trims trailing dots, and neutralizes Windows reserved device names (CON, NUL, COM1…). A malicious video title cannot write outside the destination folder.
 
@@ -40,7 +40,7 @@ All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation �
 
 ## What this application does NOT do
 
-No telemetry, no analytics. It does not execute downloaded content, does not silently self-update, does not touch the Windows registry, and does not require administrator privileges. The only listening port is the local receiver described above, always bound to 127.0.0.1 and disableable.
+No telemetry, no analytics. It does not execute downloaded content, does not silently self-update, and does not require administrator privileges. The optional magnet handler only registers the application's capabilities under `HKEY_CURRENT_USER`; it makes no machine-wide registry changes and does not modify the protected `UserChoice` association. Outside an active BitTorrent session, the only listening endpoint is the local receiver described above, always bound to 127.0.0.1 and disableable.
 
 ## Known limitations
 

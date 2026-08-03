@@ -3,7 +3,7 @@
 # ⬇️ Todo Downloader
 
 **A lightweight, bloat-free desktop download manager.**
-Written in Rust. Single portable executable — no installer, no runtime, no Java.
+Written in Rust. Single portable executable — no installer, no Java and no system runtime required.
 
 [![Build](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -17,7 +17,7 @@ Written in Rust. Single portable executable — no installer, no runtime, no Jav
 
 ## What is this?
 
-A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single ~7 MB executable that starts instantly.
+A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single compact executable that starts instantly.
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
@@ -45,7 +45,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 
 ### Built-in engines
 
-All three install **with one click from Settings**, downloading the official binary from GitHub Releases. No Python, no pip, no PATH setup.
+The three core helper engines install **with one click from Settings**, downloading their official binaries from GitHub Releases. No Python, pip or PATH setup is required for these core engines. The optional cyberdrop-dl integration is installed separately and requires Python.
 
 | Engine | Purpose | Source |
 |---|---|---|
@@ -154,7 +154,7 @@ Being upfront about these:
 - Direct CDN links **expire within hours**. If you capture thousands of files, the earliest ones may expire before their turn comes. Download in batches.
 - Pause terminates the engine subprocess tree within ~150 ms, so a half-written file may be left behind. For galleries the archive records what completed, so resuming continues cleanly.
 - **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
-- The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
+- The binary is **not code-signed**, so SmartScreen or your antivirus may display a reputation-based warning. Verify the published hash and review the full source if you want additional assurance.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
 - The Torrent tab shows **connected peers**, not a swarm seeder/leecher split — librqbit's aggregate stats don't expose that cleanly, and per-peer inspection isn't worth the fragility. Peer GeoIP (countries) is intentionally omitted: it needs a multi-MB database and is unreliable behind VPNs.
 - BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
