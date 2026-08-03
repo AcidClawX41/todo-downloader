@@ -3,10 +3,10 @@
 # ⬇️ Todo Downloader
 
 **A lightweight, bloat-free desktop download manager.**
-Written in Rust. Single portable executable — no installer, no Java and no system runtime required.
+Written in Rust. Single portable executable — no installer, no runtime, no Java.
 
 [![Build](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)
 ![egui](https://img.shields.io/badge/GUI-egui%200.28-blue)
 ![Platforms](https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
@@ -17,7 +17,7 @@ Written in Rust. Single portable executable — no installer, no Java and no sys
 
 ## What is this?
 
-A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single compact executable that starts instantly.
+A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single ~7 MB executable that starts instantly.
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
@@ -36,6 +36,18 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Resumable galleries.** gallery-dl keeps an archive of what it already fetched, so when a site cuts you off halfway through a 400-post profile, *Retry* picks up where it stopped instead of starting over and hitting the same wall forever. Clearable from Settings.
 - Exponential backoff retries and per-site request spacing — Instagram gets 6–12 s between requests, everything else 1.5 s.
 
+### Booru browser
+
+A dedicated **Booru** tab for Danbooru, Safebooru, AIBooru, yande.re, Konachan, e621 and Gelbooru. Search by tags, review results as a **thumbnail grid**, click to select, and queue only what you want — always the **original file**, downloaded through the native HTTP engine with resume.
+
+- Filter locally by **minimum width** and **rating** without re-querying the site.
+- Each tile shows resolution (highlighted when ≥1920 px), format and file size.
+- Pagination, select-all/none, and thumbnails carried through to the download queue.
+
+Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danbooru, Gelbooru and Moebooru all expose different, shifting APIs; gallery-dl already maintains an extractor per site, so reimplementing them in Rust would be permanent maintenance for no gain. Parsing is deliberately tolerant — field names differ per site (`image_width` vs `width`, some booru APIs return integers **as strings**, e621 nests them under `file`).
+
+> **Gelbooru requires API credentials** (`AuthRequired` without them). Add them in *Settings → Booru accounts*; the key field is masked. Everything else works anonymously.
+
 ### Capturing links
 
 - **LinkGrabber**: watches the clipboard and queues URLs as you copy them, just like JDownloader.
@@ -45,7 +57,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 
 ### Built-in engines
 
-The three core helper engines install **with one click from Settings**, downloading their official binaries from GitHub Releases. No Python, pip or PATH setup is required for these core engines. The optional cyberdrop-dl integration is installed separately and requires Python.
+All three install **with one click from Settings**, downloading the official binary from GitHub Releases. No Python, no pip, no PATH setup.
 
 | Engine | Purpose | Source |
 |---|---|---|
@@ -125,6 +137,7 @@ The binary lands in `target/release/`. On Windows you can also double-click `Com
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
+| Browse and grab booru art | **Booru** tab → pick a site → tags → select thumbnails → queue |
 | Download a torrent / magnet | **Torrent** tab → paste the magnet or pick a `.torrent` |
 | Click magnet links in the browser | **Settings** → *Open magnet links with Todo Downloader*, then pick it in Windows *Default apps → MAGNET* |
 | Grab a Pixeldrain / GoFile / MediaFire link | Just paste it — resolved natively, folders expand into individual files |
@@ -154,7 +167,7 @@ Being upfront about these:
 - Direct CDN links **expire within hours**. If you capture thousands of files, the earliest ones may expire before their turn comes. Download in batches.
 - Pause terminates the engine subprocess tree within ~150 ms, so a half-written file may be left behind. For galleries the archive records what completed, so resuming continues cleanly.
 - **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
-- The binary is **not code-signed**, so SmartScreen or your antivirus may display a reputation-based warning. Verify the published hash and review the full source if you want additional assurance.
+- The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
 - The Torrent tab shows **connected peers**, not a swarm seeder/leecher split — librqbit's aggregate stats don't expose that cleanly, and per-peer inspection isn't worth the fragility. Peer GeoIP (countries) is intentionally omitted: it needs a multi-MB database and is unreliable behind VPNs.
 - BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
@@ -168,6 +181,7 @@ build.rs          Embeds the icon and version metadata into the Windows binary
 src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
 ├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)
+├── booru.rs      Booru search over gallery-dl's JSON dump, tolerant across APIs
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
 ├── receiver.rs   Local HTTP receiver (Click'n'Load), 127.0.0.1 only
@@ -186,6 +200,12 @@ In `src/i18n.rs`: add a variant to the `Lang` enum, include it in `Lang::ALL` an
 
 Issues and pull requests are welcome. If you're reporting a download failure, please include the full error message — hover over the status pill in the Errors tab to copy it.
 
+## Support
+
+Todo Downloader is free, open source, ad-free and telemetry-free, and it will stay that way — **no feature is behind a paywall**. If it saves you time, there's a *Support this project* panel in **Settings** with links to Ko-fi, PayPal and GitHub Sponsors.
+
+Those buttons simply open your browser. The application contains no payment SDK, no API keys and no credentials, and never sees payments or banking details.
+
 ## Legal notice
 
 This is a tool for personal use: downloading content you already have legitimate access to, backing up your own posts, or archiving material with permission.
@@ -194,4 +214,9 @@ Respect each platform's terms of service and creators' copyright. **Responsibili
 
 ## License
 
-[MIT](LICENSE) © 2026 Eric V. Gramunt
+[GPL-3.0-or-later](LICENSE) © 2026 Eric V. Gramunt
+
+> **Todo Downloader v1.5.0 and later are licensed under GPL-3.0.**
+> Versions up to and including v1.4.0 were released under the MIT License and remain available under those terms — see [LICENSE-HISTORY.md](LICENSE-HISTORY.md) for the full picture, including third-party components.
+
+If you distribute this program or a modified version of it, GPL-3.0 requires you to pass on the same freedoms: the recipients must get the source code and the same rights you had.

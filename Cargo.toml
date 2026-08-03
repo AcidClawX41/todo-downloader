@@ -1,11 +1,11 @@
 [package]
 name = "todo-downloader"
-version = "1.4.0"
+version = "1.5.0"
 build = "build.rs"
 edition = "2021"
 description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"
 authors = ["Eric V. Gramunt"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 readme = "README.md"
 repository = "https://github.com/AcidClawX41/todo-downloader"
 keywords = ["downloader", "tiktok", "yt-dlp", "gallery-dl", "gui"]
@@ -25,7 +25,7 @@ open = "5"
 anyhow = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Decodificación de miniaturas (portadas de vídeo/imagen en la cola)
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 # Cliente BitTorrent nativo (magnet + .torrent): DHT, uTP, trackers, UPnP. Rust puro, Apache-2.0.
 librqbit = "8.1"
 

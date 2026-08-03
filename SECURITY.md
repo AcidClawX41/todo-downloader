@@ -1,14 +1,14 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.4.0.
+Summary of the security audit and the application's threat model. Last reviewed for v1.5.0.
 
 ## Communication channels
 
-All web traffic handled by the native HTTP client uses **HTTPS with rustls** (a pure-Rust TLS implementation — no system OpenSSL). There is no code path that accepts invalid TLS certificates. Any `http://` link added to the regular download queue is **automatically rewritten to `https://`** before downloading. Helper engines are downloaded exclusively from fixed GitHub Releases URLs (`github.com/yt-dlp/yt-dlp`, `github.com/gdl-org/builds`, `github.com/yt-dlp/FFmpeg-Builds`) over TLS. BitTorrent traffic is the exception: DHT, uTP, peer connections and UDP/HTTP trackers use the protocols required by BitTorrent.
+All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation — no system OpenSSL). There is no code path that accepts invalid certificates. Any `http://` link added to the queue is **automatically rewritten to `https://`** before downloading: the application never transmits in the clear. Helper engines are downloaded exclusively from fixed GitHub Releases URLs (`github.com/yt-dlp/yt-dlp`, `github.com/gdl-org/builds`, `github.com/yt-dlp/FFmpeg-Builds`) over TLS.
 
 ## Attack surface and mitigations
 
-**Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing is passed through a shell, preventing conventional shell-command injection. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
+**Command injection**: yt-dlp and gallery-dl are invoked via `Command` with arguments passed as an array — nothing ever goes through a shell, so shell injection is impossible. Against *argument injection* (a malicious "URL" starting with `-` trying to sneak in as a flag, e.g. `--exec`), every URL is passed after the `--` separator, which terminates the option list. In addition, only strings beginning with `http` are accepted.
 
 **Path traversal**: all filenames and author folder names go through `sanitize()`, which strips path separators, control characters and wildcards, trims trailing dots, and neutralizes Windows reserved device names (CON, NUL, COM1…). A malicious video title cannot write outside the destination folder.
 
@@ -28,6 +28,14 @@ All web traffic handled by the native HTTP client uses **HTTPS with rustls** (a 
 
 **Magnet protocol handler**: opt-in from Settings. Registration writes to `HKEY_CURRENT_USER` only — no administrator rights, no machine-wide changes — and is done through `reg.exe` rather than adding a registry crate. Windows still protects the *actual* default with its signed `UserChoice` key, which no application can forge; the app therefore only publishes its capabilities so the user can pick it in Settings. When a magnet is clicked and an instance is already running, the link is handed to it through the same localhost-only receiver and the second process exits immediately.
 
+**Booru credentials**: optional, and only Gelbooru actually requires them. The key field is masked in the UI and no credential is ever written to a log or an error message.
+
+They are **never passed as process arguments**. Command lines are readable by any process running as the same user (`wmic process get commandline`, Task Manager's *Command line* column, `ps aux`), so instead the app writes a minimal config file, hands it to gallery-dl with `-c` — which *merges* with the user's own gallery-dl configuration rather than replacing it — and **deletes it as soon as the search finishes**, success or failure. On Unix the file is created with mode `0600` before any content is written, so it never exists with permissive bits. On Windows it lives in the app's data folder inside the user profile, inheriting an ACL restricted to that user. A leftover file from an abrupt shutdown is removed at startup.
+
+This leaves a small, bounded exposure — the credentials are on disk for the seconds a search takes — which is strictly better than being visible in the process list, and far better than storing them permanently in plaintext.
+
+**Booru search**: runs gallery-dl in `-j --no-download` mode, which only dumps metadata. Search results are parsed defensively — a malformed or hostile response yields zero posts and a readable error rather than a crash. Thumbnails are capped at 4 MiB, decoded off the async pool and kept in memory only.
+
 **Custom background image**: read from a path the user picks in a file dialog, decoded with the `image` crate, downscaled and kept in memory only. A malformed image simply fails to decode and no background is shown; nothing is copied or written elsewhere.
 
 **Thumbnails**: cover images are fetched over HTTPS with the same per-domain Referer logic as downloads, capped at 6 MiB, decoded off the async pool, and kept **in memory only** — never written to disk. Decoding is delegated to the `image` crate; a malformed or hostile image simply fails to decode and the row shows no thumbnail. At most 512 are held at once.
@@ -40,7 +48,7 @@ All web traffic handled by the native HTTP client uses **HTTPS with rustls** (a 
 
 ## What this application does NOT do
 
-No telemetry, no analytics. It does not execute downloaded content, does not silently self-update, and does not require administrator privileges. The optional magnet handler only registers the application's capabilities under `HKEY_CURRENT_USER`; it makes no machine-wide registry changes and does not modify the protected `UserChoice` association. Outside an active BitTorrent session, the only listening endpoint is the local receiver described above, always bound to 127.0.0.1 and disableable.
+No telemetry, no analytics. It does not execute downloaded content, does not silently self-update, does not touch the Windows registry, and does not require administrator privileges. The only listening port is the local receiver described above, always bound to 127.0.0.1 and disableable.
 
 ## Known limitations
 

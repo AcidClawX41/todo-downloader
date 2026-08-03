@@ -381,6 +381,86 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "⚠ Downloading via torrent also shares (uploads) the content. Use only with legal material."
         ),
         // ---------- Manejador de magnet ----------
+        // ---------- Booru Browser ----------
+        "nav.booru" => entry!("Booru", "Booru"),
+        "booru.title" => entry!("Buscador de boorus", "Booru browser"),
+        "booru.subtitle" => entry!(
+            "Busca por etiquetas, revisa las miniaturas y descarga solo lo que elijas, siempre en calidad original.",
+            "Search by tags, review the thumbnails and download only what you pick — always the original quality."
+        ),
+        "booru.tags" => entry!("ETIQUETAS (separadas por espacios)", "TAGS (space separated)"),
+        "booru.search" => entry!("🔍  Buscar", "🔍  Search"),
+        "booru.samples" => entry!("✨  Ejemplos…", "✨  Examples…"),
+        "booru.min_width" => entry!("Ancho mínimo:", "Min width:"),
+        "booru.rating" => entry!("Clasificación:", "Rating:"),
+        "booru.rating_all" => entry!("Todo", "All"),
+        "booru.rating_safe" => entry!("General", "General"),
+        "booru.rating_sensitive" => entry!("Sensible", "Sensitive"),
+        "booru.next" => entry!("Página siguiente", "Next page"),
+        "booru.prev" => entry!("Página anterior", "Previous page"),
+        "booru.needs_auth" => entry!(
+            "⚠ Este sitio exige credenciales de API: añádelas en Ajustes → Cuentas de booru.",
+            "⚠ This site requires API credentials: add them in Settings → Booru accounts."
+        ),
+        "set.booru" => entry!("CUENTAS DE BOORU", "BOORU ACCOUNTS"),
+        "set.booru_user" => entry!("Usuario / user-id:", "Username / user-id:"),
+        "set.booru_key" => entry!("Clave de API:", "API key:"),
+        "set.booru_note" => entry!(
+            "Solo hacen falta para Gelbooru (obligatorias) y para funciones de cuenta en Danbooru. Se guardan en tu configuración local y se pasan al motor sin aparecer en registros.",
+            "Only needed for Gelbooru (mandatory) and for account features on Danbooru. Stored in your local settings and passed to the engine without appearing in logs."
+        ),
+
+        "gal.analyzing" => entry!("Analizando…", "Analyzing…"),
+        "gal.current" => entry!("Descargando ahora:", "Downloading now:"),
+
+        // ---------- Pestaña «Tip my Work» ----------
+        "nav.tip" => entry!("Invítame a algo", "Tip my Work"),
+        "tip.title" => entry!("¡Invítame a un café o a una cerveza!", "Buy me a coffee or a Beer!"),
+        "tip.subtitle" => entry!(
+            "Gratis, abierto y sin anuncios — y quiero que siga siendo así.",
+            "Free, open and ad-free — and I'd like to keep it that way."
+        ),
+        "tip.msg1" => entry!(
+            "Todo Downloader y mis otras herramientas son gratuitas, de código abierto, sin anuncios y sin telemetría, y me gustaría que siguieran siéndolo.",
+            "Todo Downloader and my other software tools are free, open source, ad-free and telemetry-free — and I would like to keep them that way."
+        ),
+        "tip.msg2" => entry!(
+            "Las desarrollo y mantengo después del trabajo, en mi tiempo libre. Cada cambio en una web, cada extractor que se rompe y cada fallo propio de una plataforma lleva su tiempo de investigar y arreglar.",
+            "I develop and maintain them after work and during my free time. Every website change, broken extractor and platform-specific bug takes time to investigate and fix."
+        ),
+        "tip.msg3" => entry!(
+            "Si Todo Downloader te ha ahorrado horas de descargas manuales, invitarme a un café o a una cerveza es una forma sencilla de ayudar a que el proyecto siga vivo y bien mantenido.",
+            "If Todo Downloader has saved you hours of manual downloading, buying me a coffee or a beer is a small way to help keep the project alive and actively maintained."
+        ),
+        "tip.msg4" => entry!(
+            "El apoyo es totalmente opcional y no hay ninguna función bloqueada tras una donación.",
+            "Support is completely optional, and no features are locked behind donations."
+        ),
+        "tip.thanks" => entry!("¡Gracias! ;)", "Thank you! ;)"),
+        "tip.help" => entry!(
+            "Ayuda a mantener mis proyectos de código abierto.",
+            "Help maintain my open-source projects."
+        ),
+        "tip.no_links" => entry!(
+            "Aún no hay enlaces configurados: edita KOFI_URL, PAYPAL_URL y SPONSORS_URL al principio de src/main.rs.",
+            "No links configured yet: edit KOFI_URL, PAYPAL_URL and SPONSORS_URL at the top of src/main.rs."
+        ),
+
+        // ---------- Apoyo al proyecto ----------
+
+        "support.title" => entry!("❤  APOYAR EL PROYECTO", "❤  SUPPORT THIS PROJECT"),
+        "support.body" => entry!(
+            "Todo Downloader es gratuito, de código abierto, sin anuncios y sin telemetría. Si te ahorra tiempo, puedes apoyar su desarrollo.",
+            "Todo Downloader is free, open source, ad-free and telemetry-free. If it saves you time, you can support its development."
+        ),
+        "support.kofi" => entry!("☕  Ko-fi", "☕  Ko-fi"),
+        "support.paypal" => entry!("PayPal", "PayPal"),
+        "support.sponsors" => entry!("GitHub Sponsors", "GitHub Sponsors"),
+        "support.optional" => entry!(
+            "Totalmente opcional: no hay ninguna función bloqueada. Los botones solo abren el navegador; la aplicación nunca ve pagos ni datos bancarios.",
+            "Entirely optional — no feature is ever locked. The buttons just open your browser; the app never sees payments or banking details."
+        ),
+
         "set.theme" => entry!("TEMA", "THEME"),
         "theme.classic" => entry!("Clásico", "Classic"),
         "theme.sober" => entry!("Sobrio", "Sober"),
@@ -569,6 +649,15 @@ pub fn clip_captured(lang: Lang, n: usize) -> String {
     }
 }
 
+/// Recuento de archivos completados de una galería. No hay total conocido:
+/// gallery-dl no lo sabe hasta terminar.
+pub fn files_done(lang: Lang, n: u64) -> String {
+    match lang {
+        Lang::Es => format!("{n} archivos"),
+        Lang::En => format!("{n} files"),
+    }
+}
+
 pub fn list_cleared(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("🗑 {n} elemento(s) quitados de la lista"),
@@ -580,6 +669,34 @@ pub fn host_resolved(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("🔗 {n} archivo(s) resueltos del hoster"),
         Lang::En => format!("🔗 {n} file(s) resolved from the host"),
+    }
+}
+
+pub fn booru_summary(lang: Lang, shown: usize, sel: usize) -> String {
+    match lang {
+        Lang::Es => format!("{shown} mostrados · {sel} seleccionados"),
+        Lang::En => format!("{shown} shown · {sel} selected"),
+    }
+}
+
+pub fn booru_add(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es => format!("➕  Añadir {n} a la cola"),
+        Lang::En => format!("➕  Add {n} to queue"),
+    }
+}
+
+pub fn booru_found(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es => format!("🔍 {n} resultados"),
+        Lang::En => format!("🔍 {n} results"),
+    }
+}
+
+pub fn booru_error(lang: Lang, e: &str) -> String {
+    match lang {
+        Lang::Es => format!("Búsqueda fallida: {e}"),
+        Lang::En => format!("Search failed: {e}"),
     }
 }
 

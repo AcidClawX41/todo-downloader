@@ -8,3 +8,7 @@ Todo Downloader.exe
 # IDE
 /.idea
 /.vscode
+
+# Animaciones locales de la pestaña de apoyo: nunca se publican
+/tips/*
+!/tips/LEEME.txt

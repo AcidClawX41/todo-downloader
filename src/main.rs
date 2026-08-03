@@ -14,6 +14,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod booru;
 mod hosters;
 mod i18n;
 mod receiver;
@@ -39,6 +40,26 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const URL_RE: &str = r#"https?://[^\s"'<>]+"#;
 const MAX_RETRIES: u32 = 3;
+
+// ---------- Enlaces de apoyo al proyecto ----------
+//
+// EDITA SOLO ESTAS TRES LÍNEAS con tus usuarios reales. Un enlace que siga
+// conteniendo «TU_USUARIO» no se muestra: es preferible ocultar el botón a
+// enseñar uno roto.
+//
+// Ko-fi        -> https://ko-fi.com/manage  (tu nombre de página)
+// PayPal.Me    -> https://paypal.me/  (crea el enlace; PayPal no permite
+//                 cambiarlo después, así que elige bien el nombre)
+// GitHub       -> el propio usuario, si tienes Sponsors activado
+const KOFI_URL: &str = "https://ko-fi.com/ericdev";
+const PAYPAL_URL: &str = "https://paypal.me/EricValls";
+const SPONSORS_URL: &str = "https://github.com/sponsors/AcidClawX41";
+
+/// Un enlace sin configurar no debe pintarse
+fn link_ready(url: &str) -> bool {
+    !url.contains("TU_USUARIO")
+}
+
 
 // ============================= Temas =============================
 //
@@ -430,6 +451,8 @@ struct Row {
     speed: f64,
     status: Status,
     gal_files: u64,
+    /// Nombre del archivo que gallery-dl está escribiendo ahora mismo
+    gal_current: String,
     error_full: String,
     cancel: Arc<AtomicBool>,
     /// URL de la portada del post; vacía si el origen no la proporcionó
@@ -453,7 +476,8 @@ enum Ev {
     Progress(u64, u64, f64),
     Clipboard(Vec<String>),
     Received(Vec<receiver::Incoming>),
-    GalFiles(u64, u64),
+    /// (id, nº de archivos completados, nombre del que acaba de escribirse)
+    GalFiles(u64, u64, String),
     ErrorDetail(u64, String),
     CookieFallback,
     DisableCookies,
@@ -480,6 +504,11 @@ enum Ev {
     /// Torrent añadido: id de la app, handle de librqbit, nombre provisional
     TorrentAdded(u64, Arc<librqbit::ManagedTorrent>, String),
     TorrentError(String),
+    /// Resultados de una búsqueda en un booru
+    BooruResults(Vec<booru::Post>),
+    BooruError(String),
+    /// Miniatura de un post de booru ya decodificada
+    BooruThumb(u64, egui::ColorImage),
 }
 
 /// Motor de descarga por tarea
@@ -531,7 +560,11 @@ fn is_direct_media(url: &str) -> bool {
 /// listado de perfil yt-dlp no puede enumerar: los gestiona gallery-dl entero.
 const GALLERY_SITES: &[&str] = &[
     "instagram.com", "pinterest.com", "pinterest.es", "deviantart.com",
-    "flickr.com", "tumblr.com", "artstation.com", "danbooru", "gelbooru",
+    "flickr.com", "tumblr.com", "artstation.com",
+    // Boorus: gallery-dl trae extractores para todos estos y se actualiza
+    // cuando cambian, así que basta con enrutarlos hacia él.
+    "danbooru", "gelbooru", "safebooru", "aibooru", "e621.net", "e926.net",
+    "yande.re", "konachan", "rule34.xxx", "tbib.org", "hypnohub.net",
     // Weibo: gallery-dl trae extractores de perfil, álbum, post y vídeo,
     // y descarga fotos y vídeos del mismo post en una sola pasada.
     "weibo.com", "weibo.cn",
@@ -729,7 +762,9 @@ enum View {
     Downloads,
     Profile,
     Capture,
+    Booru,
     Torrents,
+    Support,
     Done,
     Failed,
     Settings,
@@ -756,6 +791,9 @@ struct Settings {
     bg_opacity: f32,
     /// Sigma del desenfoque gaussiano del fondo (0 = nítido)
     bg_blur: f32,
+    /// Credenciales de boorus: usuario/clave por clave de extractor
+    booru_user: String,
+    booru_key: String,
     receiver_enabled: bool,
     receiver_port: u16,
     /// Carpeta de destino de los torrents (vacío = <dest>/Torrents)
@@ -783,6 +821,8 @@ impl Default for Settings {
             bg_image: String::new(),
             bg_opacity: 0.22,
             bg_blur: 0.0,
+            booru_user: String::new(),
+            booru_key: String::new(),
             receiver_enabled: true,
             receiver_port: 9777,
             torrent_dir: String::new(),
@@ -948,6 +988,24 @@ struct App {
     bg_source: Option<image::DynamicImage>,
     /// Marca que hay que regenerar la textura (cambió la ruta o el desenfoque)
     bg_dirty: bool,
+    // ---- Animación de la pestaña de apoyo ----
+    /// Fotogramas del GIF elegido: (textura, duración en segundos)
+    tip_frames: Vec<(egui::TextureHandle, f32)>,
+    /// Instante en que empezó la animación, para saber qué fotograma toca
+    tip_started: Option<Instant>,
+    /// Se pone al entrar en la pestaña: fuerza elegir otro GIF al azar
+    tip_reload: bool,
+    // ---- Booru Browser ----
+    booru_site: usize,
+    booru_tags: String,
+    booru_page: u32,
+    booru_posts: Vec<booru::Post>,
+    booru_searching: bool,
+    booru_min_w: u32,
+    /// Filtro de clasificación: "" = todo, si no la letra del booru (g/s/q/e)
+    booru_rating: String,
+    booru_thumbs: std::collections::HashMap<u64, egui::TextureHandle>,
+    booru_pending: std::collections::HashSet<u64>,
 }
 
 impl App {
@@ -1006,6 +1064,10 @@ impl App {
                 let _ = tx_r.send(Ev::Received(items));
             });
         }
+        // Limpieza defensiva: si la app se cerró de golpe durante una búsqueda,
+        // el archivo temporal de credenciales pudo quedar huérfano.
+        let _ = std::fs::remove_file(ytdlp_dir().join("booru-auth.json"));
+
         spawn_ytdlp_check(tx.clone());
         spawn_galdl_check(tx.clone());
         spawn_ffmpeg_check(tx.clone());
@@ -1062,6 +1124,18 @@ impl App {
             bg_loaded_from: String::new(),
             bg_source: None,
             bg_dirty: false,
+            tip_frames: Vec::new(),
+            tip_started: None,
+            tip_reload: true,
+            booru_site: 0,
+            booru_tags: String::new(),
+            booru_page: 1,
+            booru_posts: Vec::new(),
+            booru_searching: false,
+            booru_min_w: 0,
+            booru_rating: String::new(),
+            booru_thumbs: std::collections::HashMap::new(),
+            booru_pending: std::collections::HashSet::new(),
         };
 
         // Enlace recibido por línea de comandos (clic en un magnet del navegador)
@@ -1282,6 +1356,7 @@ impl App {
             speed: 0.0,
             status: Status::Queued,
             gal_files: 0,
+            gal_current: String::new(),
             error_full: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             thumb_url: if thumb.starts_with("http") { thumb.to_string() } else { String::new() },
@@ -1493,9 +1568,10 @@ impl App {
                         }
                     }
                 }
-                Ev::GalFiles(id, n) => {
+                Ev::GalFiles(id, n, name) => {
                     if let Some(i) = self.idx(id) {
                         self.rows[i].gal_files = n;
+                        self.rows[i].gal_current = name;
                         if self.rows[i].status == Status::Resolving {
                             self.rows[i].status = Status::Downloading;
                         }
@@ -1631,6 +1707,28 @@ impl App {
                 Ev::TorrentError(e) => {
                     self.torrent_adding = false;
                     self.toast(i18n::torrent_error(self.settings.lang, &e));
+                }
+                Ev::BooruResults(posts) => {
+                    self.booru_searching = false;
+                    let n = posts.len();
+                    self.booru_posts = posts;
+                    // Las miniaturas de la búsqueda anterior ya no sirven
+                    self.booru_thumbs.clear();
+                    self.booru_pending.clear();
+                    self.toast(i18n::booru_found(self.settings.lang, n));
+                }
+                Ev::BooruError(e) => {
+                    self.booru_searching = false;
+                    self.toast(i18n::booru_error(self.settings.lang, &e));
+                }
+                Ev::BooruThumb(id, img) => {
+                    self.booru_pending.remove(&id);
+                    let tex = ctx.load_texture(
+                        format!("booru_{id}"),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.booru_thumbs.insert(id, tex);
                 }
             }
         }
@@ -1776,13 +1874,284 @@ enum HttpOutcome {
     Expired(u16),
 }
 
+/// Carpeta de donde salen los GIF de la pestaña de apoyo: `tips/` junto al
+/// ejecutable. Deliberadamente NO se incrustan en el binario ni se publican en
+/// el repositorio: así cada quien pone los suyos sin redistribuir obra ajena.
+fn tips_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("tips")))
+        .unwrap_or_else(|| PathBuf::from("tips"))
+}
+
+/// Elige un GIF al azar de `tips/` y decodifica sus fotogramas.
+///
+/// Sin dependencia de números aleatorios: basta con los nanosegundos del reloj
+/// como semilla, que para elegir una imagen sobra.
+fn load_random_tip_gif(ctx: &egui::Context) -> Vec<(egui::TextureHandle, f32)> {
+    use image::AnimationDecoder;
+
+    let dir = tips_dir();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .map(|e| e.eq_ignore_ascii_case("gif"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if files.is_empty() {
+        return Vec::new();
+    }
+    files.sort(); // orden estable antes de sortear
+
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    let path = &files[seed % files.len()];
+
+    let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
+    let Ok(decoder) = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)) else {
+        return Vec::new();
+    };
+    let Ok(frames) = decoder.into_frames().collect_frames() else { return Vec::new() };
+
+    frames
+        .into_iter()
+        .enumerate()
+        // Tope de fotogramas: un GIF largo no debe llenar la memoria de vídeo
+        .take(120)
+        .filter_map(|(i, f)| {
+            let (num, den) = f.delay().numer_denom_ms();
+            // Muchos GIF declaran 0 ms; los navegadores usan 100 ms en ese caso
+            let ms = if den == 0 { 100.0 } else { num as f32 / den as f32 };
+            let secs = if ms < 10.0 { 0.1 } else { ms / 1000.0 };
+            let buf = f.into_buffer();
+            let (w, h) = buf.dimensions();
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [w as usize, h as usize],
+                buf.as_raw(),
+            );
+            Some((
+                ctx.load_texture(format!("tip_{i}"), img, egui::TextureOptions::NEAREST),
+                secs,
+            ))
+        })
+        .collect()
+}
+
+/// Limita cuántas miniaturas se piden a la vez, en toda la aplicación.
+///
+/// Cuatro simultáneas es el punto en que ningún CDN de booru protesta. Con las
+/// 40 de golpe que se lanzaban antes, cada sitio reaccionaba distinto: Danbooru
+/// devolvía una página de bloqueo en todas, yande.re dejaba pasar dos o tres,
+/// y AIBooru o Safebooru lo aguantaban. Ese «depende del booru» era, en el
+/// fondo, un problema de ritmo, no de compatibilidad.
+fn thumb_gate() -> &'static Arc<Semaphore> {
+    static G: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    G.get_or_init(|| Arc::new(Semaphore::new(4)))
+}
+
+/// Referer del sitio al que pertenece un CDN de booru. Varios lo comprueban
+/// para evitar el hotlinking.
+fn booru_referer(url: &str) -> &'static str {
+    let u = url.to_ascii_lowercase();
+    if u.contains("donmai.us") {
+        "https://danbooru.donmai.us/"
+    } else if u.contains("aibooru") {
+        "https://aibooru.online/"
+    } else if u.contains("yande.re") {
+        "https://yande.re/"
+    } else if u.contains("konachan") {
+        "https://konachan.com/"
+    } else if u.contains("e621") || u.contains("e926") {
+        "https://e621.net/"
+    } else if u.contains("safebooru") {
+        "https://safebooru.org/"
+    } else if u.contains("gelbooru") {
+        "https://gelbooru.com/"
+    } else {
+        ""
+    }
+}
+
+/// Escribe el archivo temporal de credenciales para gallery-dl.
+///
+/// En Unix se crea con permisos **0600** (solo el propietario lee y escribe)
+/// ANTES de volcar el contenido, para que no exista ni un instante con permisos
+/// abiertos. En Windows va en la carpeta de datos de la app, dentro del perfil
+/// del usuario, que ya hereda una ACL restringida a ese usuario.
+async fn write_booru_auth(json: &str) -> Option<PathBuf> {
+    let dir = ytdlp_dir();
+    tokio::fs::create_dir_all(&dir).await.ok()?;
+    let path = dir.join("booru-auth.json");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .await
+            .ok()?;
+        f.write_all(json.as_bytes()).await.ok()?;
+        f.flush().await.ok()?;
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(&path, json).await.ok()?;
+    }
+    Some(path)
+}
+
+/// Lanza `gallery-dl -j` para listar posts SIN descargarlos.
+///
+/// `--range` pagina: 40 resultados por página. Es el mismo binario que ya usa
+/// la app para descargar galerías, así que no añade ninguna dependencia nueva.
+async fn booru_search(
+    program: String,
+    url: String,
+    page: u32,
+    per_page: u32,
+    auth_cfg: Option<String>,
+    tx: UnboundedSender<Ev>,
+) {
+    let first = (page.saturating_sub(1)) * per_page + 1;
+    let last = first + per_page - 1;
+
+    // Credenciales en archivo temporal, NO en la línea de comandos (ver
+    // booru::auth_config). Se borra pase lo que pase, también si falla.
+    let cfg_path = match &auth_cfg {
+        Some(json) => write_booru_auth(json).await,
+        None => None,
+    };
+
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.args(["-j", "--range", &format!("{first}-{last}"), "--no-download"]);
+    if let Some(p) = &cfg_path {
+        cmd.arg("-c").arg(p);
+    }
+    cmd.arg("--").arg(&url);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let result = cmd.output().await;
+
+    // Borrado inmediato: el archivo solo existe mientras dura la búsqueda
+    if let Some(p) = &cfg_path {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+
+    match result {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim().is_empty() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("sin resultados");
+                let _ = tx.send(Ev::BooruError(last.chars().take(160).collect()));
+                return;
+            }
+            match booru::parse(&stdout) {
+                Ok(posts) => {
+                    let _ = tx.send(Ev::BooruResults(posts));
+                }
+                Err(e) => {
+                    let _ = tx.send(Ev::BooruError(e));
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::BooruError(e.to_string()));
+        }
+    }
+}
+
+/// Descarga la miniatura de un post de booru para la rejilla.
+async fn fetch_booru_thumb(client: reqwest::Client, id: u64, url: String, tx: UnboundedSender<Ev>) {
+    const MAX: usize = 4 * 1024 * 1024;
+
+    // Cola global de miniaturas. Sin esto se lanzaban 40 peticiones de golpe
+    // al mismo CDN y varios boorus respondían con una página de desafío en vez
+    // de la imagen: Danbooru bloqueaba todas, yande.re dejaba pasar unas pocas
+    // y AIBooru lo toleraba. De ahí que «dependiera del booru».
+    let _permit = thumb_gate().acquire().await.ok();
+
+    // Referer del propio sitio: varios CDN de boorus lo comprueban
+    let referer = booru_referer(&url);
+
+    // Un reintento: los bloqueos por ritmo son transitorios y se van solos
+    let mut bytes = None;
+    for attempt in 0..2u32 {
+        let mut req = client.get(&url);
+        if !referer.is_empty() {
+            req = req.header(reqwest::header::REFERER, referer);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(b) = resp.bytes().await {
+                    // Un CDN que responde HTML es una página de bloqueo, no
+                    // una imagen: se descarta y se reintenta.
+                    if !b.is_empty() && b.len() <= MAX && !b.starts_with(b"<") {
+                        bytes = Some(b);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+    }
+    let Some(bytes) = bytes else { return };
+
+    let img = tokio::task::spawn_blocking(move || {
+        let im = image::load_from_memory(&bytes).ok()?;
+        let im = im.thumbnail(180, 180);
+        let rgba = im.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            rgba.as_raw(),
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(img) = img {
+        let _ = tx.send(Ev::BooruThumb(id, img));
+    }
+}
+
 /// Descarga y decodifica una miniatura. Silenciosa ante cualquier fallo: una
 /// portada caída jamás debe generar ruido; la fila simplemente queda sin imagen.
 async fn fetch_thumb(client: reqwest::Client, id: u64, url: String, tx: UnboundedSender<Ev>) {
     const MAX_THUMB: usize = 6 * 1024 * 1024;
 
+    // Mismo límite global que las miniaturas de booru: una cola de 300 posts
+    // no debe lanzar 300 peticiones simultáneas al CDN.
+    let _permit = thumb_gate().acquire().await.ok();
+
     let mut req = client.get(&url);
-    let referer = referer_for(&url);
+    // Referer del sitio de origen; si no es un dominio conocido, se prueba
+    // con el del booru correspondiente.
+    let referer = {
+        let r = referer_for(&url);
+        if r.is_empty() { booru_referer(&url) } else { r }
+    };
     if !referer.is_empty() {
         req = req.header(reqwest::header::REFERER, referer);
     }
@@ -1791,7 +2160,8 @@ async fn fetch_thumb(client: reqwest::Client, id: u64, url: String, tx: Unbounde
         return;
     }
     let Ok(bytes) = resp.bytes().await else { return };
-    if bytes.is_empty() || bytes.len() > MAX_THUMB {
+    // Una respuesta HTML es una página de bloqueo, no una imagen
+    if bytes.is_empty() || bytes.len() > MAX_THUMB || bytes.starts_with(b"<") {
         return;
     }
 
@@ -2235,11 +2605,21 @@ async fn galdl_exec(
         let mut lines = BufReader::new(out).lines();
         let mut n: u64 = 0;
         while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() {
+            let l = line.trim();
+            if l.is_empty() {
                 continue;
             }
             n += 1;
-            let _ = tx_files.send(Ev::GalFiles(id, n));
+            // gallery-dl imprime la ruta completa de cada archivo escrito;
+            // nos quedamos con el nombre para mostrar en qué va.
+            let name = l
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(l)
+                .chars()
+                .take(48)
+                .collect::<String>();
+            let _ = tx_files.send(Ev::GalFiles(id, n, name));
         }
     });
 
@@ -3496,6 +3876,9 @@ impl eframe::App for App {
                 if nav_item(ui, self.view == View::Capture, "🧲", t(lang, "nav.capture"), 0) {
                     self.view = View::Capture;
                 }
+                if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
+                    self.view = View::Booru;
+                }
                 if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
                     self.view = View::Torrents;
                 }
@@ -3508,6 +3891,13 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 if nav_item(ui, self.view == View::Settings, "⚙", t(lang, "nav.settings"), 0) {
                     self.view = View::Settings;
+                }
+                // Justo debajo de Ajustes, con el corazón para que destaque
+                if nav_item(ui, self.view == View::Support, "❤", t(lang, "nav.tip"), 0) {
+                    if self.view != View::Support {
+                        self.tip_reload = true; // otro GIF en cada visita
+                    }
+                    self.view = View::Support;
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -3583,6 +3973,18 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| self.capture_ui(ui));
+                    }
+                    View::Booru => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .id_source("booru_scroll")
+                            .show(ui, |ui| self.booru_ui(ui));
+                    }
+                    View::Support => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .id_source("support_scroll")
+                            .show(ui, |ui| self.support_ui(ui));
                     }
                     View::Torrents => {
                         egui::ScrollArea::vertical()
@@ -3721,7 +4123,7 @@ impl App {
                         self.retry_failed();
                     }
                 }
-                View::Settings | View::Profile | View::Capture | View::Torrents => {}
+                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru | View::Support => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_sized(
@@ -3743,7 +4145,7 @@ impl App {
                 View::Downloads => r.status != Status::Done && !matches!(r.status, Status::Error(_)),
                 View::Done => r.status == Status::Done,
                 View::Failed => matches!(r.status, Status::Error(_)),
-                View::Settings | View::Profile | View::Capture | View::Torrents => false,
+                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru | View::Support => false,
             })
             .filter(|(_, r)| {
                 search.is_empty()
@@ -3854,7 +4256,7 @@ impl App {
                             row.col(|ui| {
                                 // gallery-dl no da bytes totales: mostramos archivos descargados
                                 let txt = if r.engine == Engine::GalleryDl && r.gal_files > 0 {
-                                    format!("{} arch.", r.gal_files)
+                                    i18n::files_done(lang, r.gal_files)
                                 } else if r.size > 0 {
                                     fmt_size(r.size as f64)
                                 } else {
@@ -3863,6 +4265,33 @@ impl App {
                                 ui.label(RichText::new(txt).color(MUTED()));
                             });
                             row.col(|ui| {
+                                // Las galerías no conocen el total de archivos hasta
+                                // terminar (saberlo exigiría una pasada previa que
+                                // duplicaría las peticiones y dispararía el rate-limit).
+                                // Así que en vez de un 0% falso se usa una barra
+                                // animada indeterminada con el recuento en vivo.
+                                let gallery_running = r.engine == Engine::GalleryDl
+                                    && r.status != Status::Done
+                                    && !matches!(r.status, Status::Error(_));
+                                if gallery_running {
+                                    let label = if r.gal_files > 0 {
+                                        i18n::files_done(lang, r.gal_files)
+                                    } else {
+                                        t(lang, "gal.analyzing").to_string()
+                                    };
+                                    ui.add(
+                                        egui::ProgressBar::new(0.999)
+                                            .fill(ACCENT().gamma_multiply(0.55))
+                                            .animate(r.status.is_active())
+                                            .text(RichText::new(label).size(11.0)),
+                                    )
+                                    .on_hover_text(if r.gal_current.is_empty() {
+                                        t(lang, "gal.analyzing").to_string()
+                                    } else {
+                                        format!("{}\n{}", t(lang, "gal.current"), r.gal_current)
+                                    });
+                                    return;
+                                }
                                 let frac = if r.size > 0 {
                                     r.downloaded as f32 / r.size as f32
                                 } else if r.status == Status::Done {
@@ -4274,6 +4703,455 @@ impl App {
                     );
                 });
         });
+    }
+
+    // ---------------- Vista Apoyar ----------------
+
+    fn support_ui(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.lang;
+
+        // Al entrar en la pestaña se sortea otro GIF
+        if self.tip_reload {
+            self.tip_reload = false;
+            self.tip_frames = load_random_tip_gif(ui.ctx());
+            self.tip_started = Some(Instant::now());
+        }
+
+        ui.label(RichText::new(t(lang, "tip.title")).size(24.0).strong().color(Color32::WHITE));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t(lang, "tip.subtitle")).color(MUTED()));
+        ui.add_space(14.0);
+
+        // ---- Mensaje ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(720.0));
+            ui.label(RichText::new(t(lang, "tip.msg1")).size(13.5).color(TEXT()));
+            ui.add_space(8.0);
+            ui.label(RichText::new(t(lang, "tip.msg2")).size(13.0).color(MUTED()));
+            ui.add_space(8.0);
+            ui.label(RichText::new(t(lang, "tip.msg3")).size(13.0).color(TEXT()));
+            ui.add_space(8.0);
+            ui.label(RichText::new(t(lang, "tip.msg4")).size(12.5).color(MUTED()));
+            ui.add_space(6.0);
+            ui.label(RichText::new(t(lang, "tip.thanks")).size(14.0).strong().color(ACCENT()));
+        });
+        ui.add_space(14.0);
+
+        // ---- Botones ----
+        let links: Vec<(&str, &str, Color32)> = [
+            ("support.kofi", KOFI_URL, ACCENT()),
+            ("support.paypal", PAYPAL_URL, CYAN()),
+            ("support.sponsors", SPONSORS_URL, GREEN()),
+        ]
+        .into_iter()
+        .filter(|(_, url, _)| link_ready(url))
+        .collect();
+
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(720.0));
+            ui.label(RichText::new(t(lang, "support.title")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "tip.help")).size(13.0).color(TEXT()));
+            ui.add_space(10.0);
+            if links.is_empty() {
+                // Ningún enlace configurado todavía: se explica en vez de
+                // dejar una tarjeta vacía sin sentido.
+                ui.label(RichText::new(t(lang, "tip.no_links")).size(12.0).color(AMBER()));
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for (key, url, color) in &links {
+                        let btn = egui::Button::new(
+                            RichText::new(t(lang, key)).size(14.0).color(Color32::WHITE).strong(),
+                        )
+                        .fill(*color)
+                        .rounding(Rounding::same(10.0))
+                        .min_size(egui::vec2(150.0, 40.0));
+                        let resp = ui.add(btn);
+                        gloss_paint(ui, &resp);
+                        if resp.clicked() {
+                            if let Err(e) = open::that(*url) {
+                                self.toast(format!("{e}"));
+                            }
+                        }
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(t(lang, "support.optional")).size(11.5).color(MUTED()));
+        });
+
+        // ---- Animación, enmarcada y pegada bajo el panel de apoyo ----
+        //
+        // Va aquí abajo a propósito: primero el mensaje y los botones, y la
+        // animación como remate visual. Si no hay ningún GIF en la carpeta,
+        // simplemente no se dibuja nada — nunca se enseña la ruta interna al
+        // usuario, que además quedaría fea en una captura.
+        if !self.tip_frames.is_empty() {
+            // Fotograma que toca según el tiempo transcurrido, en bucle
+            let total: f32 = self.tip_frames.iter().map(|(_, d)| *d).sum::<f32>().max(0.05);
+            let elapsed = self
+                .tip_started
+                .map(|s| s.elapsed().as_secs_f32())
+                .unwrap_or(0.0)
+                % total;
+            let mut acc = 0.0;
+            let mut idx = 0;
+            for (i, (_, d)) in self.tip_frames.iter().enumerate() {
+                acc += *d;
+                if elapsed < acc {
+                    idx = i;
+                    break;
+                }
+            }
+            let (tex, _) = &self.tip_frames[idx];
+            let ts = tex.size_vec2();
+
+            // Se ajusta al ancho del panel de arriba para que queden alineados,
+            // sin deformar la imagen y con tope de altura.
+            let panel_w = ui.available_width().min(720.0);
+            let mut w = panel_w;
+            let mut h = w / ts.x.max(1.0) * ts.y;
+            if h > 240.0 {
+                h = 240.0;
+                w = h / ts.y.max(1.0) * ts.x;
+            }
+
+            ui.add_space(10.0);
+            // Marco oscuro estilizado: borde negro grueso + halo del acento
+            egui::Frame::none()
+                .fill(Color32::BLACK)
+                .rounding(Rounding::same(14.0))
+                .inner_margin(Margin::same(6.0))
+                .stroke(Stroke::new(2.0f32, ACCENT().gamma_multiply(0.55)))
+                .show(ui, |ui| {
+                    ui.set_width(panel_w);
+                    ui.vertical_centered(|ui| {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(w, h),
+                            ))
+                            .rounding(Rounding::same(9.0)),
+                        );
+                    });
+                });
+            // Repintado continuo para que la animación corra
+            ui.ctx().request_repaint_after(Duration::from_millis(60));
+        }
+    }
+
+
+    // ---------------- Vista Booru ----------------
+
+    fn booru_ui(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.lang;
+        ui.label(RichText::new(t(lang, "booru.title")).size(24.0).strong().color(Color32::WHITE));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t(lang, "booru.subtitle")).color(MUTED()));
+        ui.add_space(14.0);
+
+        let site = &booru::SITES[self.booru_site.min(booru::SITES.len() - 1)];
+        let mut do_search = false;
+
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(860.0));
+            // Selector de sitio
+            ui.horizontal_wrapped(|ui| {
+                for (i, s) in booru::SITES.iter().enumerate() {
+                    let sel = self.booru_site == i;
+                    let btn = egui::Button::new(
+                        RichText::new(s.name).color(if sel { Color32::WHITE } else { MUTED() }),
+                    )
+                    .fill(if sel { ACCENT() } else { CARD_HOVER() })
+                    .rounding(Rounding::same(8.0));
+                    let r = ui.add(btn);
+                    gloss_paint(ui, &r);
+                    if r.clicked() {
+                        self.booru_site = i;
+                        self.booru_page = 1;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+
+            // Etiquetas
+            ui.label(RichText::new(t(lang, "booru.tags")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let te = ui.add_sized(
+                    [420.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.booru_tags)
+                        .hint_text("landscape scenery 1girl  ·  rating:general"),
+                );
+                // Enter también busca
+                if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    do_search = true;
+                }
+                if self.booru_searching {
+                    ui.spinner();
+                } else if primary_button(ui, t(lang, "booru.search")).clicked() {
+                    do_search = true;
+                }
+
+                // Ejemplos: además de dar por dónde empezar, enseñan la
+                // convención de nombres de los boorus, que no es evidente.
+                egui::ComboBox::from_id_source("booru_samples")
+                    .selected_text(t(lang, "booru.samples"))
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        for (label, tag) in booru::SAMPLE_TAGS {
+                            if ui.selectable_label(false, *label).on_hover_text(*tag).clicked() {
+                                self.booru_tags = tag.to_string();
+                                self.booru_page = 1;
+                                do_search = true;
+                            }
+                        }
+                    });
+            });
+
+            // Filtros
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t(lang, "booru.min_width")).size(12.0).color(MUTED()));
+                ui.add(egui::DragValue::new(&mut self.booru_min_w).suffix(" px").range(0..=8000));
+                ui.add_space(10.0);
+                ui.label(RichText::new(t(lang, "booru.rating")).size(12.0).color(MUTED()));
+                for (code, key) in [("", "booru.rating_all"), ("g", "booru.rating_safe"), ("s", "booru.rating_sensitive")] {
+                    let sel = self.booru_rating == code;
+                    if ui
+                        .selectable_label(sel, RichText::new(t(lang, key)).size(12.0))
+                        .clicked()
+                    {
+                        self.booru_rating = code.to_string();
+                    }
+                }
+            });
+
+            if site.needs_auth && self.settings.booru_key.trim().is_empty() {
+                ui.label(RichText::new(t(lang, "booru.needs_auth")).size(11.5).color(AMBER()));
+            }
+            if self.galdl_cmd.is_none() {
+                ui.label(RichText::new(t(lang, "profile.need_galdl")).size(11.5).color(RED()));
+            }
+        });
+
+        if do_search && !self.booru_searching {
+            if let Some(prog) = self.galdl_cmd.clone() {
+                self.booru_searching = true;
+                self.booru_posts.clear();
+                let url = booru::search_url(site, &self.booru_tags);
+                let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
+                let tx = self.tx.clone();
+                let page = self.booru_page;
+                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx));
+            } else {
+                self.toast(t(lang, "profile.need_galdl"));
+            }
+        }
+
+        if self.booru_posts.is_empty() {
+            return;
+        }
+        ui.add_space(12.0);
+
+        // Filtrado local (resolución y clasificación)
+        let min_w = self.booru_min_w;
+        let rating = self.booru_rating.clone();
+        let visible: Vec<usize> = self
+            .booru_posts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.width >= min_w)
+            .filter(|(_, p)| rating.is_empty() || p.rating == rating)
+            .map(|(i, _)| i)
+            .collect();
+
+        let sel_count = visible.iter().filter(|&&i| self.booru_posts[i].selected).count();
+
+        // Barra de acciones (aplicadas tras pintar, para no romper índices)
+        let mut set_all: Option<bool> = None;
+        let mut page_delta: i32 = 0;
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(860.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(i18n::booru_summary(lang, visible.len(), sel_count)).strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if soft_button(ui, "▶").on_hover_text(t(lang, "booru.next")).clicked() {
+                        page_delta = 1;
+                    }
+                    ui.label(RichText::new(format!("{}", self.booru_page)).color(CYAN()));
+                    if self.booru_page > 1
+                        && soft_button(ui, "◀").on_hover_text(t(lang, "booru.prev")).clicked()
+                    {
+                        page_delta = -1;
+                    }
+                    ui.add_space(10.0);
+                    if soft_button(ui, t(lang, "btn.none")).clicked() {
+                        set_all = Some(false);
+                    }
+                    if soft_button(ui, t(lang, "btn.all")).clicked() {
+                        set_all = Some(true);
+                    }
+                });
+            });
+        });
+        ui.add_space(8.0);
+
+        // Rejilla de miniaturas
+        const CELL: f32 = 150.0;
+        let avail = ui.available_width().min(880.0);
+        let cols = ((avail / (CELL + 10.0)).floor() as usize).max(1);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let rt = self.rt.handle().clone();
+        let mut pending = std::mem::take(&mut self.booru_pending);
+        let mut toggle: Option<usize> = None;
+
+        egui::ScrollArea::vertical()
+            .max_height(520.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("booru_grid").spacing([10.0, 10.0]).show(ui, |ui| {
+                    for (n, &i) in visible.iter().enumerate() {
+                        let p = &self.booru_posts[i];
+                        // Descarga perezosa de la miniatura
+                        if !self.booru_thumbs.contains_key(&p.id)
+                            && !pending.contains(&p.id)
+                            && pending.len() < 60
+                        {
+                            pending.insert(p.id);
+                            rt.spawn(fetch_booru_thumb(
+                                client.clone(),
+                                p.id,
+                                p.preview_url.clone(),
+                                tx.clone(),
+                            ));
+                        }
+
+                        let sel = p.selected;
+                        egui::Frame::none()
+                            .fill(if sel { ACCENT().gamma_multiply(0.25) } else { CARD() })
+                            .rounding(Rounding::same(10.0))
+                            .stroke(Stroke::new(
+                                if sel { 2.0f32 } else { 1.0f32 },
+                                if sel { ACCENT() } else { CARD_HOVER() },
+                            ))
+                            .inner_margin(Margin::same(6.0))
+                            .show(ui, |ui| {
+                                ui.set_width(CELL);
+                                ui.vertical(|ui| {
+                                    let resp = if let Some(tex) = self.booru_thumbs.get(&p.id) {
+                                        let ts = tex.size_vec2();
+                                        let h = (CELL / ts.x.max(1.0) * ts.y).min(CELL);
+                                        ui.add(
+                                            egui::Image::new(egui::load::SizedTexture::new(
+                                                tex.id(),
+                                                egui::vec2(CELL, h),
+                                            ))
+                                            .rounding(Rounding::same(6.0))
+                                            .sense(egui::Sense::click()),
+                                        )
+                                    } else {
+                                        ui.allocate_response(
+                                            egui::vec2(CELL, CELL * 0.7),
+                                            egui::Sense::click(),
+                                        )
+                                    };
+                                    if resp.clicked() {
+                                        toggle = Some(i);
+                                    }
+                                    // Datos útiles sin saturar: resolución y peso
+                                    ui.label(
+                                        RichText::new(format!("{}×{}", p.width, p.height))
+                                            .size(10.5)
+                                            .color(if p.width >= 1920 { GREEN() } else { MUTED() }),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        // Marca los vídeos: los boorus también
+                                        // alojan webm/mp4 y conviene saberlo
+                                        // antes de encolar 40 «imágenes».
+                                        if !p.is_image() {
+                                            ui.label(RichText::new("🎬").size(10.0).color(CYAN()));
+                                        }
+                                        ui.label(
+                                            RichText::new(format!(".{}", p.ext))
+                                                .size(10.0)
+                                                .color(MUTED()),
+                                        );
+                                        if p.file_size > 0 {
+                                            ui.label(
+                                                RichText::new(fmt_size(p.file_size as f64))
+                                                    .size(10.0)
+                                                    .color(MUTED()),
+                                            );
+                                        }
+                                    });
+                                    // Autor, si el booru lo expone. Se recorta
+                                    // para no romper la rejilla.
+                                    if !p.artist.is_empty() {
+                                        let a: String = p.artist.chars().take(20).collect();
+                                        ui.label(RichText::new(a).size(9.5).color(ACCENT()))
+                                            .on_hover_text(&p.artist);
+                                    }
+                                });
+                            });
+
+                        if (n + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            });
+
+        self.booru_pending = pending;
+        if let Some(i) = toggle {
+            self.booru_posts[i].selected = !self.booru_posts[i].selected;
+        }
+        if let Some(v) = set_all {
+            for &i in &visible {
+                self.booru_posts[i].selected = v;
+            }
+        }
+        if page_delta != 0 {
+            self.booru_page = (self.booru_page as i32 + page_delta).max(1) as u32;
+            if let Some(prog) = self.galdl_cmd.clone() {
+                self.booru_searching = true;
+                let url = booru::search_url(site, &self.booru_tags);
+                let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
+                self.rt.spawn(booru_search(prog, url, self.booru_page, 40, auth, self.tx.clone()));
+            }
+        }
+
+        ui.add_space(10.0);
+        if primary_button(ui, &i18n::booru_add(lang, sel_count)).clicked() && sel_count > 0 {
+            let site_name = site.name.to_string();
+            let chosen: Vec<(String, String, String, String)> = visible
+                .iter()
+                .filter(|&&i| self.booru_posts[i].selected)
+                .map(|&i| {
+                    let p = &self.booru_posts[i];
+                    (
+                        p.file_url.clone(),
+                        p.id.to_string(),
+                        p.preview_url.clone(),
+                        // El primer artista etiquetado sirve de carpeta/autor:
+                        // así la subcarpeta por autor tiene sentido también aquí.
+                        p.artist.split_whitespace().next().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+            let n = chosen.len();
+            for (url, id, thumb, artist) in chosen {
+                // El original va por el motor HTTP nativo: máxima calidad y
+                // reanudación. La miniatura alimenta la vista de la cola.
+                let author = if artist.is_empty() { site_name.clone() } else { artist };
+                self.add_url(&url, &author, "", "", &id, &thumb);
+            }
+            self.toast(i18n::added_to_queue(lang, n));
+            self.view = View::Downloads;
+        }
     }
 
     // ---------------- Vista de torrents ----------------
@@ -4920,6 +5798,28 @@ impl App {
                 }
                 ui.label(RichText::new(t(lang, "eng.ffmpeg_note")).size(11.5).color(MUTED()));
             }
+        });
+        ui.add_space(12.0);
+
+        // ---- Credenciales de boorus ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.booru")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.booru_user")).size(12.0).color(MUTED()));
+                ui.add_sized([200.0, 26.0], egui::TextEdit::singleline(&mut self.settings.booru_user));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.booru_key")).size(12.0).color(MUTED()));
+                // password(true): la clave no queda a la vista de nadie que
+                // mire la pantalla ni en una captura.
+                ui.add_sized(
+                    [200.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.settings.booru_key).password(true),
+                );
+            });
+            ui.label(RichText::new(t(lang, "set.booru_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 

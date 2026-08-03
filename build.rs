@@ -16,7 +16,7 @@ fn main() {
         res.set("ProductName", "Todo Downloader");
         res.set("FileDescription", "Todo Downloader - gestor de descargas");
         res.set("CompanyName", "Eric V. Gramunt");
-        res.set("LegalCopyright", "MIT License (c) 2026 Eric V. Gramunt");
+        res.set("LegalCopyright", "GPL-3.0-or-later (c) 2026 Eric V. Gramunt");
         // No abortar la compilación si el recurso falla (p. ej. cross-compiling)
         if let Err(e) = res.compile() {
             eprintln!("aviso: no se pudo incrustar el icono: {e}");
