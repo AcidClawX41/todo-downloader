@@ -159,8 +159,11 @@ fn parse_body(body: &str) -> Vec<Incoming> {
     out
 }
 
+/// Enlaces aceptados: http(s) para descargas normales y `magnet:` para
+/// torrents (el clic en un magnet del navegador llega por aquí cuando ya hay
+/// una instancia abierta). Cualquier otro esquema se descarta.
 fn is_http(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://")
+    s.starts_with("http://") || s.starts_with("https://") || s.starts_with("magnet:")
 }
 
 fn respond(mut stream: TcpStream, code: u16, body: &str) -> std::io::Result<()> {
@@ -170,12 +173,20 @@ fn respond(mut stream: TcpStream, code: u16, body: &str) -> std::io::Result<()> 
         503 => "Service Unavailable",
         _ => "OK",
     };
-    // CORS abierto: el receptor solo escucha en localhost y solo encola URLs
+    // CORS abierto: el receptor solo escucha en localhost y solo encola URLs.
+    //
+    // `Access-Control-Allow-Private-Network` es imprescindible: Chrome aplica
+    // "Private Network Access", que bloquea las peticiones de una web pública
+    // (tiktok.com) hacia una dirección de red local (127.0.0.1) salvo que el
+    // servidor lo autorice explícitamente en el preflight. Sin esta cabecera el
+    // script capturaba los enlaces pero no podía entregárselos a la app.
     let resp = format!(
         "HTTP/1.1 {code} {reason}\r\n\
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: POST, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type\r\n\
+         Access-Control-Allow-Private-Network: true\r\n\
+         Access-Control-Max-Age: 600\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",

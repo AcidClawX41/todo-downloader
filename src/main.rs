@@ -40,33 +40,326 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 const URL_RE: &str = r#"https?://[^\s"'<>]+"#;
 const MAX_RETRIES: u32 = 3;
 
-// ---------- Paleta (dark, acento TikTok) ----------
-const BG: Color32 = Color32::from_rgb(15, 17, 21); // fondo ventana
-const PANEL: Color32 = Color32::from_rgb(21, 24, 31); // sidebar
-const CARD: Color32 = Color32::from_rgb(30, 34, 45); // tarjetas / inputs
-const CARD_HOVER: Color32 = Color32::from_rgb(38, 43, 57);
-const ACCENT: Color32 = Color32::from_rgb(254, 44, 85); // rosa TikTok
-const CYAN: Color32 = Color32::from_rgb(37, 244, 238); // cian TikTok
-const TEXT: Color32 = Color32::from_rgb(232, 234, 240);
-const MUTED: Color32 = Color32::from_rgb(138, 144, 160);
-const GREEN: Color32 = Color32::from_rgb(61, 220, 132);
-const AMBER: Color32 = Color32::from_rgb(255, 180, 84);
-const RED: Color32 = Color32::from_rgb(255, 84, 112);
+// ============================= Temas =============================
+//
+// Los colores no son constantes: se leen de una paleta intercambiable en
+// caliente, para poder ofrecer varias «skins». Se accede por funciones cortas
+// (bg(), card(), accent()…) que resuelven contra la paleta activa.
+
+/// Skin seleccionable por el usuario
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Theme {
+    /// Oscuro con acento rosa TikTok (el de siempre)
+    #[default]
+    Classic,
+    /// Gris pizarra, sin rosa: discreto para entornos de trabajo
+    Sober,
+    /// Rosa intenso, con halos difuminados de fondo y gloss rosa al pasar
+    HotPink,
+}
+
+impl Theme {
+    const ALL: [Theme; 3] = [Theme::Classic, Theme::Sober, Theme::HotPink];
+
+    /// Etiqueta traducida. Antes estaba escrita a fuego en español y no
+    /// respetaba el idioma elegido.
+    fn label(self, lang: Lang) -> &'static str {
+        match self {
+            Theme::Classic => t(lang, "theme.classic"),
+            Theme::Sober => t(lang, "theme.sober"),
+            Theme::HotPink => "Hot Pink", // nombre propio: igual en ambos idiomas
+        }
+    }
+
+    /// ¿Pinta halos difuminados de fondo?
+    fn has_glow(self) -> bool {
+        matches!(self, Theme::HotPink)
+    }
+
+    fn palette(self) -> Palette {
+        let rgb = Color32::from_rgb;
+        match self {
+            Theme::Classic => Palette {
+                bg: rgb(15, 17, 21),
+                panel: rgb(21, 24, 31),
+                card: rgb(30, 34, 45),
+                card_hover: rgb(38, 43, 57),
+                accent: rgb(254, 44, 85),
+                cyan: rgb(37, 244, 238),
+                text: rgb(232, 234, 240),
+                muted: rgb(138, 144, 160),
+                green: rgb(61, 220, 132),
+                amber: rgb(255, 180, 84),
+                red: rgb(255, 84, 112),
+            },
+            // Azul pizarra, acento sobrio: nada llama la atención
+            Theme::Sober => Palette {
+                bg: rgb(18, 20, 24),
+                panel: rgb(25, 28, 33),
+                card: rgb(34, 38, 44),
+                card_hover: rgb(45, 50, 58),
+                accent: rgb(96, 132, 178),
+                cyan: rgb(126, 176, 200),
+                text: rgb(226, 229, 234),
+                muted: rgb(139, 146, 158),
+                green: rgb(104, 176, 130),
+                amber: rgb(206, 168, 106),
+                red: rgb(203, 106, 116),
+            },
+            // Rosa por todas partes, sobre un fondo cálido oscuro
+            Theme::HotPink => Palette {
+                bg: rgb(22, 10, 20),
+                panel: rgb(32, 14, 29),
+                card: rgb(46, 20, 41),
+                card_hover: rgb(68, 28, 60),
+                accent: rgb(255, 45, 130),
+                cyan: rgb(255, 140, 200),
+                text: rgb(255, 236, 247),
+                muted: rgb(196, 148, 180),
+                green: rgb(94, 226, 158),
+                amber: rgb(255, 190, 120),
+                red: rgb(255, 96, 130),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Palette {
+    bg: Color32,
+    panel: Color32,
+    card: Color32,
+    card_hover: Color32,
+    accent: Color32,
+    cyan: Color32,
+    text: Color32,
+    muted: Color32,
+    green: Color32,
+    amber: Color32,
+    red: Color32,
+}
+
+/// Paleta activa. RwLock porque solo se escribe al cambiar de tema; las
+/// lecturas por frame son miles pero baratísimas y sin contención.
+fn palette() -> &'static std::sync::RwLock<Palette> {
+    static P: std::sync::OnceLock<std::sync::RwLock<Palette>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::RwLock::new(Theme::Classic.palette()))
+}
+
+fn set_palette(theme: Theme) {
+    if let Ok(mut p) = palette().write() {
+        *p = theme.palette();
+    }
+}
+
+macro_rules! pal {
+    ($($fn_name:ident => $field:ident),* $(,)?) => {
+        $(
+            #[allow(non_snake_case)]
+            fn $fn_name() -> Color32 {
+                palette().read().map(|p| p.$field).unwrap_or(Color32::GRAY)
+            }
+        )*
+    };
+}
+
+pal! {
+    BG => bg, PANEL => panel, CARD => card, CARD_HOVER => card_hover,
+    ACCENT => accent, CYAN => cyan, TEXT => text, MUTED => muted,
+    GREEN => green, AMBER => amber, RED => red,
+}
 
 fn main() -> eframe::Result<()> {
+    // Enlace recibido por línea de comandos: al pulsar un magnet en el
+    // navegador, Windows lanza el programa con la URL como argumento.
+    // También acepta una ruta a un .torrent (arrastrar sobre el ejecutable).
+    let cli_link = std::env::args().nth(1).filter(|a| {
+        let l = a.to_ascii_lowercase();
+        l.starts_with("magnet:") || l.ends_with(".torrent")
+    });
+
+    // Si ya hay una instancia abierta, se le pasa el enlace por el receptor
+    // local y salimos: así el clic en un magnet no abre una segunda ventana.
+    if let Some(link) = &cli_link {
+        if forward_to_running_instance(link) {
+            return Ok(());
+        }
+    }
+
+    // Icono de la ventana (barra de título, Alt+Tab, barra de tareas).
+    // Es independiente del icono del .exe, que incrusta build.rs en Windows.
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1160.0, 700.0])
+        // Mínimo calculado para que la tabla nunca recorte la columna de acciones
+        .with_min_inner_size([1000.0, 520.0])
+        .with_title("Todo Downloader");
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1160.0, 700.0])
-            // Mínimo calculado para que la tabla nunca recorte la columna de acciones
-            .with_min_inner_size([1000.0, 520.0])
-            .with_title("Todo Downloader"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
         "todo-downloader-evg",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, cli_link)))),
     )
+}
+
+/// Decodifica el PNG del icono, incrustado en el binario en tiempo de compilación.
+/// Devuelve `None` si algo falla: la app arranca igual, solo sin icono propio.
+fn load_app_icon() -> Option<egui::IconData> {
+    const PNG: &[u8] = include_bytes!("../assets/icon.png");
+    let img = image::load_from_memory(PNG).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
+/// Registra (o quita) Todo Downloader como manejador de los enlaces `magnet:`.
+///
+/// Se escribe en HKEY_CURRENT_USER, así que **no hace falta ser administrador**
+/// y solo afecta a este usuario. Windows abre el programa registrado aquí
+/// cuando pulsas un magnet en el navegador, pasándole la URL como argumento.
+///
+/// Se usa `reg.exe` en vez de una dependencia del registro para no añadir otro
+/// crate por cuatro claves.
+#[cfg(windows)]
+fn set_magnet_handler(enable: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    const KEY: &str = r"HKCU\Software\Classes\magnet";
+
+    let run = |args: Vec<String>| -> Result<(), String> {
+        let out = std::process::Command::new("reg")
+            .args(&args)
+            .creation_flags(NO_WINDOW)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    };
+
+    if !enable {
+        // Quitar el registro: Windows vuelve al manejador anterior (qBittorrent…)
+        return run(vec!["delete".into(), KEY.into(), "/f".into()]);
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned();
+
+    // Estructura estándar de un protocolo: la clave, el marcador URL Protocol,
+    // y el comando con "%1" (la URL que pasa Windows).
+    run(vec!["add".into(), KEY.into(), "/ve".into(), "/d".into(), "URL:magnet".into(), "/f".into()])?;
+    run(vec!["add".into(), KEY.into(), "/v".into(), "URL Protocol".into(), "/d".into(), String::new(), "/f".into()])?;
+    run(vec![
+        "add".into(),
+        format!(r"{KEY}\shell\open\command"),
+        "/ve".into(),
+        "/d".into(),
+        format!("\"{exe}\" \"%1\""),
+        "/f".into(),
+    ])?;
+
+    // --- Registro como aplicación con capacidades ---
+    //
+    // Windows 10/11 protege el programa por defecto con `UserChoice`, una clave
+    // firmada con un hash que NINGUNA aplicación puede escribir (es a propósito,
+    // para impedir secuestros de asociaciones). Por eso lo anterior no basta si
+    // ya hay otro cliente puesto por defecto.
+    //
+    // La vía legítima es publicar las «capacidades» de la app para que aparezca
+    // en Configuración → Aplicaciones predeterminadas y sea el USUARIO quien la
+    // elija. Eso es lo que se registra aquí.
+    const CAP: &str = r"HKCU\Software\TodoDownloader\Capabilities";
+    run(vec!["add".into(), CAP.into(), "/v".into(), "ApplicationName".into(), "/d".into(), "Todo Downloader".into(), "/f".into()])?;
+    run(vec![
+        "add".into(), CAP.into(), "/v".into(), "ApplicationDescription".into(),
+        "/d".into(), "Lightweight download manager with BitTorrent".into(), "/f".into(),
+    ])?;
+    run(vec![
+        "add".into(), format!(r"{CAP}\URLAssociations"), "/v".into(), "magnet".into(),
+        "/d".into(), "TodoDownloader.Magnet".into(), "/f".into(),
+    ])?;
+    // ProgID al que apunta la asociación
+    const PROGID: &str = r"HKCU\Software\Classes\TodoDownloader.Magnet";
+    run(vec!["add".into(), PROGID.into(), "/ve".into(), "/d".into(), "Magnet Link".into(), "/f".into()])?;
+    run(vec![
+        "add".into(), format!(r"{PROGID}\shell\open\command"), "/ve".into(),
+        "/d".into(), format!("\"{exe}\" \"%1\""), "/f".into(),
+    ])?;
+    // Alta en el listado de aplicaciones registradas del sistema
+    run(vec![
+        "add".into(), r"HKCU\Software\RegisteredApplications".into(),
+        "/v".into(), "Todo Downloader".into(),
+        "/d".into(), r"Software\TodoDownloader\Capabilities".into(), "/f".into(),
+    ])?;
+    Ok(())
+}
+
+/// ¿Somos ya el manejador de magnet? (compara la ruta registrada con la nuestra)
+#[cfg(windows)]
+fn is_magnet_handler() -> bool {
+    use std::os::windows::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let exe = exe.to_string_lossy().to_ascii_lowercase();
+    let out = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Classes\magnet\shell\open\command", "/ve"])
+        .creation_flags(0x0800_0000)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .to_ascii_lowercase()
+            .contains(&exe),
+        _ => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn set_magnet_handler(_enable: bool) -> Result<(), String> {
+    Err("solo disponible en Windows".into())
+}
+
+#[cfg(not(windows))]
+fn is_magnet_handler() -> bool {
+    false
+}
+
+/// Intenta entregar el enlace a una instancia ya en marcha usando el receptor
+/// local (el mismo de Click'n'Load). Devuelve true si lo aceptó.
+///
+/// Se prueban los puertos habituales porque el receptor es configurable; con
+/// que uno responda, la instancia viva se queda el enlace.
+fn forward_to_running_instance(link: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    // El puerto por defecto primero; los siguientes cubren cambios manuales.
+    for port in [9777u16, 9778, 9779] {
+        let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) else { continue };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let body = serde_json::json!({ "items": [ { "url": link } ] }).to_string();
+        let req = format!(
+            "POST /add HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        if s.write_all(req.as_bytes()).is_err() {
+            continue;
+        }
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        if resp.starts_with("HTTP/1.1 200") {
+            return true;
+        }
+    }
+    false
 }
 
 // ============================= Modelo =============================
@@ -113,11 +406,11 @@ impl Status {
     }
     fn color(&self) -> Color32 {
         match self {
-            Status::Done => GREEN,
-            Status::Downloading | Status::Resolving => CYAN,
-            Status::Paused => AMBER,
-            Status::Error(_) => RED,
-            _ => MUTED,
+            Status::Done => GREEN(),
+            Status::Downloading | Status::Resolving => CYAN(),
+            Status::Paused => AMBER(),
+            Status::Error(_) => RED(),
+            _ => MUTED(),
         }
     }
     fn is_active(&self) -> bool {
@@ -207,6 +500,8 @@ struct ProfileEntry {
     title: String,
     url: String,
     is_image: bool,
+    /// Portada que devuelve yt-dlp; alimenta la miniatura de la cola
+    thumb: String,
 }
 
 /// Sitios que el LinkGrabber captura por defecto
@@ -453,6 +748,14 @@ struct Settings {
     cookies_browser: String,
     cookies_file: String,
     lang: Lang,
+    /// Skin de la interfaz
+    theme: Theme,
+    /// Ruta a una imagen de fondo para el panel principal (vacío = ninguna)
+    bg_image: String,
+    /// Intensidad del fondo, 0.0–1.0. Bajo por defecto para no estorbar
+    bg_opacity: f32,
+    /// Sigma del desenfoque gaussiano del fondo (0 = nítido)
+    bg_blur: f32,
     receiver_enabled: bool,
     receiver_port: u16,
     /// Carpeta de destino de los torrents (vacío = <dest>/Torrents)
@@ -476,6 +779,10 @@ impl Default for Settings {
             cookies_browser: "firefox".into(),
             cookies_file: String::new(),
             lang: Lang::detect(),
+            theme: Theme::default(),
+            bg_image: String::new(),
+            bg_opacity: 0.22,
+            bg_blur: 0.0,
             receiver_enabled: true,
             receiver_port: 9777,
             torrent_dir: String::new(),
@@ -634,10 +941,17 @@ struct App {
     torrent_speed: std::collections::HashMap<u64, (u64, Instant, f64)>,
     /// Ancla del desplazamiento automático con el botón central del ratón
     autoscroll: Option<egui::Pos2>,
+    /// Textura del fondo personalizado y ruta con la que se cargó
+    bg_texture: Option<egui::TextureHandle>,
+    bg_loaded_from: String,
+    /// Imagen original en memoria: permite re-difuminar sin releer del disco
+    bg_source: Option<image::DynamicImage>,
+    /// Marca que hay que regenerar la textura (cambió la ruta o el desenfoque)
+    bg_dirty: bool,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, cli_link: Option<String>) -> Self {
         let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
@@ -653,6 +967,8 @@ impl App {
         }
 
         load_cjk_font(&cc.egui_ctx);
+        // La paleta debe estar puesta ANTES de construir el estilo
+        set_palette(settings.theme);
         apply_theme(&cc.egui_ctx);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -695,7 +1011,7 @@ impl App {
         spawn_ffmpeg_check(tx.clone());
         spawn_cyberdrop_check(tx.clone());
 
-        Self {
+        let mut app = Self {
             rows: Vec::new(),
             next_id: 0,
             sem: Arc::new(Semaphore::new(settings.concurrency)),
@@ -742,7 +1058,18 @@ impl App {
             torrent_adding: false,
             torrent_speed: std::collections::HashMap::new(),
             autoscroll: None,
+            bg_texture: None,
+            bg_loaded_from: String::new(),
+            bg_source: None,
+            bg_dirty: false,
+        };
+
+        // Enlace recibido por línea de comandos (clic en un magnet del navegador)
+        if let Some(link) = cli_link {
+            app.view = View::Torrents;
+            app.add_torrent(link);
         }
+        app
     }
 
     /// Añade un magnet / URL .torrent / ruta local a la sesión BitTorrent,
@@ -839,7 +1166,7 @@ impl App {
         let painter =
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("__autoscroll")));
         painter.circle_filled(anchor, 16.0, Color32::from_black_alpha(170));
-        painter.circle_stroke(anchor, 16.0, Stroke::new(1.5f32, CYAN));
+        painter.circle_stroke(anchor, 16.0, Stroke::new(1.5f32, CYAN()));
         for dir in [-1.0f32, 1.0] {
             let base = anchor.y + dir * 4.0;
             painter.add(egui::Shape::convex_polygon(
@@ -848,7 +1175,7 @@ impl App {
                     egui::pos2(anchor.x - 4.5, base),
                     egui::pos2(anchor.x + 4.5, base),
                 ],
-                CYAN,
+                CYAN(),
                 Stroke::NONE,
             ));
         }
@@ -1141,6 +1468,18 @@ impl App {
                 }
                 Ev::Clipboard(links) => clip_batch.extend(links),
                 Ev::Received(items) => {
+                    // Los magnet van al motor BitTorrent, no a la cola HTTP.
+                    // Es la vía por la que llega un clic en un magnet cuando la
+                    // app ya estaba abierta (la lanza forward_to_running_instance).
+                    let (magnets, links): (Vec<_>, Vec<_>) = items
+                        .into_iter()
+                        .partition(|i| i.url.to_ascii_lowercase().starts_with("magnet:"));
+                    for m in magnets {
+                        self.view = View::Torrents;
+                        self.add_torrent(m.url);
+                    }
+                    let items = links;
+
                     let before = self.rows.len();
                     for it in &items {
                         self.add_url(&it.url, &it.author, &it.title, &it.page_url, &it.id, &it.thumb);
@@ -2210,12 +2549,30 @@ async fn analyze_profile(program: String, url: String, extra_args: Vec<String>, 
                             if t.is_empty() { g("id") } else { t }
                         };
                         let is_image = u.contains("/photo/") || u.contains("/note/");
+                        // Portada: yt-dlp la da como `thumbnail` suelto o como
+                        // lista `thumbnails[]`. Sin esto la cola salía sin
+                        // miniaturas aunque el análisis fuera perfecto.
+                        let thumb = {
+                            let direct = g("thumbnail");
+                            if !direct.is_empty() {
+                                direct
+                            } else {
+                                e.get("thumbnails")
+                                    .and_then(|t| t.as_array())
+                                    .and_then(|arr| arr.last())
+                                    .and_then(|t| t.get("url"))
+                                    .and_then(|u| u.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            }
+                        };
                         entries.push(ProfileEntry {
                             selected: true,
                             id: g("id"),
                             title,
                             url: u,
                             is_image,
+                            thumb,
                         });
                     };
                     if let Some(arr) = v.get("entries").and_then(|e| e.as_array()) {
@@ -2783,6 +3140,111 @@ fn load_cjk_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Carga una imagen de disco y la sube como textura de fondo.
+///
+/// Se reescala a 1920 px de ancho como máximo: un wallpaper 4K ocuparía ~33 MB
+/// de memoria de vídeo sin ninguna ganancia visual al ir difuminado y a baja
+/// opacidad detrás de la interfaz.
+fn load_bg_source(path: &str) -> Option<image::DynamicImage> {
+    let img = image::open(path).ok()?;
+    Some(if img.width() > 1920 {
+        img.resize(1920, u32::MAX, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    })
+}
+
+/// Genera la textura de fondo aplicando desenfoque gaussiano si procede.
+///
+/// Truco de rendimiento: un desenfoque fuerte **destruye el detalle fino**, así
+/// que no tiene sentido calcularlo a 1920 px (sería lentísimo, O(n) por píxel).
+/// Se reduce antes a 720 px y la GPU lo reescala con filtrado lineal: mismo
+/// resultado visual, una fracción del coste.
+fn make_bg_texture(
+    ctx: &egui::Context,
+    src: &image::DynamicImage,
+    blur: f32,
+) -> Option<egui::TextureHandle> {
+    let rgba = if blur > 0.1 {
+        let small = src
+            .resize(720, u32::MAX, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        image::imageops::blur(&small, blur)
+    } else {
+        src.to_rgba8()
+    };
+    let (w, h) = rgba.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+    Some(ctx.load_texture("bg_image", color, egui::TextureOptions::LINEAR))
+}
+
+/// Pinta la imagen de fondo cubriendo el rectángulo dado, **sin deformarla**.
+///
+/// Emula el `background-size: cover` de CSS: se recorta por el eje que sobra y
+/// se centra, así una foto apaisada en una ventana alta no sale estirada.
+fn paint_bg_image(ui: &egui::Ui, tex: &egui::TextureHandle, rect: egui::Rect, opacity: f32) {
+    if opacity <= 0.001 || rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
+    }
+    let ts = tex.size_vec2();
+    let img_ar = ts.x / ts.y.max(1.0);
+    let rect_ar = rect.width() / rect.height().max(1.0);
+
+    // UV recortado y centrado sobre el eje sobrante
+    let uv = if img_ar > rect_ar {
+        let frac = rect_ar / img_ar; // porción del ancho que se usa
+        egui::Rect::from_min_max(
+            egui::pos2((1.0 - frac) * 0.5, 0.0),
+            egui::pos2((1.0 + frac) * 0.5, 1.0),
+        )
+    } else {
+        let frac = img_ar / rect_ar; // porción del alto que se usa
+        egui::Rect::from_min_max(
+            egui::pos2(0.0, (1.0 - frac) * 0.5),
+            egui::pos2(1.0, (1.0 + frac) * 0.5),
+        )
+    };
+
+    // El tint blanco con alfa actúa como opacidad global de la imagen
+    let tint = Color32::from_white_alpha((opacity.clamp(0.0, 1.0) * 255.0) as u8);
+    ui.painter().image(tex.id(), rect, uv, tint);
+}
+
+/// Halos difuminados de fondo, al estilo de un desenfoque gaussiano.
+///
+/// egui no tiene desenfoque, así que se imita apilando círculos concéntricos
+/// con muy poca opacidad cada uno: al acumularse dan una caída suave del
+/// centro al borde, indistinguible de un degradado radial difuminado.
+fn paint_bg_glow(ctx: &egui::Context, theme: Theme) {
+    if !theme.has_glow() {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let r = ctx.screen_rect();
+    let accent = ACCENT();
+    let cyan = CYAN();
+
+    // (posición relativa, radio relativo al ancho, color)
+    let blobs = [
+        (egui::pos2(r.left() + r.width() * 0.18, r.top() + r.height() * 0.12), 0.42f32, accent),
+        (egui::pos2(r.right() - r.width() * 0.08, r.bottom() - r.height() * 0.10), 0.38, cyan),
+        (egui::pos2(r.center().x, r.bottom() + r.height() * 0.06), 0.30, accent),
+    ];
+
+    const STEPS: usize = 26;
+    for (pos, rel, color) in blobs {
+        let radius = r.width() * rel;
+        for i in 0..STEPS {
+            let t = i as f32 / STEPS as f32;
+            // Capas de fuera hacia dentro; la opacidad se acumula en el centro
+            painter.circle_filled(pos, radius * (1.0 - t), color.gamma_multiply(0.014));
+        }
+    }
+}
+
 fn apply_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
 
@@ -2803,45 +3265,45 @@ fn apply_theme(ctx: &egui::Context) {
     style.animation_time = 0.18; // transiciones suaves en hover
 
     let mut v = egui::Visuals::dark();
-    v.override_text_color = Some(TEXT);
-    v.panel_fill = BG;
-    v.window_fill = PANEL;
+    v.override_text_color = Some(TEXT());
+    v.panel_fill = BG();
+    v.window_fill = PANEL();
     v.window_rounding = Rounding::same(12.0);
-    v.window_stroke = Stroke::new(1.0f32,CARD_HOVER);
-    v.extreme_bg_color = CARD; // fondo de TextEdit / ProgressBar
+    v.window_stroke = Stroke::new(1.0f32,CARD_HOVER());
+    v.extreme_bg_color = CARD(); // fondo de TextEdit / ProgressBar
     v.faint_bg_color = Color32::from_rgb(25, 28, 36); // striped
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0f32,ACCENT);
+    v.selection.bg_fill = ACCENT().gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0f32,ACCENT());
     v.slider_trailing_fill = true;
-    v.hyperlink_color = CYAN;
+    v.hyperlink_color = CYAN();
 
     let r = Rounding::same(8.0);
     v.widgets.noninteractive.rounding = r;
-    v.widgets.noninteractive.bg_fill = CARD;
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0f32,TEXT);
+    v.widgets.noninteractive.bg_fill = CARD();
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0f32,TEXT());
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0f32,Color32::from_rgb(40, 45, 58));
 
     v.widgets.inactive.rounding = r;
-    v.widgets.inactive.weak_bg_fill = CARD; // relleno de botones
-    v.widgets.inactive.bg_fill = CARD;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0f32,TEXT);
+    v.widgets.inactive.weak_bg_fill = CARD(); // relleno de botones
+    v.widgets.inactive.bg_fill = CARD();
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0f32,TEXT());
     v.widgets.inactive.bg_stroke = Stroke::NONE;
 
     v.widgets.hovered.rounding = r;
-    v.widgets.hovered.weak_bg_fill = CARD_HOVER;
-    v.widgets.hovered.bg_fill = CARD_HOVER;
+    v.widgets.hovered.weak_bg_fill = CARD_HOVER();
+    v.widgets.hovered.bg_fill = CARD_HOVER();
     v.widgets.hovered.fg_stroke = Stroke::new(1.2f32,Color32::WHITE);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0f32,ACCENT.gamma_multiply(0.6));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0f32,ACCENT().gamma_multiply(0.6));
     v.widgets.hovered.expansion = 1.6; // el botón "crece" al pasar el ratón
 
     v.widgets.active.rounding = r;
-    v.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.5);
-    v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.5);
+    v.widgets.active.weak_bg_fill = ACCENT().gamma_multiply(0.5);
+    v.widgets.active.bg_fill = ACCENT().gamma_multiply(0.5);
     v.widgets.active.fg_stroke = Stroke::new(1.2f32,Color32::WHITE);
 
     v.widgets.open.rounding = r;
-    v.widgets.open.weak_bg_fill = CARD_HOVER;
-    v.widgets.open.bg_fill = CARD_HOVER;
+    v.widgets.open.weak_bg_fill = CARD_HOVER();
+    v.widgets.open.bg_fill = CARD_HOVER();
 
     style.visuals = v;
     ctx.set_style(style);
@@ -2851,7 +3313,7 @@ fn apply_theme(ctx: &egui::Context) {
 
 fn card_frame() -> egui::Frame {
     egui::Frame::none()
-        .fill(CARD)
+        .fill(CARD())
         .rounding(Rounding::same(12.0))
         .inner_margin(Margin::symmetric(16.0, 12.0))
 }
@@ -2861,7 +3323,7 @@ fn stat_card(ui: &mut egui::Ui, value: String, label: &str, color: Color32) {
         ui.set_min_width(120.0);
         ui.vertical(|ui| {
             ui.label(RichText::new(value).size(22.0).strong().color(color));
-            ui.label(RichText::new(label).size(11.5).color(MUTED));
+            ui.label(RichText::new(label).size(11.5).color(MUTED()));
         });
     });
 }
@@ -2886,14 +3348,14 @@ fn gloss_paint(ui: &egui::Ui, resp: &egui::Response) {
     painter.rect_stroke(
         rect,
         Rounding::same(8.0),
-        Stroke::new(1.0f32, ACCENT.gamma_multiply(0.55 * t)),
+        Stroke::new(1.0f32, ACCENT().gamma_multiply(0.55 * t)),
     );
 }
 
 fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let resp = ui.add(
         egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
-            .fill(ACCENT)
+            .fill(ACCENT())
             .rounding(Rounding::same(8.0)),
     );
     gloss_paint(ui, &resp);
@@ -2927,10 +3389,10 @@ fn nav_item(ui: &mut egui::Ui, selected: bool, icon: &str, label: &str, badge: u
     let rt = if selected {
         RichText::new(text).color(Color32::WHITE).strong()
     } else {
-        RichText::new(text).color(MUTED)
+        RichText::new(text).color(MUTED())
     };
     let btn = egui::Button::new(rt)
-        .fill(if selected { ACCENT.gamma_multiply(0.25) } else { Color32::TRANSPARENT })
+        .fill(if selected { ACCENT().gamma_multiply(0.25) } else { Color32::TRANSPARENT })
         .rounding(Rounding::same(8.0))
         .min_size(egui::vec2(176.0, 36.0));
     let resp = ui.add(btn);
@@ -2947,6 +3409,28 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        // Halos difuminados de fondo (solo en los temas que los usan)
+        paint_bg_glow(ctx, self.settings.theme);
+
+        // Cargar la imagen de fondo cuando cambie la ruta elegida
+        if self.bg_loaded_from != self.settings.bg_image {
+            self.bg_loaded_from = self.settings.bg_image.clone();
+            self.bg_source = if self.settings.bg_image.trim().is_empty() {
+                None
+            } else {
+                load_bg_source(&self.settings.bg_image)
+            };
+            self.bg_dirty = true;
+        }
+        // Regenerar la textura solo cuando hace falta (cambio de imagen o de
+        // desenfoque al soltar el deslizador), nunca en cada frame.
+        if self.bg_dirty {
+            self.bg_dirty = false;
+            self.bg_texture = self
+                .bg_source
+                .as_ref()
+                .and_then(|s| make_bg_texture(ctx, s, self.settings.bg_blur));
+        }
         // Antes de pintar: el delta inyectado debe llegar al área de scroll
         self.handle_autoscroll(ctx);
 
@@ -2982,13 +3466,13 @@ impl eframe::App for App {
             .resizable(false)
             .frame(
                 egui::Frame::none()
-                    .fill(PANEL)
+                    .fill(PANEL())
                     .inner_margin(Margin::symmetric(16.0, 18.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     egui::Frame::none()
-                        .fill(ACCENT)
+                        .fill(ACCENT())
                         .rounding(Rounding::same(10.0))
                         .inner_margin(Margin::symmetric(9.0, 5.0))
                         .show(ui, |ui| {
@@ -2997,7 +3481,7 @@ impl eframe::App for App {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         ui.label(RichText::new("Todo").size(16.0).strong().color(Color32::WHITE));
-                        ui.label(RichText::new("Downloader").size(16.0).strong().color(CYAN));
+                        ui.label(RichText::new("Downloader").size(16.0).strong().color(CYAN()));
                     });
                 });
                 ui.add_space(24.0);
@@ -3027,42 +3511,42 @@ impl eframe::App for App {
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("By Eric V. Gramunt").size(11.5).color(MUTED));
-                    ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
+                    ui.label(RichText::new("By Eric V. Gramunt").size(11.5).color(MUTED()));
+                    ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED()));
                     ui.add_space(6.0);
                     match self.ytdlp_ok {
-                        Some(true) => ui.label(RichText::new(t(lang, "side.ytdlp_active")).size(11.5).color(GREEN)),
+                        Some(true) => ui.label(RichText::new(t(lang, "side.ytdlp_active")).size(11.5).color(GREEN())),
                         Some(false) => ui
-                            .label(RichText::new(t(lang, "side.ytdlp_missing")).size(11.5).color(AMBER))
+                            .label(RichText::new(t(lang, "side.ytdlp_missing")).size(11.5).color(AMBER()))
                             .on_hover_text(t(lang, "side.ytdlp_tip")),
-                        None => ui.label(RichText::new("● yt-dlp…").size(11.5).color(MUTED)),
+                        None => ui.label(RichText::new("● yt-dlp…").size(11.5).color(MUTED())),
                     };
                     if self.galdl_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.galdl_active")).size(11.5).color(GREEN));
+                        ui.label(RichText::new(t(lang, "side.galdl_active")).size(11.5).color(GREEN()));
                     } else {
-                        ui.label(RichText::new(t(lang, "side.galdl_missing")).size(11.5).color(AMBER))
+                        ui.label(RichText::new(t(lang, "side.galdl_missing")).size(11.5).color(AMBER()))
                             .on_hover_text(t(lang, "side.galdl_tip"));
                     }
                     if self.ffmpeg_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.ffmpeg_active")).size(11.5).color(GREEN));
+                        ui.label(RichText::new(t(lang, "side.ffmpeg_active")).size(11.5).color(GREEN()));
                     } else {
-                        ui.label(RichText::new(t(lang, "side.ffmpeg_missing")).size(11.5).color(AMBER))
+                        ui.label(RichText::new(t(lang, "side.ffmpeg_missing")).size(11.5).color(AMBER()))
                             .on_hover_text(t(lang, "side.ffmpeg_tip"));
                     }
                     // cyberdrop-dl es opcional: solo se anuncia si está presente
                     if self.cyberdrop_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.cyberdrop_active")).size(11.5).color(GREEN));
+                        ui.label(RichText::new(t(lang, "side.cyberdrop_active")).size(11.5).color(GREEN()));
                     }
                     if self.settings.clipboard_watch {
-                        ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN));
+                        ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN()));
                     }
                     // Estado real de las cookies: la app las desactiva sola si
                     // resultan ilegibles, y sin este aviso no había forma de
                     // saber que se estaba descargando sin sesión.
                     if !cookie_args(&self.settings).is_empty() {
-                        ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN));
+                        ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN()));
                     } else {
-                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED));
+                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()));
                     }
                 });
             });
@@ -3071,10 +3555,18 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(BG)
+                    .fill(BG())
                     .inner_margin(Margin::symmetric(22.0, 18.0)),
             )
             .show(ctx, |ui| {
+                // Fondo personalizado: se pinta lo primero, así queda DETRÁS de
+                // todo el contenido. Solo aquí; la barra lateral sigue sólida
+                // para que el menú se lea siempre.
+                if let Some(tex) = &self.bg_texture {
+                    let full = ui.max_rect().expand2(egui::vec2(22.0, 18.0)); // compensa el margen
+                    paint_bg_image(ui, tex, full, self.settings.bg_opacity);
+                }
+
                 match self.view {
                     // Vistas de formulario: con scroll vertical para que nada quede tapado
                     View::Settings => {
@@ -3107,12 +3599,12 @@ impl eframe::App for App {
                             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -18.0])
                             .show(ctx, |ui| {
                                 egui::Frame::none()
-                                    .fill(CARD_HOVER)
+                                    .fill(CARD_HOVER())
                                     .rounding(Rounding::same(10.0))
                                     .inner_margin(Margin::symmetric(16.0, 9.0))
-                                    .stroke(Stroke::new(1.0f32,ACCENT.gamma_multiply(0.5)))
+                                    .stroke(Stroke::new(1.0f32,ACCENT().gamma_multiply(0.5)))
                                     .show(ui, |ui| {
-                                        ui.label(RichText::new(&self.toast).color(TEXT));
+                                        ui.label(RichText::new(&self.toast).color(TEXT()));
                                     });
                             });
                     }
@@ -3129,7 +3621,7 @@ impl eframe::App for App {
                 .default_size([560.0, 300.0])
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    ui.label(RichText::new(t(lang, "add.hint")).color(MUTED));
+                    ui.label(RichText::new(t(lang, "add.hint")).color(MUTED()));
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.add_text)
@@ -3173,14 +3665,14 @@ impl App {
         let lg = self.settings.lang;
         ui.horizontal(|ui| {
             stat_card(ui, format!("{}", self.rows.len()), t(lg, "stat.total"), Color32::WHITE);
-            stat_card(ui, format!("{n_active}"), t(lg, "stat.active"), CYAN);
-            stat_card(ui, format!("{n_done}"), t(lg, "stat.completed"), GREEN);
-            stat_card(ui, format!("{n_failed}"), t(lg, "stat.errors"), if n_failed > 0 { RED } else { MUTED });
+            stat_card(ui, format!("{n_active}"), t(lg, "stat.active"), CYAN());
+            stat_card(ui, format!("{n_done}"), t(lg, "stat.completed"), GREEN());
+            stat_card(ui, format!("{n_failed}"), t(lg, "stat.errors"), if n_failed > 0 { RED() } else { MUTED() });
             stat_card(
                 ui,
                 if global_speed > 0.0 { format!("{}/s", fmt_size(global_speed)) } else { "—".into() },
                 t(lg, "stat.speed"),
-                ACCENT,
+                ACCENT(),
             );
         });
         ui.add_space(14.0);
@@ -3271,7 +3763,7 @@ impl App {
                 };
                 ui.label(RichText::new(icon).size(42.0));
                 ui.add_space(6.0);
-                ui.label(RichText::new(msg).size(15.0).color(MUTED));
+                ui.label(RichText::new(msg).size(15.0).color(MUTED()));
             });
             return;
         }
@@ -3289,7 +3781,7 @@ impl App {
         // Margen derecho reducido: deja hueco a la barra de scroll para que no
         // se coma la última columna (los botones de acción) al estrechar la ventana.
         egui::Frame::none()
-            .fill(CARD)
+            .fill(CARD())
             .rounding(Rounding::same(12.0))
             .inner_margin(Margin {
                 left: 16.0,
@@ -3321,7 +3813,7 @@ impl App {
                         for key in ["col.file", "col.size", "col.progress", "col.speed", "col.status", ""] {
                             h.col(|ui| {
                                 let txt = if key.is_empty() { "" } else { t(lang, key) };
-                                ui.label(RichText::new(txt).size(11.0).color(MUTED).strong());
+                                ui.label(RichText::new(txt).size(11.0).color(MUTED()).strong());
                             });
                         }
                     })
@@ -3356,7 +3848,7 @@ impl App {
                                         thumb_tx.clone(),
                                     ));
                                 }
-                                ui.label(RichText::new(&r.filename).color(TEXT))
+                                ui.label(RichText::new(&r.filename).color(TEXT()))
                                     .on_hover_text(&r.url);
                             });
                             row.col(|ui| {
@@ -3368,7 +3860,7 @@ impl App {
                                 } else {
                                     "—".into()
                                 };
-                                ui.label(RichText::new(txt).color(MUTED));
+                                ui.label(RichText::new(txt).color(MUTED()));
                             });
                             row.col(|ui| {
                                 let frac = if r.size > 0 {
@@ -3380,7 +3872,7 @@ impl App {
                                 };
                                 ui.add(
                                     egui::ProgressBar::new(frac)
-                                        .fill(if r.status == Status::Done { GREEN } else { ACCENT })
+                                        .fill(if r.status == Status::Done { GREEN() } else { ACCENT() })
                                         .show_percentage(),
                                 );
                             });
@@ -3391,7 +3883,7 @@ impl App {
                                     } else {
                                         "—".into()
                                     })
-                                    .color(CYAN),
+                                    .color(CYAN()),
                                 );
                             });
                             row.col(|ui| {
@@ -3473,12 +3965,12 @@ impl App {
         let lang = self.settings.lang;
         ui.label(RichText::new(t(lang, "profile.title")).size(24.0).strong().color(Color32::WHITE));
         ui.add_space(4.0);
-        ui.label(RichText::new(t(lang, "profile.subtitle")).color(MUTED));
+        ui.label(RichText::new(t(lang, "profile.subtitle")).color(MUTED()));
         ui.add_space(14.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(720.0));
-            ui.label(RichText::new(t(lang, "profile.url_label")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "profile.url_label")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -3496,7 +3988,7 @@ impl App {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "profile.want")).color(MUTED));
+                ui.label(RichText::new(t(lang, "profile.want")).color(MUTED()));
                 ui.checkbox(&mut self.profile_want_videos, t(lang, "profile.videos"));
                 ui.checkbox(&mut self.profile_want_images, t(lang, "profile.images"));
             });
@@ -3505,15 +3997,15 @@ impl App {
                 t(lang, "profile.cookies_inline"),
             );
             if is_douyin_profile(&self.profile_url) {
-                ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED));
+                ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED()));
             } else if is_gallery_site(&self.profile_url) {
-                ui.label(RichText::new(t(lang, "profile.gallery_note")).size(11.5).color(AMBER));
+                ui.label(RichText::new(t(lang, "profile.gallery_note")).size(11.5).color(AMBER()));
             }
             ui.add_space(8.0);
             if self.profile_analyzing {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new(t(lang, "profile.analyzing")).color(CYAN));
+                    ui.label(RichText::new(t(lang, "profile.analyzing")).color(CYAN()));
                 });
             } else if primary_button(ui, t(lang, "btn.analyze")).clicked() {
                 let url = self.profile_url.trim().to_string();
@@ -3575,6 +4067,12 @@ impl App {
             let n_vid = self.profile_entries.iter().filter(|e| !e.is_image).count();
             let n_img = self.profile_entries.len() - n_vid;
 
+            // Acciones de borrado, diferidas: modificar la lista mientras se
+            // pinta rompería los índices de `visible`.
+            let mut clear_all = false;
+            let mut remove_selected = false;
+            let mut drop_one: Option<usize> = None;
+
             card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width().min(720.0));
                 ui.horizontal(|ui| {
@@ -3583,6 +4081,14 @@ impl App {
                             .strong(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Vaciar la lista entera (distinto de «Ninguno», que solo desmarca)
+                        if soft_button(ui, t(lang, "btn.clear_list")).clicked() {
+                            clear_all = true;
+                        }
+                        // Quitar de la lista lo que esté marcado
+                        if selected > 0 && soft_button(ui, t(lang, "btn.remove_selected")).clicked() {
+                            remove_selected = true;
+                        }
                         if soft_button(ui, t(lang, "btn.none")).clicked() {
                             for e in &mut self.profile_entries {
                                 e.selected = false;
@@ -3603,8 +4109,14 @@ impl App {
                             ui.checkbox(&mut e.selected, "");
                             ui.label(if e.is_image { "🖼" } else { "🎬" });
                             let title: String = e.title.chars().take(64).collect();
-                            ui.label(RichText::new(title).color(TEXT)).on_hover_text(&e.url);
-                            ui.label(RichText::new(&e.id).size(11.0).color(MUTED));
+                            ui.label(RichText::new(title).color(TEXT())).on_hover_text(&e.url);
+                            ui.label(RichText::new(&e.id).size(11.0).color(MUTED()));
+                            // Papelera por fila, alineada a la derecha
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("🗑").on_hover_text(t(lang, "tip.remove")).clicked() {
+                                    drop_one = Some(i);
+                                }
+                            });
                         });
                     }
                 });
@@ -3616,22 +4128,38 @@ impl App {
                             .map(|c| c[1].to_string())
                             .unwrap_or_default()
                     };
-                    let to_add: Vec<(String, String, String)> = visible
+                    let to_add: Vec<(String, String, String, String)> = visible
                         .iter()
                         .filter(|&&i| self.profile_entries[i].selected)
                         .map(|&i| {
                             let e = &self.profile_entries[i];
-                            (e.url.clone(), e.title.clone(), e.id.clone())
+                            (e.url.clone(), e.title.clone(), e.id.clone(), e.thumb.clone())
                         })
                         .collect();
                     let n = to_add.len();
-                    for (url, title, id) in to_add {
-                        self.add_url(&url, &author, &title, &url, &id, "");
+                    for (url, title, id, thumb) in to_add {
+                        self.add_url(&url, &author, &title, &url, &id, &thumb);
                     }
                     self.toast(i18n::added_to_queue(lang, n));
                     self.view = View::Downloads;
                 }
             });
+
+            // Aplicar los borrados fuera del pintado de la lista
+            if clear_all {
+                let n = self.profile_entries.len();
+                self.profile_entries.clear();
+                self.toast(i18n::list_cleared(lang, n));
+            } else if remove_selected {
+                let before = self.profile_entries.len();
+                self.profile_entries.retain(|e| !e.selected);
+                let n = before - self.profile_entries.len();
+                self.toast(i18n::list_cleared(lang, n));
+            } else if let Some(i) = drop_one {
+                if i < self.profile_entries.len() {
+                    self.profile_entries.remove(i);
+                }
+            }
         }
     }
 
@@ -3641,7 +4169,7 @@ impl App {
         let lang = self.settings.lang;
         ui.label(RichText::new(t(lang, "cap.title")).size(24.0).strong().color(Color32::WHITE));
         ui.add_space(4.0);
-        ui.label(RichText::new(t(lang, "cap.subtitle")).color(MUTED));
+        ui.label(RichText::new(t(lang, "cap.subtitle")).color(MUTED()));
         ui.add_space(14.0);
 
         // Estado del receptor
@@ -3649,13 +4177,13 @@ impl App {
             ui.set_width(ui.available_width().min(760.0));
             ui.horizontal(|ui| {
                 if self.settings.receiver_enabled {
-                    ui.label(RichText::new(t(lang, "cap.listening")).color(GREEN));
+                    ui.label(RichText::new(t(lang, "cap.listening")).color(GREEN()));
                     ui.label(
                         RichText::new(format!("127.0.0.1:{}", self.settings.receiver_port))
-                            .color(CYAN),
+                            .color(CYAN()),
                     );
                 } else {
-                    ui.label(RichText::new(t(lang, "cap.off")).color(AMBER));
+                    ui.label(RichText::new(t(lang, "cap.off")).color(AMBER()));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let chk = ui.checkbox(&mut self.settings.receiver_enabled, t(lang, "cap.enable"));
@@ -3665,22 +4193,22 @@ impl App {
                     }
                 });
             });
-            ui.label(RichText::new(t(lang, "cap.note_restart")).size(11.5).color(MUTED));
+            ui.label(RichText::new(t(lang, "cap.note_restart")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
         // Selector de sitio + pasos
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
-            ui.label(RichText::new(t(lang, "cap.site")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "cap.site")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 for (i, name) in ["TikTok", "Douyin"].iter().enumerate() {
                     let sel = self.capture_site == i;
                     let btn = egui::Button::new(
-                        RichText::new(*name).color(if sel { Color32::WHITE } else { MUTED }),
+                        RichText::new(*name).color(if sel { Color32::WHITE } else { MUTED() }),
                     )
-                    .fill(if sel { ACCENT } else { CARD_HOVER })
+                    .fill(if sel { ACCENT() } else { CARD_HOVER() })
                     .rounding(Rounding::same(8.0));
                     let r = ui.add(btn);
                     gloss_paint(ui, &r);
@@ -3726,7 +4254,7 @@ impl App {
         // Vista previa del script
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
-            ui.label(RichText::new(t(lang, "cap.preview")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "cap.preview")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             let script = if self.capture_site == 0 {
                 scripts::tiktok(self.settings.receiver_port)
@@ -3754,13 +4282,13 @@ impl App {
         let lang = self.settings.lang;
         ui.label(RichText::new(t(lang, "torrent.title")).size(24.0).strong().color(Color32::WHITE));
         ui.add_space(4.0);
-        ui.label(RichText::new(t(lang, "torrent.subtitle")).color(MUTED));
+        ui.label(RichText::new(t(lang, "torrent.subtitle")).color(MUTED()));
         ui.add_space(14.0);
 
         // Alta de torrent
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
-            ui.label(RichText::new(t(lang, "torrent.add_label")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "torrent.add_label")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -3785,24 +4313,24 @@ impl App {
             if self.torrent_adding {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new(t(lang, "torrent.adding")).color(CYAN));
+                    ui.label(RichText::new(t(lang, "torrent.adding")).color(CYAN()));
                 });
             } else if primary_button(ui, t(lang, "torrent.add_btn")).clicked() {
                 let src = std::mem::take(&mut self.torrent_input);
                 self.add_torrent(src);
             }
-            ui.label(RichText::new(t(lang, "torrent.legal")).size(11.0).color(AMBER));
+            ui.label(RichText::new(t(lang, "torrent.legal")).size(11.0).color(AMBER()));
         });
         ui.add_space(12.0);
 
         // Ajustes (carpeta + velocidad) plegados por defecto: no saturan y
         // quedan a un clic cuando hacen falta.
         let session_live = self.torrent_client.is_some();
-        egui::CollapsingHeader::new(RichText::new(t(lang, "torrent.options")).size(12.5).color(MUTED))
+        egui::CollapsingHeader::new(RichText::new(t(lang, "torrent.options")).size(12.5).color(MUTED()))
             .id_source("torrent_opts")
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.label(RichText::new(t(lang, "torrent.folder_label")).size(11.0).color(MUTED).strong());
+                ui.label(RichText::new(t(lang, "torrent.folder_label")).size(11.0).color(MUTED()).strong());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let shown = self.settings.torrent_folder().to_string_lossy().into_owned();
@@ -3821,15 +4349,15 @@ impl App {
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("↓ {}", t(lang, "torrent.down_limit"))).size(12.0).color(MUTED));
+                    ui.label(RichText::new(format!("↓ {}", t(lang, "torrent.down_limit"))).size(12.0).color(MUTED()));
                     ui.add(egui::DragValue::new(&mut self.settings.torrent_down_kbps).suffix(" KiB/s").range(0..=1_000_000));
                     ui.add_space(12.0);
-                    ui.label(RichText::new(format!("↑ {}", t(lang, "torrent.up_limit"))).size(12.0).color(MUTED));
+                    ui.label(RichText::new(format!("↑ {}", t(lang, "torrent.up_limit"))).size(12.0).color(MUTED()));
                     ui.add(egui::DragValue::new(&mut self.settings.torrent_up_kbps).suffix(" KiB/s").range(0..=1_000_000));
-                    ui.label(RichText::new(t(lang, "torrent.limit_zero")).size(11.0).color(MUTED));
+                    ui.label(RichText::new(t(lang, "torrent.limit_zero")).size(11.0).color(MUTED()));
                 });
                 if session_live && (self.settings.torrent_down_kbps > 0 || self.settings.torrent_up_kbps > 0) {
-                    ui.label(RichText::new(t(lang, "torrent.limit_restart")).size(11.0).color(AMBER));
+                    ui.label(RichText::new(t(lang, "torrent.limit_restart")).size(11.0).color(AMBER()));
                 }
             });
         ui.add_space(10.0);
@@ -3839,7 +4367,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("🌀").size(42.0));
                 ui.add_space(6.0);
-                ui.label(RichText::new(t(lang, "torrent.empty")).size(15.0).color(MUTED));
+                ui.label(RichText::new(t(lang, "torrent.empty")).size(15.0).color(MUTED()));
             });
             return;
         }
@@ -3886,17 +4414,17 @@ impl App {
             };
 
             egui::Frame::none()
-                .fill(CARD)
+                .fill(CARD())
                 .rounding(Rounding::same(12.0))
                 .inner_margin(Margin::symmetric(16.0, 12.0))
-                .stroke(Stroke::new(1.0f32, CARD_HOVER))
+                .stroke(Stroke::new(1.0f32, CARD_HOVER()))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width().min(880.0));
 
                     // Cabecera: nombre + acciones a la derecha
                     ui.horizontal(|ui| {
                         let name: String = h.display_name().chars().take(72).collect();
-                        ui.label(RichText::new(name).size(14.0).color(TEXT).strong());
+                        ui.label(RichText::new(name).size(14.0).color(TEXT()).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("🗑").on_hover_text(t(lang, "torrent.remove")).clicked() {
                                 acts.push(TAct::Remove(idx, false));
@@ -3915,7 +4443,7 @@ impl App {
                                 RichText::new(format!("{:.0}%", snap.progress * 100.0))
                                     .size(13.0)
                                     .strong()
-                                    .color(if snap.finished { GREEN } else { CYAN }),
+                                    .color(if snap.finished { GREEN() } else { CYAN() }),
                             );
                         });
                     });
@@ -3925,7 +4453,7 @@ impl App {
                     ui.add(
                         egui::ProgressBar::new(snap.progress)
                             .desired_height(7.0)
-                            .fill(if snap.finished { GREEN } else { ACCENT }),
+                            .fill(if snap.finished { GREEN() } else { ACCENT() }),
                     );
                     ui.add_space(8.0);
 
@@ -3935,27 +4463,27 @@ impl App {
 
                         // Estado
                         let (state_txt, state_col) = match snap.state {
-                            self::torrents::State::Initializing if snap.downloaded > 0 => (t(lang, "torrent.state_down"), CYAN),
-                            self::torrents::State::Initializing => (t(lang, "torrent.state_init"), MUTED),
-                            self::torrents::State::Live if snap.finished => (t(lang, "torrent.state_seeding"), GREEN),
-                            self::torrents::State::Live => (t(lang, "torrent.state_down"), CYAN),
-                            self::torrents::State::Paused => (t(lang, "status.paused"), AMBER),
-                            self::torrents::State::Error => (t(lang, "status.error"), RED),
+                            self::torrents::State::Initializing if snap.downloaded > 0 => (t(lang, "torrent.state_down"), CYAN()),
+                            self::torrents::State::Initializing => (t(lang, "torrent.state_init"), MUTED()),
+                            self::torrents::State::Live if snap.finished => (t(lang, "torrent.state_seeding"), GREEN()),
+                            self::torrents::State::Live => (t(lang, "torrent.state_down"), CYAN()),
+                            self::torrents::State::Paused => (t(lang, "status.paused"), AMBER()),
+                            self::torrents::State::Error => (t(lang, "status.error"), RED()),
                         };
                         chip(ui, state_txt.to_string(), state_col);
 
                         if speed > 0.0 && !snap.finished {
-                            chip(ui, format!("↓ {}/s", fmt_size(speed)), CYAN);
+                            chip(ui, format!("↓ {}/s", fmt_size(speed)), CYAN());
                         }
-                        let peer_col = if snap.peers > 0 { CYAN } else { MUTED };
+                        let peer_col = if snap.peers > 0 { CYAN() } else { MUTED() };
                         let r = ui.scope(|ui| chip(ui, format!("👥 {}", snap.peers), peer_col)).response;
                         r.on_hover_text(t(lang, "torrent.peers_tip"));
 
                         if snap.state == self::torrents::State::Live && !snap.finished {
-                            chip(ui, format!("⏱ {eta}"), MUTED);
+                            chip(ui, format!("⏱ {eta}"), MUTED());
                         }
                         if snap.uploaded > 0 {
-                            chip(ui, format!("↑ {}", fmt_size(snap.uploaded as f64)), MUTED);
+                            chip(ui, format!("↑ {}", fmt_size(snap.uploaded as f64)), MUTED());
                         }
 
                         // Tamaño a la derecha
@@ -3967,14 +4495,14 @@ impl App {
                                     fmt_size(snap.total as f64)
                                 ))
                                 .size(11.5)
-                                .color(MUTED),
+                                .color(MUTED()),
                             );
                         });
                     });
 
                     if let Some(err) = &snap.error {
                         ui.add_space(4.0);
-                        ui.label(RichText::new(err).size(11.0).color(RED));
+                        ui.label(RichText::new(err).size(11.0).color(RED()));
                     }
                 });
             ui.add_space(10.0);
@@ -4021,16 +4549,16 @@ impl App {
         // ---- Idioma ----
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.language")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.language")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(t(lang, "set.language_label"));
                 for l in Lang::ALL {
                     let selected = self.settings.lang == l;
                     let btn = egui::Button::new(
-                        RichText::new(l.label()).color(if selected { Color32::WHITE } else { MUTED }),
+                        RichText::new(l.label()).color(if selected { Color32::WHITE } else { MUTED() }),
                     )
-                    .fill(if selected { ACCENT } else { CARD_HOVER })
+                    .fill(if selected { ACCENT() } else { CARD_HOVER() })
                     .rounding(Rounding::same(8.0));
                     let resp = ui.add(btn);
                     gloss_paint(ui, &resp);
@@ -4042,9 +4570,100 @@ impl App {
         });
         ui.add_space(12.0);
 
+        // ---- Tema / skin ----
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.folder")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.theme")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for th in Theme::ALL {
+                    let selected = self.settings.theme == th;
+                    // Cada botón se tiñe con el acento de SU tema: se ve al vuelo
+                    let swatch = th.palette().accent;
+                    let btn = egui::Button::new(
+                        RichText::new(th.label(lang)).color(if selected { Color32::WHITE } else { MUTED() }),
+                    )
+                    .fill(if selected { swatch } else { CARD_HOVER() })
+                    .stroke(Stroke::new(1.0f32, swatch.gamma_multiply(0.7)))
+                    .rounding(Rounding::same(8.0));
+                    let resp = ui.add(btn);
+                    gloss_paint(ui, &resp);
+                    if resp.clicked() && !selected {
+                        self.settings.theme = th;
+                        // Aplicar en caliente: paleta primero, luego el estilo
+                        set_palette(th);
+                        apply_theme(ui.ctx());
+                    }
+                }
+            });
+            ui.label(RichText::new(t(lang, "set.theme_note")).size(11.5).color(MUTED()));
+
+            // ---- Imagen de fondo personalizada ----
+            ui.add_space(10.0);
+            ui.label(RichText::new(t(lang, "set.bg_image")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if soft_button(ui, t(lang, "set.bg_pick")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Imagen", &["png", "jpg", "jpeg", "webp", "bmp"])
+                        .pick_file()
+                    {
+                        self.settings.bg_image = p.to_string_lossy().into_owned();
+                    }
+                }
+                if !self.settings.bg_image.is_empty()
+                    && soft_button(ui, t(lang, "set.bg_clear")).clicked()
+                {
+                    self.settings.bg_image.clear();
+                }
+            });
+            if !self.settings.bg_image.is_empty() {
+                // Nombre del archivo, no la ruta entera: cabe y se lee mejor
+                let name = std::path::Path::new(&self.settings.bg_image)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.label(RichText::new(name).size(11.0).color(CYAN()));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t(lang, "set.bg_opacity")).size(12.0).color(MUTED()));
+                    ui.add(
+                        egui::Slider::new(&mut self.settings.bg_opacity, 0.0..=0.85)
+                            .show_value(false),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:.0}%", self.settings.bg_opacity * 100.0))
+                            .size(12.0)
+                            .color(MUTED()),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t(lang, "set.bg_blur")).size(12.0).color(MUTED()));
+                    let resp = ui.add(
+                        egui::Slider::new(&mut self.settings.bg_blur, 0.0..=24.0).show_value(false),
+                    );
+                    // Difuminar cuesta CPU: se recalcula al SOLTAR, no mientras
+                    // se arrastra, o la interfaz se atascaría.
+                    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                        self.bg_dirty = true;
+                    }
+                    ui.label(
+                        RichText::new(if self.settings.bg_blur < 0.1 {
+                            t(lang, "set.bg_blur_off").to_string()
+                        } else {
+                            format!("{:.0}", self.settings.bg_blur)
+                        })
+                        .size(12.0)
+                        .color(MUTED()),
+                    );
+                });
+            }
+            ui.label(RichText::new(t(lang, "set.bg_note")).size(11.5).color(MUTED()));
+        });
+        ui.add_space(12.0);
+
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.folder")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let mut dest = self.settings.dest.clone();
@@ -4069,7 +4688,7 @@ impl App {
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.downloads")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.downloads")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(t(lang, "set.concurrency"));
@@ -4080,7 +4699,7 @@ impl App {
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.linkgrabber")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.linkgrabber")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             let clip = ui.checkbox(
                 &mut self.settings.clipboard_watch,
@@ -4109,7 +4728,7 @@ impl App {
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.receiver")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.receiver")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             let chk = ui.checkbox(&mut self.settings.receiver_enabled, t(lang, "cap.enable"));
             if chk.changed() {
@@ -4120,13 +4739,13 @@ impl App {
                 ui.label(t(lang, "set.receiver_port"));
                 ui.add(egui::DragValue::new(&mut self.settings.receiver_port).range(1024..=65535));
             });
-            ui.label(RichText::new(t(lang, "cap.note_restart")).size(11.5).color(MUTED));
+            ui.label(RichText::new(t(lang, "cap.note_restart")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.cookies")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.cookies")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.checkbox(
                 &mut self.settings.use_browser_cookies,
@@ -4145,11 +4764,11 @@ impl App {
                             }
                         });
                 });
-                ui.label(RichText::new(t(lang, "set.cookies_note")).size(11.5).color(MUTED));
-                ui.label(RichText::new(t(lang, "set.cookies_warn")).size(11.5).color(AMBER));
+                ui.label(RichText::new(t(lang, "set.cookies_note")).size(11.5).color(MUTED()));
+                ui.label(RichText::new(t(lang, "set.cookies_warn")).size(11.5).color(AMBER()));
             }
             ui.add_space(6.0);
-            ui.label(RichText::new(t(lang, "set.cookies_file")).size(11.5).color(MUTED));
+            ui.label(RichText::new(t(lang, "set.cookies_file")).size(11.5).color(MUTED()));
             ui.horizontal(|ui| {
                 let mut f = self.settings.cookies_file.clone();
                 if ui
@@ -4171,14 +4790,14 @@ impl App {
                 }
             });
             if !self.settings.cookies_file.is_empty() {
-                ui.label(RichText::new(t(lang, "set.cookies_file_note")).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "set.cookies_file_note")).size(11.5).color(MUTED()));
             }
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "set.history")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "set.history")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             let archive = galdl_archive_path();
             let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
@@ -4189,7 +4808,7 @@ impl App {
                     archive.display().to_string()
                 })
                 .size(11.0)
-                .color(MUTED),
+                .color(MUTED()),
             );
             if soft_button(ui, t(lang, "btn.clear_history")).clicked() {
                 let msg = if std::fs::remove_file(&archive).is_ok() {
@@ -4199,25 +4818,25 @@ impl App {
                 };
                 self.toast(msg);
             }
-            ui.label(RichText::new(t(lang, "set.history_note")).size(11.5).color(MUTED));
+            ui.label(RichText::new(t(lang, "set.history_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "eng.ytdlp")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "eng.ytdlp")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             if self.ytdlp_installing {
                 ui.add(
                     egui::ProgressBar::new(self.ytdlp_progress)
-                        .fill(CYAN)
+                        .fill(CYAN())
                         .show_percentage(),
                 );
-                ui.label(RichText::new(t(lang, "eng.ytdlp_downloading")).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.ytdlp_downloading")).color(MUTED()));
             } else if self.ytdlp_ok == Some(true) {
-                ui.label(RichText::new(t(lang, "eng.ytdlp_ok")).color(GREEN));
+                ui.label(RichText::new(t(lang, "eng.ytdlp_ok")).color(GREEN()));
                 if let Some(cmd) = &self.ytdlp_cmd {
-                    ui.label(RichText::new(cmd.as_str()).size(11.5).color(MUTED));
+                    ui.label(RichText::new(cmd.as_str()).size(11.5).color(MUTED()));
                 }
                 if soft_button(ui, t(lang, "btn.update_latest")).clicked() {
                     self.ytdlp_installing = true;
@@ -4227,7 +4846,7 @@ impl App {
                     self.rt.spawn(install_ytdlp(client, tx));
                 }
             } else {
-                ui.label(RichText::new(t(lang, "eng.ytdlp_missing")).color(AMBER));
+                ui.label(RichText::new(t(lang, "eng.ytdlp_missing")).color(AMBER()));
                 if primary_button(ui, t(lang, "eng.install_ytdlp")).clicked() {
                     self.ytdlp_installing = true;
                     self.ytdlp_progress = 0.0;
@@ -4235,25 +4854,25 @@ impl App {
                     let tx = self.tx.clone();
                     self.rt.spawn(install_ytdlp(client, tx));
                 }
-                ui.label(RichText::new(t(lang, "eng.ytdlp_note")).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.ytdlp_note")).size(11.5).color(MUTED()));
             }
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "eng.galdl")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "eng.galdl")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             if self.galdl_installing {
                 ui.add(
                     egui::ProgressBar::new(self.galdl_progress)
-                        .fill(CYAN)
+                        .fill(CYAN())
                         .show_percentage(),
                 );
-                ui.label(RichText::new(t(lang, "eng.galdl_downloading")).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.galdl_downloading")).color(MUTED()));
             } else if let Some(cmd) = self.galdl_cmd.clone() {
-                ui.label(RichText::new(t(lang, "eng.galdl_ok")).color(GREEN));
-                ui.label(RichText::new(cmd).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.galdl_ok")).color(GREEN()));
+                ui.label(RichText::new(cmd).size(11.5).color(MUTED()));
                 if soft_button(ui, t(lang, "btn.update_latest")).clicked() {
                     self.galdl_installing = true;
                     self.galdl_progress = 0.0;
@@ -4262,7 +4881,7 @@ impl App {
                     self.rt.spawn(install_gallerydl(client, tx));
                 }
             } else {
-                ui.label(RichText::new(t(lang, "eng.galdl_missing")).color(AMBER));
+                ui.label(RichText::new(t(lang, "eng.galdl_missing")).color(AMBER()));
                 if primary_button(ui, t(lang, "eng.install_galdl")).clicked() {
                     self.galdl_installing = true;
                     self.galdl_progress = 0.0;
@@ -4270,28 +4889,28 @@ impl App {
                     let tx = self.tx.clone();
                     self.rt.spawn(install_gallerydl(client, tx));
                 }
-                ui.label(RichText::new(t(lang, "eng.galdl_note")).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.galdl_note")).size(11.5).color(MUTED()));
             }
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "eng.ffmpeg")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "eng.ffmpeg")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             if self.ffmpeg_installing {
                 ui.add(
                     egui::ProgressBar::new(self.ffmpeg_progress)
-                        .fill(CYAN)
+                        .fill(CYAN())
                         .show_percentage(),
                 );
-                ui.label(RichText::new(t(lang, "eng.ffmpeg_downloading")).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.ffmpeg_downloading")).color(MUTED()));
             } else if let Some(cmd) = self.ffmpeg_cmd.clone() {
-                ui.label(RichText::new(t(lang, "eng.ffmpeg_ok")).color(GREEN));
-                ui.label(RichText::new(cmd).size(11.5).color(MUTED));
-                ui.label(RichText::new(t(lang, "eng.ffmpeg_quality_on")).size(11.5).color(CYAN));
+                ui.label(RichText::new(t(lang, "eng.ffmpeg_ok")).color(GREEN()));
+                ui.label(RichText::new(cmd).size(11.5).color(MUTED()));
+                ui.label(RichText::new(t(lang, "eng.ffmpeg_quality_on")).size(11.5).color(CYAN()));
             } else {
-                ui.label(RichText::new(t(lang, "eng.ffmpeg_missing")).color(AMBER));
+                ui.label(RichText::new(t(lang, "eng.ffmpeg_missing")).color(AMBER()));
                 if primary_button(ui, t(lang, "eng.install_ffmpeg")).clicked() {
                     self.ffmpeg_installing = true;
                     self.ffmpeg_progress = 0.0;
@@ -4299,7 +4918,41 @@ impl App {
                     let tx = self.tx.clone();
                     self.rt.spawn(install_ffmpeg(client, tx));
                 }
-                ui.label(RichText::new(t(lang, "eng.ffmpeg_note")).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.ffmpeg_note")).size(11.5).color(MUTED()));
+            }
+        });
+        ui.add_space(12.0);
+
+        // ---- Manejador de enlaces magnet ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.magnet")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            let is_handler = is_magnet_handler();
+            if is_handler {
+                ui.label(RichText::new(t(lang, "set.magnet_on")).color(GREEN()));
+                if soft_button(ui, t(lang, "set.magnet_unregister")).clicked() {
+                    match set_magnet_handler(false) {
+                        Ok(()) => self.toast(t(lang, "set.magnet_removed")),
+                        Err(e) => self.toast(format!("{e}")),
+                    }
+                }
+            } else {
+                ui.label(RichText::new(t(lang, "set.magnet_off")).color(AMBER()));
+                if primary_button(ui, t(lang, "set.magnet_register")).clicked() {
+                    match set_magnet_handler(true) {
+                        Ok(()) => self.toast(t(lang, "set.magnet_done")),
+                        Err(e) => self.toast(format!("{e}")),
+                    }
+                }
+            }
+            ui.label(RichText::new(t(lang, "set.magnet_note")).size(11.5).color(MUTED()));
+            // Windows protege la asociación por defecto con UserChoice: si ya
+            // hay otro cliente puesto, hay que cambiarlo a mano en Configuración.
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "set.magnet_userchoice")).size(11.5).color(AMBER()));
+            if soft_button(ui, t(lang, "set.magnet_open_settings")).clicked() {
+                let _ = open::that("ms-settings:defaultapps");
             }
         });
         ui.add_space(12.0);
@@ -4307,40 +4960,40 @@ impl App {
         // ---- cyberdrop-dl (opcional, hosters difíciles) ----
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "eng.cyberdrop")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "eng.cyberdrop")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             if self.cyberdrop_installing {
                 ui.add(
                     egui::ProgressBar::new(self.cyberdrop_progress)
-                        .fill(CYAN)
+                        .fill(CYAN())
                         .show_percentage(),
                 );
-                ui.label(RichText::new(t(lang, "eng.cyberdrop_downloading")).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_downloading")).color(MUTED()));
             } else if let Some(cmd) = self.cyberdrop_cmd.clone() {
-                ui.label(RichText::new(t(lang, "eng.cyberdrop_ok")).color(GREEN));
-                ui.label(RichText::new(cmd).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_ok")).color(GREEN()));
+                ui.label(RichText::new(cmd).size(11.5).color(MUTED()));
             } else {
-                ui.label(RichText::new(t(lang, "eng.cyberdrop_missing")).color(AMBER));
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_missing")).color(AMBER()));
                 if primary_button(ui, t(lang, "eng.install_cyberdrop")).clicked() {
                     self.cyberdrop_installing = true;
                     self.cyberdrop_progress = 0.0;
                     let tx = self.tx.clone();
                     self.rt.spawn(install_cyberdrop(tx));
                 }
-                ui.label(RichText::new(t(lang, "eng.cyberdrop_note")).size(11.5).color(MUTED));
+                ui.label(RichText::new(t(lang, "eng.cyberdrop_note")).size(11.5).color(MUTED()));
             }
         });
         ui.add_space(12.0);
 
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
-            ui.label(RichText::new(t(lang, "about")).size(11.0).color(MUTED).strong());
+            ui.label(RichText::new(t(lang, "about")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.label(format!(
                 "Todo Downloader v{} — By Eric V. Gramunt",
                 env!("CARGO_PKG_VERSION")
             ));
-            ui.label(RichText::new(t(lang, "about.tech")).color(MUTED));
+            ui.label(RichText::new(t(lang, "about.tech")).color(MUTED()));
         });
     }
 }

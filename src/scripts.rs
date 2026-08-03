@@ -49,6 +49,8 @@ function tdHud() {{
       <div id="__td_msg" style="font-size:11px;color:#8A90A0;min-height:15px"></div>
       <button id="__td_stop" style="width:100%;margin-top:9px;padding:7px;border:0;border-radius:8px;
               background:#262B39;color:#E8EAF0;font-size:12px;cursor:pointer">■ Detener y enviar</button>
+      <button id="__td_save" style="width:100%;margin-top:6px;padding:7px;border:0;border-radius:8px;
+              background:#FE2C55;color:#fff;font-size:12px;cursor:pointer;display:none">💾 Guardar JSON</button>
       <style>@keyframes __tdp{{0%{{transform:translateX(-100%)}}100%{{transform:translateX(340%)}}}}</style>`;
     document.body.appendChild(el);
     el.querySelector('#__td_x').onclick = () => el.remove();
@@ -56,6 +58,8 @@ function tdHud() {{
         window.__tdStop = true;
         el.querySelector('#__td_msg').textContent = 'Deteniendo…';
     }};
+    // Guardar a archivo: vía manual siempre disponible al terminar
+    el.querySelector('#__td_save').onclick = () => tdSaveFile(window.__tdItems || []);
     return {{
         n(v) {{ const e = document.getElementById('__td_n'); if (e) e.textContent = v; }},
         lbl(t) {{ const e = document.getElementById('__td_lbl'); if (e) e.textContent = t; }},
@@ -66,6 +70,9 @@ function tdHud() {{
             if (bar) {{ bar.style.animation = 'none'; bar.style.width = '100%'; }}
             const btn = document.getElementById('__td_stop');
             if (btn) {{ btn.textContent = 'Cerrar'; btn.onclick = () => document.getElementById('__td_hud')?.remove(); }}
+            // El botón de guardar aparece al terminar, haya ido bien el envío o no
+            const sv = document.getElementById('__td_save');
+            if (sv && v > 0) sv.style.display = 'block';
             const sub = document.getElementById('__td_sub');
             if (sub) {{ sub.textContent = ok ? 'Enviado a la app ✓' : 'Terminado'; sub.style.color = ok ? '#3DDC84' : '#FFB454'; }}
             this.n(v);
@@ -103,10 +110,33 @@ function tdFallbackCopy(items, hud) {{
             console.log('[TD] 📋 Enlaces copiados — el LinkGrabber los detectará');
         }},
         () => {{
-            hud && hud.done(items.length, false, 'Copia manual desde la consola');
+            hud && hud.done(items.length, false, 'Usa el botón 💾 Guardar JSON');
             console.log(txt);
         }}
     );
+}}
+
+/** Guarda un JSON con TODOS los metadatos (autor, título, portada) en el
+ *  formato que importa la app: Descargas → Importar TXT/JSON.
+ *
+ *  Es la vía a prueba de balas: no depende del portapapeles (que exige que la
+ *  pestaña tenga el foco) ni de que el navegador permita hablar con 127.0.0.1
+ *  (Chrome lo restringe con Private Network Access). Descargar un archivo
+ *  siempre funciona. */
+function tdSaveFile(items) {{
+    if (!items || !items.length) return;
+    const data = {{ videos: items.map(i => ({{
+        id: i.id, author: i.author, title: i.title,
+        hqUrl: i.url, pageUrl: i.pageUrl, thumb: i.thumb || ''
+    }})) }};
+    const blob = new Blob([JSON.stringify(data, null, 2)], {{ type: 'application/json' }});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `todo-downloader-${{location.hostname.replace(/^www\./, '')}}-${{items.length}}.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {{ URL.revokeObjectURL(a.href); a.remove(); }}, 5000);
+    console.log(`[TD] 💾 JSON guardado con ${{items.length}} elementos`);
 }}
 "#
     )
@@ -120,30 +150,82 @@ pub fn tiktok(port: u16) -> String {
 (() => {{
 {sender}
 const items = new Map();
-const API = /\/api\/(post|repost|favorite)\/item_list|\/api\/item\/detail/;
+// Muy amplio a propósito: TikTok cambia rutas con frecuencia. Antes solo se
+// miraban 3 endpoints exactos y bastaba un renombrado suyo para no capturar nada.
+const API = /item_list|\/api\/(post|repost|favorite|item|search)|aweme|\/feed/;
+const diag = {{ hits: 0, scanned: 0, added: 0, noUrl: 0 }};
+
+/** Saca la primera URL utilizable de un campo que puede venir en varias formas:
+ *  string suelto, {{url_list:[…]}}, {{urlList:[…]}} o un array de strings. */
+function firstUrl(x) {{
+    if (!x) return '';
+    if (typeof x === 'string') return x.startsWith('http') ? x : '';
+    if (Array.isArray(x)) return firstUrl(x[0]);
+    return firstUrl(x.url_list || x.urlList || x.url || x.playAddr || '');
+}}
 
 function add(it) {{
+    diag.scanned++;
     if (!it || !it.id || items.has(it.id)) return;
     const v = it.video || {{}};
-    const author = (it.author && it.author.uniqueId) || (location.pathname.match(/@([^/]+)/) || [])[1] || '';
-    const q = (v.bitrateInfo || [])
-        .map(b => ({{ br: b.Bitrate || 0, u: (b.PlayAddr && b.PlayAddr.UrlList || []).slice(-1)[0] || '' }}))
+    const author = (it.author && (it.author.uniqueId || it.author.unique_id))
+                || (location.pathname.match(/@([^/]+)/) || [])[1] || '';
+
+    // Máxima calidad: mayor bitrate de bitrateInfo; si no, playAddr/downloadAddr
+    const q = (v.bitrateInfo || v.bitrate_info || [])
+        .map(b => ({{ br: b.Bitrate || b.bit_rate || 0,
+                     u: firstUrl((b.PlayAddr || b.play_addr)) }}))
         .filter(x => x.u).sort((a, b) => b.br - a.br);
-    let url = q.length ? q[0].u : (v.playAddr || v.downloadAddr || '');
-    if (!url) return;
+
+    let url = q.length ? q[0].u
+            : firstUrl(v.playAddr) || firstUrl(v.play_addr)
+              || firstUrl(v.downloadAddr) || firstUrl(v.download_addr);
+
+    // Post de imágenes (carrusel): TikTok los sirve en imagePost
+    const imgs = (it.imagePost && it.imagePost.images) || (it.image_post_info && it.image_post_info.images) || [];
+    if (!url && imgs.length) {{
+        imgs.forEach((im, n) => {{
+            const iu = firstUrl(im.imageURL || im.display_image || im.owner_watermark_image || im);
+            if (!iu) return;
+            const key = it.id + '_' + n;
+            if (items.has(key)) return;
+            items.set(key, {{ id: key, author, title: it.desc || '', url: iu, thumb: iu,
+                pageUrl: `https://www.tiktok.com/@${{author}}/photo/${{it.id}}` }});
+            diag.added++;
+        }});
+        return;
+    }}
+
+    if (!url) {{ diag.noUrl++; return; }}
     if (url.startsWith('http://')) url = 'https://' + url.slice(7);
-    // Portada para la miniatura de la cola: en TikTok web suele ser un string,
-    // pero en algunas respuestas es un objeto {{url_list}} — se cubren ambos.
-    const cov = v.cover || v.originCover || v.dynamicCover || '';
-    const thumb = typeof cov === 'string' ? cov : ((cov && cov.url_list && cov.url_list[0]) || '');
+    const thumb = firstUrl(v.cover) || firstUrl(v.originCover) || firstUrl(v.origin_cover) || firstUrl(v.dynamicCover);
     items.set(it.id, {{ id: it.id, author, title: it.desc || '', url, thumb,
         pageUrl: `https://www.tiktok.com/@${{author}}/video/${{it.id}}` }});
+    diag.added++;
+}}
+
+/** Recorre CUALQUIER JSON buscando objetos que parezcan publicaciones.
+ *  Mucho más resistente que asumir `itemList`: si TikTok renombra el contenedor,
+ *  esto los sigue encontrando por su forma (id + video/imagePost). */
+function harvest(o, depth) {{
+    if (!o || typeof o !== 'object' || (depth || 0) > 6) return;
+    if (Array.isArray(o)) {{ o.forEach(x => harvest(x, (depth || 0) + 1)); return; }}
+    if (o.id && (o.video || o.imagePost || o.image_post_info || o.desc !== undefined)) {{
+        add(o);
+    }}
+    for (const k in o) {{
+        const v = o[k];
+        if (v && typeof v === 'object') harvest(v, (depth || 0) + 1);
+    }}
 }}
 
 function ingest(d) {{
     if (!d) return;
-    const list = d.itemList || d.items || (d.itemInfo && d.itemInfo.itemStruct ? [d.itemInfo.itemStruct] : []);
-    list.forEach(add);
+    diag.hits++;
+    const list = d.itemList || d.items || d.aweme_list
+              || (d.itemInfo && d.itemInfo.itemStruct ? [d.itemInfo.itemStruct] : null);
+    if (list && list.length) list.forEach(add);
+    else harvest(d, 0);   // formato desconocido: búsqueda por forma
 }}
 
 // Interceptar fetch y XHR
@@ -191,15 +273,27 @@ try {{
         await new Promise(r => setTimeout(r, 1400));
         if (items.size === last) {{
             idle++;
-            hud.msg(`Buscando más… (${{idle}}/8)`);
+            // Diagnóstico: distingue «no llegan respuestas» de «llegan pero no
+            // se extrae nada». Sin esto era imposible saber qué falla.
+            hud.msg(diag.hits === 0
+                ? `Sin respuestas de la API (${{idle}}/8) — ¿scroll bloqueado o login?`
+                : `API: ${{diag.hits}} · analizados: ${{diag.scanned}} · sin URL: ${{diag.noUrl}} (${{idle}}/8)`);
         }} else {{
             idle = 0;
             last = items.size;
-            hud.msg('');
+            hud.msg(`API: ${{diag.hits}} · capturados: ${{diag.added}}`);
         }}
         hud.n(items.size);
     }}
     const arr = [...items.values()];
+    window.__tdItems = arr;   // lo usa el botón «💾 Guardar JSON»
+    console.log('[TD] Diagnóstico:', diag);
+    if (!arr.length) {{
+        hud.done(0, false, diag.hits === 0
+            ? 'La API no respondió: inicia sesión y recarga el perfil'
+            : `Respuestas recibidas (${{diag.hits}}) pero sin enlaces utilizables`);
+        return;
+    }}
     hud.sub('Enviando…');
     if (!(await tdSend(arr, hud))) tdFallbackCopy(arr, hud);
 }})();
@@ -324,6 +418,7 @@ function collect(aw) {{
         }}
     }}
     hud.sub('Enviando…');
+    window.__tdItems = items;   // lo usa el botón «💾 Guardar JSON»
     const resumen = `${{posts.size}} publicaciones → ${{vids}} vídeos + ${{imgs}} imágenes`;
     if (await tdSend(items, hud)) {{
         hud.msg(resumen);

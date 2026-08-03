@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.3.0.
+Summary of the security audit and the application's threat model. Last reviewed for v1.4.0.
 
 ## Communication channels
 
@@ -25,6 +25,10 @@ All network traffic uses **HTTPS with rustls** (a pure-Rust TLS implementation �
 **Browser cookies**: opt-in feature. Cookies are read by yt-dlp/gallery-dl directly and travel only to the destination site over TLS; this application never touches, stores or forwards them.
 
 **Data at rest**: persisted settings contain no secrets (paths, booleans, browser name). No credentials or tokens are stored. The gallery-dl download archive (`descargados.sqlite3`, in the application's own data folder) holds only opaque per-site identifiers of already-fetched items, so retries can resume; it contains no URLs, credentials or file contents, and can be deleted at any time from Settings.
+
+**Magnet protocol handler**: opt-in from Settings. Registration writes to `HKEY_CURRENT_USER` only — no administrator rights, no machine-wide changes — and is done through `reg.exe` rather than adding a registry crate. Windows still protects the *actual* default with its signed `UserChoice` key, which no application can forge; the app therefore only publishes its capabilities so the user can pick it in Settings. When a magnet is clicked and an instance is already running, the link is handed to it through the same localhost-only receiver and the second process exits immediately.
+
+**Custom background image**: read from a path the user picks in a file dialog, decoded with the `image` crate, downscaled and kept in memory only. A malformed image simply fails to decode and no background is shown; nothing is copied or written elsewhere.
 
 **Thumbnails**: cover images are fetched over HTTPS with the same per-domain Referer logic as downloads, capped at 6 MiB, decoded off the async pool, and kept **in memory only** — never written to disk. Decoding is delegated to the `image` crate; a malformed or hostile image simply fails to decode and the row shows no thumbnail. At most 512 are held at once.
 

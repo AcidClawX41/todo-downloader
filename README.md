@@ -60,8 +60,11 @@ Each binary is verified by running it after download; if it doesn't respond, it'
 
 ### Interface
 
-- Dark theme, sidebar navigation, stat cards and an animated *gloss* hover effect.
+- **Three themes**: *Classic* (dark with pink accent), *Sober* (slate grey, understated — for shared screens) and *Hot Pink* (vivid pink with soft background glows). Switchable instantly, no restart.
+- **Custom background image** for the main panel, with independent **strength** and **gaussian blur** sliders. The sidebar deliberately stays solid so the menu is always readable.
+- Dark theme, sidebar navigation, stat cards and an animated *gloss* hover effect that picks up the active theme's accent.
 - **Thumbnails in the queue.** Posts captured from TikTok or Douyin show their cover art next to the filename, fetched lazily and only for rows actually on screen.
+- **Magnet link handler**: register the app so clicking a magnet in your browser adds it straight to the Torrent tab. If the app is already open, the link goes to that window instead of spawning a second one.
 - **Middle-click autoscroll**, like a browser: click the wheel to anchor, then distance from the anchor sets direction and speed.
 - **Live cookie indicator** in the sidebar. The app disables unreadable cookies automatically, and without this you had no way of knowing you were downloading anonymously.
 - Errors explain themselves: a raw `401 Unauthorized` from Instagram becomes *"enable cookies in Settings and press Retry"*, with the original message underneath.
@@ -123,6 +126,7 @@ The binary lands in `target/release/`. On Windows you can also double-click `Com
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
 | Download a torrent / magnet | **Torrent** tab → paste the magnet or pick a `.torrent` |
+| Click magnet links in the browser | **Settings** → *Open magnet links with Todo Downloader*, then pick it in Windows *Default apps → MAGNET* |
 | Grab a Pixeldrain / GoFile / MediaFire link | Just paste it — resolved natively, folders expand into individual files |
 | Grab from Bunkr / Cyberdrop | Install cyberdrop-dl once in **Settings**, then paste the link |
 | Queue a list of links | **Add links** or **Import TXT/JSON** |
@@ -159,6 +163,8 @@ Being upfront about these:
 ## Architecture
 
 ```
+assets/           App icon (.ico embedded in the Windows .exe, .png for the window)
+build.rs          Embeds the icon and version metadata into the Windows binary
 src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
 ├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)

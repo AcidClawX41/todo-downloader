@@ -380,6 +380,51 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "⚠ Al descargar por torrent también compartes (subes) el contenido. Úsalo solo con material legal.",
             "⚠ Downloading via torrent also shares (uploads) the content. Use only with legal material."
         ),
+        // ---------- Manejador de magnet ----------
+        "set.theme" => entry!("TEMA", "THEME"),
+        "theme.classic" => entry!("Clásico", "Classic"),
+        "theme.sober" => entry!("Sobrio", "Sober"),
+        "set.bg_image" => entry!("FONDO PERSONALIZADO", "CUSTOM BACKGROUND"),
+        "set.bg_pick" => entry!("🖼  Elegir imagen…", "🖼  Choose image…"),
+        "set.bg_clear" => entry!("Quitar fondo", "Remove background"),
+        "set.bg_opacity" => entry!("Intensidad:", "Strength:"),
+        "set.bg_blur" => entry!("Desenfoque:", "Blur:"),
+        "set.bg_blur_off" => entry!("nítido", "sharp"),
+        "set.bg_note" => entry!(
+            "Se aplica solo al panel principal; la barra lateral sigue sólida para que el menú se lea siempre. Baja la intensidad si molesta al leer.",
+            "Applied to the main panel only; the sidebar stays solid so the menu is always readable. Lower the strength if it hurts legibility."
+        ),
+        "set.theme_note" => entry!(
+            "Clásico: oscuro con acento rosa. Sobrio: gris pizarra, discreto. Hot Pink: rosa intenso con halos difuminados de fondo.",
+            "Classic: dark with pink accent. Sober: slate grey, understated. Hot Pink: vivid pink with soft background glows."
+        ),
+
+        "btn.clear_list" => entry!("🗑  Vaciar lista", "🗑  Clear list"),
+        "btn.remove_selected" => entry!("🗑  Quitar marcados", "🗑  Remove checked"),
+
+        "set.magnet" => entry!("ENLACES MAGNET", "MAGNET LINKS"),
+        "set.magnet_on" => entry!(
+            "Todo Downloader abre los enlaces magnet ✓",
+            "Todo Downloader opens magnet links ✓"
+        ),
+        "set.magnet_off" => entry!(
+            "Otro programa (qBittorrent, µTorrent…) abre los enlaces magnet",
+            "Another program (qBittorrent, µTorrent…) opens magnet links"
+        ),
+        "set.magnet_register" => entry!("🧲  Abrir los magnet con Todo Downloader", "🧲  Open magnet links with Todo Downloader"),
+        "set.magnet_unregister" => entry!("Dejar de gestionar los magnet", "Stop handling magnet links"),
+        "set.magnet_done" => entry!("Listo: los magnet abrirán Todo Downloader", "Done: magnet links will open Todo Downloader"),
+        "set.magnet_removed" => entry!("Registro eliminado", "Registration removed"),
+        "set.magnet_note" => entry!(
+            "Se registra solo para tu usuario (HKCU), sin permisos de administrador. Si la app ya está abierta, el enlace va a esa ventana en vez de abrir otra.",
+            "Registered for your user only (HKCU), no admin rights needed. If the app is already running, the link goes to that window instead of opening another."
+        ),
+        "set.magnet_userchoice" => entry!(
+            "⚠ Si ya tienes otro cliente por defecto (qBittorrent…), Windows lo protege con «UserChoice» y ninguna app puede cambiarlo por código. Ve a Configuración → Aplicaciones → Aplicaciones predeterminadas → Elegir predeterminados por tipo de vínculo → MAGNET, y selecciona Todo Downloader.",
+            "⚠ If another client is already the default (qBittorrent…), Windows protects it with “UserChoice” and no app can change it programmatically. Go to Settings → Apps → Default apps → Choose defaults by link type → MAGNET, and pick Todo Downloader."
+        ),
+        "set.magnet_open_settings" => entry!("⚙  Abrir Configuración de Windows", "⚙  Open Windows Settings"),
+
         "torrent.options" => entry!("⚙  Carpeta y velocidad", "⚙  Folder & speed"),
         "torrent.folder_label" => entry!("CARPETA DE DESTINO", "DOWNLOAD FOLDER"),
         "torrent.limits_label" => entry!("LÍMITES DE VELOCIDAD", "SPEED LIMITS"),
@@ -521,6 +566,13 @@ pub fn clip_captured(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("📋 {n} enlaces capturados del portapapeles"),
         Lang::En => format!("📋 {n} links captured from the clipboard"),
+    }
+}
+
+pub fn list_cleared(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es => format!("🗑 {n} elemento(s) quitados de la lista"),
+        Lang::En => format!("🗑 {n} item(s) removed from the list"),
     }
 }
 

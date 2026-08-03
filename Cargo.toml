@@ -1,6 +1,7 @@
 [package]
 name = "todo-downloader"
-version = "1.3.0"
+version = "1.4.0"
+build = "build.rs"
 edition = "2021"
 description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"
 authors = ["Eric V. Gramunt"]
@@ -27,6 +28,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 # Cliente BitTorrent nativo (magnet + .torrent): DHT, uTP, trackers, UPnP. Rust puro, Apache-2.0.
 librqbit = "8.1"
+
+# Incrusta el icono y los metadatos de versión en el .exe de Windows
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = 3
