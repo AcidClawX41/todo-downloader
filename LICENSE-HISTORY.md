@@ -24,7 +24,7 @@ and open for whoever receives it.
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense | Separate binary, invoked as a subprocess |
 | [gallery-dl](https://github.com/mikf/gallery-dl) | GPL-2.0 | Separate binary, invoked as a subprocess |
 | [ffmpeg](https://ffmpeg.org) | LGPL / GPL | Separate binary, invoked as a subprocess |
-| [cyberdrop-dl](https://github.com/Cyberdrop-DL/cyberdrop-dl) | MIT | Optional, installed by the user |
+| [cyberdrop-dl-patched](https://github.com/NTFSvolume/cdl) | GPL-3.0-only | Optional, installed by the user |
 
 All permissive (MIT/Apache-2.0) dependencies are compatible with GPL-3.0.
 The engines are **not** bundled: they are downloaded by the user and run as

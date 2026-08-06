@@ -2,13 +2,23 @@
 /target
 *.part
 
-# Binario compilado local
+# Locally built binary
 Todo Downloader.exe
 
 # IDE
 /.idea
 /.vscode
 
-# Animaciones locales de la pestaña de apoyo: nunca se publican
+# Local animations for the support tab: never published (third-party GIFs).
+# The README stays, so anyone cloning the repo learns what the folder is for.
 /tips/*
-!/tips/LEEME.txt
+!/tips/README.txt
+
+# Internal working notes: implementation reasoning, not user documentation.
+# Kept locally, never published.
+MEGA-IMPLEMENTATION-DECISION.md
+MEGA-FEASIBILITY.md
+
+# Local build helpers. The documented way to build is `cargo build --release`,
+# so per-machine scripts stay out of the repository.
+*.bat

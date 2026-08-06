@@ -15,8 +15,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod booru;
+mod gallery;
 mod hosters;
 mod i18n;
+mod mega;
 mod receiver;
 mod scripts;
 mod torrents;
@@ -383,6 +385,13 @@ fn forward_to_running_instance(link: &str) -> bool {
     false
 }
 
+/// Elementos por página al explorar una galería.
+///
+/// Deliberadamente bajo. Instagram espacia sus peticiones 6-12 segundos, así
+/// que pedir 200 de golpe deja la exploración parada varios minutos sin
+/// mostrar nada. Mejor traer poco y enseñarlo enseguida.
+const GALLERY_PER_PAGE: u32 = 30;
+
 // ============================= Modelo =============================
 
 #[derive(Clone, PartialEq)]
@@ -391,6 +400,10 @@ enum Status {
     Waiting,
     Downloading,
     Resolving, // yt-dlp
+    /// Comprobando el MAC de MEGA antes de renombrar el .part.
+    /// Es su propio estado a propósito: en un archivo grande la pasada de
+    /// integridad tarda, y sin fase visible parecería que se ha colgado.
+    Verifying,
     Paused,
     Done,
     Error(String),
@@ -408,8 +421,10 @@ impl Status {
                 Engine::GalleryDl => "gallery-dl".into(),
                 Engine::FileHost => t(lang, "status.resolving_host").into(),
                 Engine::Cyberdrop => "cyberdrop-dl".into(),
+                Engine::Mega => t(lang, "status.resolving_mega").into(),
                 _ => t(lang, "status.resolving").into(),
             },
+            Status::Verifying => t(lang, "status.verifying").into(),
             Status::Paused => t(lang, "status.paused").into(),
             Status::Done => t(lang, "status.done").into(),
             // Etiqueta corta: el mensaje íntegro se ve al pasar el ratón, así
@@ -428,14 +443,17 @@ impl Status {
     fn color(&self) -> Color32 {
         match self {
             Status::Done => GREEN(),
-            Status::Downloading | Status::Resolving => CYAN(),
+            Status::Downloading | Status::Resolving | Status::Verifying => CYAN(),
             Status::Paused => AMBER(),
             Status::Error(_) => RED(),
             _ => MUTED(),
         }
     }
     fn is_active(&self) -> bool {
-        matches!(self, Status::Waiting | Status::Downloading | Status::Resolving)
+        matches!(
+            self,
+            Status::Waiting | Status::Downloading | Status::Resolving | Status::Verifying
+        )
     }
 }
 
@@ -466,6 +484,9 @@ struct HostItem {
     url: String,
     filename: String,
     cookie: String,
+    /// Motor de la fila resultante. Los hosters nativos resuelven a HTTP
+    /// directo; una carpeta de MEGA expande a filas Engine::Mega.
+    engine: Engine,
 }
 
 // Algunas variantes solo se emiten en Windows (instalador de ffmpeg)
@@ -504,9 +525,21 @@ enum Ev {
     /// Torrent añadido: id de la app, handle de librqbit, nombre provisional
     TorrentAdded(u64, Arc<librqbit::ManagedTorrent>, String),
     TorrentError(String),
-    /// Resultados de una búsqueda en un booru
-    BooruResults(Vec<booru::Post>),
-    BooruError(String),
+    /// Resultados de explorar una galería (Instagram, Weibo): (elementos, página)
+    GalleryResults(Vec<gallery::GalleryItem>, u32, u64),
+    GalleryError(String, u64),
+    /// Miniatura de un elemento de galería ya decodificada (índice, imagen)
+    GalleryThumb(usize, egui::ColorImage),
+    /// Miniatura de una entrada del análisis de perfil (TikTok, Bilibili…)
+    ProfileThumb(usize, egui::ColorImage),
+    /// La miniatura no se pudo obtener (CDN caducado, anti-hotlink, formato
+    /// que no decodifica). Sin este aviso la celda se quedaba con los puntos
+    /// suspensivos para siempre, dando a entender que seguía cargando.
+    /// `true` = rejilla de perfil, `false` = rejilla de galería.
+    ThumbFailed(usize, bool),
+    /// Resultados de una búsqueda en un booru, con su número de generación
+    BooruResults(Vec<booru::Post>, u64),
+    BooruError(String, u64),
     /// Miniatura de un post de booru ya decodificada
     BooruThumb(u64, egui::ColorImage),
 }
@@ -519,6 +552,7 @@ enum Engine {
     GalleryDl, // post de imágenes (TikTok /photo/, Douyin /note/)
     FileHost,  // hoster con API abierta resuelto en Rust (Pixeldrain, GoFile, MediaFire)
     Cyberdrop, // motor opcional para hosters difíciles (Bunkr, Cyberdrop…): necesita Python
+    Mega,      // enlaces públicos de MEGA: descifrado nativo en Rust (src/mega)
 }
 
 /// Entrada detectada al analizar un perfil
@@ -589,6 +623,73 @@ fn normalize_profile_url(url: &str) -> String {
     u.to_string()
 }
 
+/// Fuerza UTF-8 en la entrada/salida de los ayudantes escritos en Python.
+///
+/// POR QUÉ: en Windows, yt-dlp y gallery-dl heredan la página de códigos del
+/// sistema (cp1252 en un Windows en español). Cuando el título de un vídeo
+/// trae un carácter que esa página no sabe representar —un emoji, un kanji,
+/// unas comillas tipográficas— el `TextIOWrapper` de stdout revienta al
+/// escribirlo y el intérprete aborta con `OSError: [Errno 22] Invalid
+/// argument`. El vídeo no falla por el vídeo: falla por su título, y por eso
+/// los de al lado del mismo perfil se descargan sin problema.
+///
+/// `PYTHONIOENCODING` fija la codificación de stdout/stderr; `PYTHONUTF8`
+/// activa el modo UTF-8 completo, que además cubre los nombres de archivo.
+/// En Linux y macOS ya es lo normal, así que no cambia nada allí.
+fn utf8_env(cmd: &mut tokio::process::Command) {
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+}
+
+/// Reescribe un perfil de Weibo hacia la pestaña «álbum».
+///
+/// ESTO NO ES UN APAÑO NI UNA PREFERENCIA ESTÉTICA: es lo que decide la
+/// resolución de las imágenes. Los dos caminos de gallery-dl no son
+/// equivalentes.
+///
+/// - `tabtype=feed` → `/ajax/statuses/mymblog`. Devuelve las publicaciones tal
+///   como vienen en el muro, y el `pic_infos` de ese listado trae variantes ya
+///   reducidas: por eso el explorador enseñaba 810×1080 mientras el mismo post
+///   pegado a mano bajaba a resolución completa. Además responde 403 a quien no
+///   lleve sesión (necesita las cookies `SUB` y `SUBP` de `.weibo.com`).
+///
+/// - `tabtype=album` → `/ajax/profile/getImageWall`, y por cada entrada vuelve
+///   a pedir la publicación con `/ajax/statuses/show`, que es EXACTAMENTE la
+///   misma llamada que hace el extractor de post suelto. Misma respuesta, mismo
+///   `largest`, misma resolución que copiando la URL del post.
+///
+/// De regalo, el muro de fotos solo lista publicaciones con imagen o vídeo: las
+/// de texto no aparecen, que es justo lo que se quería en la rejilla.
+fn weibo_album_url(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    if !(host_matches(&host, "weibo.com") || host_matches(&host, "weibo.cn")) {
+        return None;
+    }
+    let low = url.to_ascii_lowercase();
+    // Ya se probó el álbum, o no es una URL de perfil
+    if low.contains("tabtype=album") || !low.contains("/u/") {
+        return None;
+    }
+    let base = url.split('?').next()?.trim_end_matches('/');
+    Some(format!("{base}?tabtype=album"))
+}
+
+/// Vuelta atrás: del muro de fotos al feed.
+///
+/// El álbum es mejor cuando funciona, pero no todas las cuentas lo tienen
+/// poblado. Si vuelve vacío, se prueba el feed antes de rendirse.
+fn weibo_feed_url(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    if !(host_matches(&host, "weibo.com") || host_matches(&host, "weibo.cn")) {
+        return None;
+    }
+    if !url.to_ascii_lowercase().contains("tabtype=album") {
+        return None;
+    }
+    let base = url.split('?').next()?.trim_end_matches('/');
+    Some(format!("{base}?tabtype=feed"))
+}
+
 /// Motor capaz de resolver una URL de PÁGINA cuando el enlace directo falla.
 /// `None` = ningún motor la soporta (p. ej. douyin.com/note/…: yt-dlp no tiene
 /// extractor de notas y gallery-dl no tiene extractor de Douyin).
@@ -637,6 +738,12 @@ fn is_cyberdrop_site(url: &str) -> bool {
 }
 
 fn engine_for_url(url: &str) -> Engine {
+    // MEGA va primero: sus enlaces no se parecen a nada de lo de abajo y el
+    // descifrado es inseparable de la descarga, así que ningún otro motor
+    // puede encargarse de ellos.
+    if mega::is_mega_url(url) {
+        return Engine::Mega;
+    }
     // Hosters con API abierta (Pixeldrain, GoFile, MediaFire): resolución nativa
     if hosters::is_filehost(url) {
         return Engine::FileHost;
@@ -869,6 +976,172 @@ fn is_cookie_error(msg: &str) -> bool {
         || (m.contains("cookies") && m.contains("decrypt"))
 }
 
+/// Host de una URL, en minúsculas, sin userinfo ni puerto.
+/// `None` si no es una URL absoluta (sin esquema) o no tiene host.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.rsplit('@').next()?; // descarta usuario:clave@
+    let host = host.split(':').next()?; // descarta :puerto
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// ¿`host` es exactamente `suffix` o un subdominio suyo?
+///
+/// Comparación estructural, no por subcadena. Con `contains()`,
+/// «weibo.com.atacante.net» pasaba por ser weibo.com, y «passport.weibo.com»
+/// era indistinguible de «weibo.com» — que es justo lo que rompía el routing.
+fn host_matches(host: &str, suffix: &str) -> bool {
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+/// ¿Este sitio necesita cookies desde el PRIMER intento?
+///
+/// YouTube **no**, y es importante: en cuanto yt-dlp encuentra cookies de
+/// cuenta de YouTube cambia al cliente `web_creator`, que exige un PO Token
+/// ligado al ID del vídeo. Sin proveedor de PO Token se descartan TODOS los
+/// formatos y la descarga muere con «Requested format is not available»
+/// aunque el vídeo sea público (yt-dlp#16569). El contenido público se baja
+/// sin problema sin cookies.
+///
+/// Instagram, Weibo y las redes sociales **sí**: sin sesión devuelven 401 o
+/// una página de login antes de listar nada, así que empezar sin cookies solo
+/// gasta una petición.
+///
+/// Para todo lo demás se empieza sin cookies y se escala solo si el error lo
+/// pide (ver `needs_auth_error`): menos exposición de las cookies del usuario
+/// a sitios que no las necesitan.
+fn needs_cookies_upfront(url: &str) -> bool {
+    const AUTH_FIRST: &[&str] = &[
+        "instagram.com",
+        "weibo.com",
+        "weibo.cn",
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+    ];
+    let Some(host) = host_of(url) else { return false };
+    AUTH_FIRST.iter().any(|s| host_matches(&host, s))
+}
+
+/// ¿El error indica que hace falta autenticarse DE VERDAD?
+///
+/// Distinto de `is_cookie_error`, que detecta cookies ilegibles. Este decide
+/// si merece la pena reintentar *añadiendo* cookies: login, vídeo privado,
+/// restricción de edad, contenido solo para miembros.
+fn needs_auth_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("login required")
+        || m.contains("sign in to confirm")
+        || m.contains("this video is private")
+        || m.contains("private video")
+        || m.contains("members-only")
+        || m.contains("join this channel")
+        || m.contains("age-restricted")
+        || m.contains("confirm your age")
+        || m.contains("account associated with this")
+        || m.contains("http error 401")
+        || m.contains("http error 403")
+}
+
+/// Nombre del autor/perfil deducido de la propia URL.
+///
+/// Hasta ahora el autor solo lo aportaban la vista Perfil y el capturador del
+/// navegador. Pegar un perfil de Instagram en Descargas dejaba el autor vacío
+/// y, aunque «Crear subcarpeta por autor» estuviese activado, todo caía suelto
+/// en la raíz de la carpeta de descargas mezclado con lo demás.
+///
+/// Devuelve cadena vacía cuando la URL no identifica a un autor. Es preferible
+/// no crear carpeta a inventarse una con un trozo cualquiera de la ruta.
+fn author_from_url(url: &str) -> String {
+    let Some(host) = host_of(url) else { return String::new() };
+
+    let path = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').skip(1).filter(|s| !s.is_empty()).collect();
+    let first = segs.first().copied().unwrap_or("");
+
+    /// Segmentos que son secciones del sitio, no perfiles.
+    const NOT_PROFILES: &[&str] = &[
+        "p", "tv", "reel", "reels", "stories", "explore", "accounts", "direct",
+        "status", "i", "home", "search", "hashtag", "watch", "shorts", "channel",
+        "video", "photo", "note", "u", "tag", "pin", "media", "about", "help",
+    ];
+
+    /// Valida que el segmento parezca un nombre de usuario y no basura.
+    fn as_user(seg: &str) -> String {
+        let s = seg.trim_start_matches('@');
+        let plausible = !s.is_empty()
+            && s.len() <= 40
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if plausible && !NOT_PROFILES.contains(&s.to_ascii_lowercase().as_str()) {
+            s.to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    // Weibo identifica al autor con un número: weibo.com/u/1234567.
+    // Se prefija para que la carpeta no sea un número suelto sin contexto.
+    if host_matches(&host, "weibo.com") || host_matches(&host, "weibo.cn") {
+        if first == "u" {
+            if let Some(id) = segs.get(1) {
+                let id = as_user(id);
+                if !id.is_empty() {
+                    return format!("weibo_{id}");
+                }
+            }
+        }
+        return String::new();
+    }
+
+    // TikTok, Douyin y YouTube marcan el perfil con @: exigirlo evita tomar
+    // «watch» o «video» por un nombre de usuario.
+    if host_matches(&host, "tiktok.com")
+        || host_matches(&host, "douyin.com")
+        || host_matches(&host, "youtube.com")
+    {
+        return if first.starts_with('@') { as_user(first) } else { String::new() };
+    }
+
+    // Sitios donde el primer segmento de la ruta es el perfil
+    const FIRST_SEG_IS_USER: &[&str] = &[
+        "instagram.com", "twitter.com", "x.com", "tumblr.com",
+        "deviantart.com", "artstation.com",
+    ];
+    let pinterest = host == "pinterest.com"
+        || host.starts_with("pinterest.")
+        || host.contains(".pinterest.");
+    if pinterest || FIRST_SEG_IS_USER.iter().any(|s| host_matches(&host, s)) {
+        return as_user(first);
+    }
+
+    String::new()
+}
+
+/// Selector de formato de yt-dlp.
+///
+/// Con ffmpeg se piden los mejores flujos por separado y se fusionan, que es
+/// la única forma de pasar de 720p en YouTube y de bajar cualquier cosa de
+/// Bilibili (solo sirve DASH).
+///
+/// Sin ffmpeg, SOLO formatos ya fusionados. El respaldo anterior era
+/// `b/bv*+ba`, que ante la ausencia de un premezclado intentaba fusionar sin
+/// fusionador y abortaba con OSError [Errno 2] — exactamente lo que se quería
+/// evitar.
+fn format_selector(has_ffmpeg: bool) -> &'static str {
+    if has_ffmpeg {
+        "bv*+ba/b"
+    } else {
+        "b"
+    }
+}
+
 fn dirs_download() -> PathBuf {
     if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
         PathBuf::from(home).join("Downloads")
@@ -958,6 +1231,10 @@ struct App {
     cyberdrop_progress: f32,
     profile_url: String,
     profile_want_videos: bool,
+    /// Portadas del análisis de perfil, por índice en `profile_entries`
+    profile_thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
+    profile_pending: std::collections::HashSet<usize>,
+    profile_failed: std::collections::HashSet<usize>,
     profile_want_images: bool,
     profile_analyzing: bool,
     profile_entries: Vec<ProfileEntry>,
@@ -999,7 +1276,31 @@ struct App {
     booru_site: usize,
     booru_tags: String,
     booru_page: u32,
+    /// Generación de la búsqueda en curso. Una respuesta con un número
+    /// distinto llega de una búsqueda que el usuario ya descartó, y pisarla
+    /// mostraría resultados de otro personaje o de otro sitio.
+    booru_epoch: u64,
     booru_posts: Vec<booru::Post>,
+    /// Explorador de galerías: elementos listados sin descargar
+    gallery_items: Vec<gallery::GalleryItem>,
+    gallery_page: u32,
+    /// Igual que en Booru: descarta listados de un perfil ya abandonado
+    gallery_epoch: u64,
+    /// Filtro PROPIO de la rejilla de galerías. Separado del de TikTok a
+    /// propósito: son dos flujos distintos y compartir el estado hacía que
+    /// tocar uno cambiara el otro sin que se viera la relación.
+    gallery_want_images: bool,
+    gallery_want_videos: bool,
+    gallery_loading: bool,
+    /// URL del perfil que se está explorando
+    gallery_url: String,
+    /// Último motivo de fallo, íntegro y legible en la propia vista
+    gallery_error: String,
+    /// Texturas de previsualización, por índice en `gallery_items`
+    gallery_thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// Índices con petición en vuelo, para no pedir la misma dos veces
+    gallery_pending: std::collections::HashSet<usize>,
+    gallery_failed: std::collections::HashSet<usize>,
     booru_searching: bool,
     booru_min_w: u32,
     /// Filtro de clasificación: "" = todo, si no la letra del booru (g/s/q/e)
@@ -1102,6 +1403,9 @@ impl App {
             cyberdrop_progress: 0.0,
             profile_url: String::new(),
             profile_want_videos: true,
+            profile_thumbs: std::collections::HashMap::new(),
+            profile_pending: std::collections::HashSet::new(),
+            profile_failed: std::collections::HashSet::new(),
             profile_want_images: true,
             profile_analyzing: false,
             profile_entries: Vec::new(),
@@ -1130,7 +1434,19 @@ impl App {
             booru_site: 0,
             booru_tags: String::new(),
             booru_page: 1,
+            booru_epoch: 0,
             booru_posts: Vec::new(),
+            gallery_items: Vec::new(),
+            gallery_page: 1,
+            gallery_epoch: 0,
+            gallery_want_images: true,
+            gallery_want_videos: true,
+            gallery_loading: false,
+            gallery_url: String::new(),
+            gallery_error: String::new(),
+            gallery_thumbs: std::collections::HashMap::new(),
+            gallery_pending: std::collections::HashSet::new(),
+            gallery_failed: std::collections::HashSet::new(),
             booru_searching: false,
             booru_min_w: 0,
             booru_rating: String::new(),
@@ -1279,10 +1595,30 @@ impl App {
         } else {
             trimmed
         };
+        // Canonicalización ANTES de deduplicar y de enrutar. Sin esto, el
+        // formato moderno y el antiguo del mismo archivo de MEGA se encolarían
+        // como dos filas distintas y se descargaría dos veces.
+        let canonical;
+        let url: &str = match mega::canonicalize(url) {
+            Some(c) => {
+                canonical = c;
+                &canonical
+            }
+            None => url,
+        };
+
         if url.is_empty() || self.rows.iter().any(|r| r.url == url) {
             return;
         }
         let engine = engine_for_url(url);
+
+        // Autor para agrupar en subcarpeta. Si quien llama no lo aporta
+        // (LinkGrabber, pegar enlaces, importar TXT/JSON, reintento) se deduce
+        // de la URL. A propósito NO entra en el nombre del archivo: así los
+        // enlaces pegados conservan exactamente el nombre de siempre y el
+        // cambio se limita a dónde se guardan.
+        let derived = if author.is_empty() { author_from_url(url) } else { String::new() };
+        let folder_author: &str = if author.is_empty() { &derived } else { author };
 
         // Identificador del post: el que envía el capturador, el de la URL,
         // o un hash corto y estable de la propia URL (nunca un contador, que
@@ -1325,9 +1661,12 @@ impl App {
             // Se resuelve al iniciar; el nombre real llega con cada archivo.
             Engine::FileHost => format!("{} ({})", stem, hosters::host_name(url)),
             Engine::Cyberdrop => format!("{stem} (cyberdrop-dl)"),
+            // El nombre real viene cifrado en los atributos y solo se conoce
+            // tras resolver el enlace; esto es solo la etiqueta provisional.
+            Engine::Mega => format!("{stem} (MEGA)"),
         };
 
-        self.push_row(url, page_url, author, engine, filename, thumb, "");
+        self.push_row(url, page_url, folder_author, engine, filename, thumb, "");
     }
 
     /// Inserta una fila en la cola. `cookie` solo lo usan los enlaces directos
@@ -1412,10 +1751,30 @@ impl App {
 
     // -------------------- Motor --------------------
 
+    /// Ajusta el límite de descargas simultáneas.
+    ///
+    /// NUNCA reemplaza el semáforo mientras haya tareas esperando turno. Antes
+    /// se creaba uno nuevo y se soltaba el anterior: las tareas que aguardaban
+    /// en el viejo recibían un error de adquisición al destruirse y morían en
+    /// silencio, dejando sus filas en «Esperando» para siempre.
+    ///
+    /// Subir el límite se hace añadiendo permisos al semáforo existente, que es
+    /// una operación segura y no rompe a nadie. Bajarlo requiere sustituirlo, y
+    /// eso solo se permite con la cola parada.
     fn refresh_semaphore(&mut self) {
-        if self.sem_permits != self.settings.concurrency {
-            self.sem = Arc::new(Semaphore::new(self.settings.concurrency));
-            self.sem_permits = self.settings.concurrency;
+        let want = self.settings.concurrency;
+        if self.sem_permits == want {
+            return;
+        }
+        if want > self.sem_permits {
+            self.sem.add_permits(want - self.sem_permits);
+            self.sem_permits = want;
+            return;
+        }
+        // Reducir: solo si no hay nada en marcha que pueda quedarse colgado
+        if !self.rows.iter().any(|r| r.status.is_active()) {
+            self.sem = Arc::new(Semaphore::new(want));
+            self.sem_permits = want;
         }
     }
 
@@ -1433,7 +1792,11 @@ impl App {
         }
         self.refresh_semaphore();
         let dir = self.dest_dir(&self.rows[i].author);
-        let _ = std::fs::create_dir_all(&dir);
+        // OJO: aquí había un std::fs::create_dir_all, es decir E/S SÍNCRONA en
+        // el hilo de la interfaz. Con una fila suelta no se nota; al expandir
+        // una carpeta de MEGA se llama 100+ veces seguidas y, con un antivirus
+        // inspeccionando cada acceso, la ventana se queda «No responde».
+        // La carpeta se crea ahora dentro de la tarea asíncrona.
 
         let row = &mut self.rows[i];
         row.cancel = Arc::new(AtomicBool::new(false));
@@ -1459,6 +1822,7 @@ impl App {
         let galdl = self.galdl_cmd.clone();
         let cyberdrop = self.cyberdrop_cmd.clone();
         self.rt.spawn(async move {
+            let _ = tokio::fs::create_dir_all(&dir).await;
             download_task(client, spec, sem, tx, ytdlp, galdl, cyberdrop).await;
         });
     }
@@ -1672,7 +2036,7 @@ impl App {
                             continue;
                         }
                         let name = sanitize(&it.filename, 150);
-                        self.push_row(&it.url, &page_url, &author, Engine::Http, name, "", &it.cookie);
+                        self.push_row(&it.url, &page_url, &author, it.engine, name, "", &it.cookie);
                         new_ids.push(self.next_id);
                     }
                     // Arrancar de inmediato lo resuelto (el usuario ya dio a iniciar)
@@ -1708,7 +2072,68 @@ impl App {
                     self.torrent_adding = false;
                     self.toast(i18n::torrent_error(self.settings.lang, &e));
                 }
-                Ev::BooruResults(posts) => {
+                Ev::GalleryResults(_, _, epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryError(_, epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryResults(items, page, _) => {
+                    self.gallery_loading = false;
+                    self.gallery_page = page;
+                    if items.is_empty() && page > 1 {
+                        self.toast(t(self.settings.lang, "gal.no_more"));
+                    } else if page > 1 {
+                        // «Cargar más» AÑADE. Reemplazar perdía lo ya marcado y
+                        // además invalidaba las miniaturas ya descargadas.
+                        self.gallery_items.extend(items);
+                    } else {
+                        // Una lista vacía en la primera página NO puede quedarse
+                        // en silencio: el usuario ve la pantalla igual que antes
+                        // y no sabe si falló, si está cargando o si no hay nada.
+                        // En Instagram la causa casi siempre es la sesión.
+                        if items.is_empty() {
+                            self.toast(t(self.settings.lang, "gal.empty"));
+                        }
+                        self.gallery_items = items;
+                        self.gallery_thumbs.clear();
+                        self.gallery_pending.clear();
+                        self.gallery_failed.clear();
+                    }
+                }
+                Ev::ThumbFailed(idx, es_perfil) => {
+                    if es_perfil {
+                        self.profile_pending.remove(&idx);
+                        self.profile_failed.insert(idx);
+                    } else {
+                        self.gallery_pending.remove(&idx);
+                        self.gallery_failed.insert(idx);
+                    }
+                }
+                Ev::ProfileThumb(idx, img) => {
+                    self.profile_pending.remove(&idx);
+                    let tex =
+                        ctx.load_texture(format!("prof_{idx}"), img, egui::TextureOptions::LINEAR);
+                    self.profile_thumbs.insert(idx, tex);
+                }
+                Ev::GalleryThumb(idx, img) => {
+                    self.gallery_pending.remove(&idx);
+                    let tex = ctx.load_texture(
+                        format!("gal_{idx}"),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.gallery_thumbs.insert(idx, tex);
+                }
+                Ev::GalleryError(msg, _) => {
+                    self.gallery_loading = false;
+                    // El texto íntegro se queda en la vista; el toast solo avisa
+                    self.gallery_error = msg.clone();
+                    self.toast(msg.lines().next().unwrap_or("").to_string());
+                }
+                Ev::BooruResults(posts, epoch) if epoch != self.booru_epoch => {
+                    // Respuesta de una búsqueda ya descartada: se ignora sin
+                    // tocar el indicador de carga, que pertenece a la actual.
+                    let _ = posts;
+                }
+                Ev::BooruError(_, epoch) if epoch != self.booru_epoch => {}
+                Ev::BooruResults(posts, _) => {
                     self.booru_searching = false;
                     let n = posts.len();
                     self.booru_posts = posts;
@@ -1717,7 +2142,7 @@ impl App {
                     self.booru_pending.clear();
                     self.toast(i18n::booru_found(self.settings.lang, n));
                 }
-                Ev::BooruError(e) => {
+                Ev::BooruError(e, _) => {
                     self.booru_searching = false;
                     self.toast(i18n::booru_error(self.settings.lang, &e));
                 }
@@ -1776,7 +2201,25 @@ async fn download_task(
     galdl: Option<String>,
     cyberdrop: Option<String>,
 ) {
-    let Ok(_permit) = sem.acquire_owned().await else { return };
+    // Aquí había un `else { return }` mudo. Si el semáforo se cierra o se
+    // reemplaza mientras hay tareas esperando turno, `acquire_owned` devuelve
+    // Err y la tarea se moría sin decir nada: la fila se quedaba en «Esperando»
+    // eternamente, sin error, sin progreso y sin forma de saber por qué.
+    // Un fallo invisible es peor que uno ruidoso.
+    let _permit = match sem.acquire_owned().await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx.send(Ev::ErrorDetail(
+                spec.id,
+                format!("no se pudo reservar hueco de descarga: {e}"),
+            ));
+            let _ = tx.send(Ev::Status(
+                spec.id,
+                Status::Error("cola interrumpida; pulsa Reintentar".into()),
+            ));
+            return;
+        }
+    };
     if spec.cancel.load(Ordering::Relaxed) {
         let _ = tx.send(Ev::Status(spec.id, Status::Paused));
         return;
@@ -1797,6 +2240,10 @@ async fn download_task(
         }
         Engine::Cyberdrop => {
             run_cyberdrop(&spec, &spec.url.clone(), &tx, cyberdrop.as_deref()).await;
+            return;
+        }
+        Engine::Mega => {
+            run_mega(&client, &spec, &tx).await;
             return;
         }
         Engine::Http => {}
@@ -1995,7 +2442,8 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        // `mode()` lo aporta el propio tokio::fs::OpenOptions en Unix; el trait
+        // de std sobraba y solo generaba un aviso en Linux y macOS.
         use tokio::io::AsyncWriteExt;
         let mut f = tokio::fs::OpenOptions::new()
             .write(true)
@@ -2019,6 +2467,82 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 ///
 /// `--range` pagina: 40 resultados por página. Es el mismo binario que ya usa
 /// la app para descargar galerías, así que no añade ninguna dependencia nueva.
+/// Ejecuta un motor capturando su salida, CON LÍMITE DE TIEMPO.
+///
+/// `Command::output()` no tiene tope: si gallery-dl se queda esperando a un
+/// booru que no responde, o reintentando internamente tras un bloqueo por
+/// ritmo, la tarea no termina nunca. Como el evento de resultado nunca llega,
+/// la interfaz se queda con el indicador girando para siempre y no hay forma
+/// de recuperarse salvo reiniciar. Es el mismo patrón de fallo mudo que ya
+/// apareció en MEGA: algo que no vuelve y nadie lo cuenta.
+///
+/// Al agotarse el plazo se mata el ÁRBOL de procesos, no solo el hijo:
+/// gallery-dl es un empaquetado PyInstaller y deja un nieto de Python vivo si
+/// se termina únicamente el lanzador.
+async fn run_capture_timeout(
+    mut cmd: tokio::process::Command,
+    limite: Duration,
+) -> std::io::Result<(std::process::ExitStatus, String, String)> {
+    use tokio::io::AsyncReadExt;
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+
+    // Las tuberías se drenan en paralelo: si se llenan, el hijo se bloquea
+    // escribiendo y el tope de tiempo saltaría por un motivo equivocado.
+    let t_out = tokio::spawn(async move {
+        let mut s = String::new();
+        if let Some(h) = so.as_mut() {
+            let _ = h.read_to_string(&mut s).await;
+        }
+        s
+    });
+    let t_err = tokio::spawn(async move {
+        let mut s = String::new();
+        if let Some(h) = se.as_mut() {
+            let _ = h.read_to_string(&mut s).await;
+        }
+        s
+    });
+
+    let fin = Instant::now() + limite;
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if Instant::now() >= fin {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "el motor no respondió a tiempo",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    };
+
+    Ok((
+        status,
+        t_out.await.unwrap_or_default(),
+        t_err.await.unwrap_or_default(),
+    ))
+}
+
+/// Tope para una búsqueda en un booru.
+///
+/// Corto a propósito. Un booru sano contesta en 2-5 segundos; pasados 25 no
+/// está pensando, está bloqueando o reintentando por dentro. Esperar 90 s
+/// «por si acaso» solo consigue que el usuario crea que la aplicación se ha
+/// colgado, que es exactamente el problema que este tope venía a resolver.
+const BOORU_TIMEOUT: Duration = Duration::from_secs(25);
+/// Tope para listar una galería. Mucho mayor porque Instagram se espacia
+/// 6-12 s entre peticiones y una página de 30 puede tardar varios minutos.
+const GALLERY_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[allow(clippy::too_many_arguments)]
 async fn booru_search(
     program: String,
     url: String,
@@ -2026,6 +2550,7 @@ async fn booru_search(
     per_page: u32,
     auth_cfg: Option<String>,
     tx: UnboundedSender<Ev>,
+    epoch: u64,
 ) {
     let first = (page.saturating_sub(1)) * per_page + 1;
     let last = first + per_page - 1;
@@ -2038,6 +2563,7 @@ async fn booru_search(
     };
 
     let mut cmd = tokio::process::Command::new(&program);
+    utf8_env(&mut cmd);
     cmd.args(["-j", "--range", &format!("{first}-{last}"), "--no-download"]);
     if let Some(p) = &cfg_path {
         cmd.arg("-c").arg(p);
@@ -2048,7 +2574,7 @@ async fn booru_search(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let result = cmd.output().await;
+    let result = run_capture_timeout(cmd, BOORU_TIMEOUT).await;
 
     // Borrado inmediato: el archivo solo existe mientras dura la búsqueda
     if let Some(p) = &cfg_path {
@@ -2056,25 +2582,25 @@ async fn booru_search(
     }
 
     match result {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
+        Ok((_st, stdout, stderr)) => {
+            let stdout = stdout.as_str();
             if stdout.trim().is_empty() {
-                let err = String::from_utf8_lossy(&out.stderr);
+                let err = stderr.as_str();
                 let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("sin resultados");
-                let _ = tx.send(Ev::BooruError(last.chars().take(160).collect()));
+                let _ = tx.send(Ev::BooruError(last.chars().take(160).collect(), epoch));
                 return;
             }
-            match booru::parse(&stdout) {
+            match booru::parse(stdout) {
                 Ok(posts) => {
-                    let _ = tx.send(Ev::BooruResults(posts));
+                    let _ = tx.send(Ev::BooruResults(posts, epoch));
                 }
                 Err(e) => {
-                    let _ = tx.send(Ev::BooruError(e));
+                    let _ = tx.send(Ev::BooruError(e, epoch));
                 }
             }
         }
         Err(e) => {
-            let _ = tx.send(Ev::BooruError(e.to_string()));
+            let _ = tx.send(Ev::BooruError(e.to_string(), epoch));
         }
     }
 }
@@ -2339,6 +2865,7 @@ async fn ytdlp_exec(
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut cmd = tokio::process::Command::new(program);
+    utf8_env(&mut cmd);
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2440,7 +2967,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     // Calidad adaptativa: con ffmpeg se puede fusionar vídeo y audio por
     // separado (necesario para 1080p+ en YouTube y similares). Sin él, hay que
     // limitarse a un archivo ya fusionado o yt-dlp aborta con OSError [Errno 2].
-    let fmt = if spec.ffmpeg.is_some() { "bv*+ba/b" } else { "b/bv*+ba" };
+    let fmt = format_selector(spec.ffmpeg.is_some());
 
     let mut base: Vec<String> = vec![
         "-f".into(), fmt.into(),
@@ -2457,7 +2984,11 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         "--fragment-retries".into(), "5".into(),
         "--retry-sleep".into(), "exp=2:60".into(),
         "--socket-timeout".into(), "30".into(),
-        "--no-warnings".into(),
+        // Sin --no-warnings a propósito: los avisos de yt-dlp son justo lo que
+        // explica por qué falla una descarga (runtime JS ausente, challenge no
+        // resuelto, PO token, extracción de firma). Silenciarlos dejaba a la
+        // app y al usuario a ciegas. El panel de error muestra solo la última
+        // línea relevante; la salida íntegra queda en Ev::ErrorDetail.
     ];
 
     // Bilibili publica cada resolución en dos códecs (AVC y HEVC) y el AVC
@@ -2480,12 +3011,24 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     // Throttle global: evita que varios procesos golpeen la API a la vez
     throttle().await;
 
-    let mut args = base.clone();
-    args.extend(spec.extra_args.iter().cloned());
-    args.push("--".into()); // fin de opciones: la URL nunca se interpreta como flag
-    args.push(url.to_string());
+    // Política de cookies (ver needs_cookies_upfront). Antes se pasaban a TODA
+    // descarga, y eso es lo que rompía YouTube: con cookies de cuenta yt-dlp
+    // exige un PO Token que no tenemos y descarta todos los formatos.
+    let has_cookies = !spec.extra_args.is_empty();
+    let cookies_first = has_cookies && needs_cookies_upfront(url);
 
-    let first = match ytdlp_exec(program, &args, spec.id, tx, &spec.cancel).await {
+    // fin de opciones (`--`): la URL nunca se interpreta como flag
+    let build = |with_cookies: bool| -> Vec<String> {
+        let mut a = base.clone();
+        if with_cookies {
+            a.extend(spec.extra_args.iter().cloned());
+        }
+        a.push("--".into());
+        a.push(url.to_string());
+        a
+    };
+
+    let first = match ytdlp_exec(program, &build(cookies_first), spec.id, tx, &spec.cancel).await {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
@@ -2505,28 +3048,27 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
 
     let err = first.stderr;
 
-    // Cookies ilegibles (App-Bound Encryption, DB bloqueada…): reintentar sin ellas
-    if is_cookie_error(&err) && !spec.extra_args.is_empty() {
-        let _ = tx.send(Ev::CookieFallback);
-        let _ = tx.send(Ev::DisableCookies);
+    // Escalada: se fue sin cookies y el sitio pide autenticación de verdad
+    // (login, privado, edad, solo miembros). Ahora sí tiene sentido añadirlas.
+    let retry_with_cookies = !cookies_first && has_cookies && needs_auth_error(&err);
 
-        let mut retry_args = base;
-        retry_args.push("--".into());
-        retry_args.push(url.to_string());
+    // Camino inverso: se fueron con cookies y resultaron ilegibles
+    // (App-Bound Encryption de Chrome 127+, DB bloqueada…): reintentar sin ellas.
+    let retry_without_cookies = cookies_first && is_cookie_error(&err);
 
-        match ytdlp_exec(program, &retry_args, spec.id, tx, &spec.cancel).await {
+    if retry_with_cookies || retry_without_cookies {
+        if retry_without_cookies {
+            let _ = tx.send(Ev::CookieFallback);
+            let _ = tx.send(Ev::DisableCookies);
+        }
+        match ytdlp_exec(program, &build(retry_with_cookies), spec.id, tx, &spec.cancel).await {
             Ok(r) if r.killed => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Paused));
             }
             Ok(r) if r.ok => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Done));
             }
-            Ok(r) => {
-                let last = r.stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error yt-dlp");
-                let short: String = last.chars().take(60).collect();
-                let _ = tx.send(Ev::ErrorDetail(spec.id, r.stderr));
-                let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
-            }
+            Ok(r) => report_ytdlp_error(spec.id, &err, r.stderr, tx),
             Err(e) => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
             }
@@ -2534,10 +3076,501 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         return;
     }
 
-    let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error yt-dlp");
-    let short: String = last.chars().take(60).collect();
-    let _ = tx.send(Ev::ErrorDetail(spec.id, err));
-    let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
+    report_ytdlp_error(spec.id, "", err, tx);
+}
+
+/// Reporta un fallo de yt-dlp conservando la salida completa.
+///
+/// La etiqueta corta busca primero una línea `ERROR:`; antes se cogía la
+/// última línea no vacía, que con los avisos ya visibles suele ser un
+/// `WARNING:` irrelevante en lugar del error real.
+///
+/// `first` es la salida del primer intento cuando hubo dos: sin ella se
+/// perdería la razón por la que se decidió reintentar.
+fn report_ytdlp_error(id: u64, first: &str, last_out: String, tx: &UnboundedSender<Ev>) {
+    let brief = last_out
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("ERROR:"))
+        .or_else(|| last_out.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or("error yt-dlp");
+    let short: String = brief.trim().chars().take(60).collect();
+
+    let full = if first.is_empty() {
+        last_out
+    } else {
+        format!("--- intento 1 ---\n{first}\n--- intento 2 ---\n{last_out}")
+    };
+    let _ = tx.send(Ev::ErrorDetail(id, full));
+    let _ = tx.send(Ev::Status(id, Status::Error(short)));
+}
+
+/// Descarga un enlace público de MEGA con el motor nativo de `src/mega`.
+///
+/// Un enlace de ARCHIVO se descarga aquí. Un enlace de CARPETA se enumera y la
+/// fila se expande en una por archivo, reutilizando el mismo mecanismo que ya
+/// usan los hosters nativos: así cada archivo tiene su propio progreso, su
+/// pausa y su error, en vez de una barra única y opaca.
+async fn run_mega(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSender<Ev>) {
+    // Pausar mientras 100 filas están resolviendo debe notarse YA. Sin esta
+    // comprobación, cada tarea encolada seguía haciendo su petición aunque el
+    // usuario ya hubiera pulsado Pausa.
+    if spec.cancel.load(Ordering::Relaxed) {
+        let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        return;
+    }
+    let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
+
+    let link = match mega::parse(&spec.url) {
+        Ok(l) => l,
+        Err(e) => {
+            // Aquí no hay enlace parseado, así que no hay nada que redactar:
+            // se informa sin incluir la URL, que podría llevar la clave.
+            let _ = tx.send(Ev::ErrorDetail(spec.id, e.to_string()));
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(e.to_string())));
+            return;
+        }
+    };
+
+    /// Diagnóstico con el enlace YA REDACTADO.
+    ///
+    /// Saber qué enlace falló es justo lo que hace falta para dar soporte, y
+    /// `redacted()` deja el identificador visible pero sustituye la clave por
+    /// [REDACTED]. Volcar `spec.url` tal cual filtraría la clave al log.
+    fn detail(link: &mega::MegaLink, e: &mega::MegaError) -> String {
+        format!("{e}\n\nenlace: {}\nid: {}", link.redacted(), link.handle())
+    }
+
+    // ---------------- Carpeta pública: expandir en una fila por archivo -------
+    //
+    // OJO CON LA CONDICIÓN: solo se expande una carpeta SIN nodo. Un enlace
+    // `/folder/H#K/file/NODE` también parsea como Folder, pero designa UN
+    // archivo concreto, y es justo la forma en que se encola cada archivo al
+    // expandir. Sin el `d.node.is_none()`, cada fila de archivo volvía a listar
+    // la carpeta y se re-expandía a sí misma: la fila se borraba, se recreaba
+    // con otro id, arrancaba y vuelta a empezar. Un bucle infinito que exploraba
+    // sin descargar nunca nada.
+    // Un único match sobre el enlace ya parseado. Antes se parseaba dos veces
+    // y las ramas no cubrían el caso «carpeta con nodo», que es precisamente
+    // como se encola cada archivo al expandir una carpeta.
+    let (query_link, folder) = match &link {
+        // ---- Carpeta SIN nodo: expandir en una fila por archivo y salir ----
+        //
+        // Solo aquí se expande. Un `/folder/H#K/file/NODE` también es Folder,
+        // pero designa UN archivo; si entrase por esta rama volvería a listar
+        // la carpeta y se re-expandiría a sí mismo en bucle infinito, sin
+        // descargar nunca nada.
+        mega::MegaLink::Folder(d) if d.node.is_none() => {
+            match mega::folder::list_cached(client, d).await {
+                Ok(entries) => {
+                    let items: Vec<HostItem> = entries
+                        .iter()
+                        .filter(|e| !e.is_folder && e.size > 0)
+                        .map(|e| HostItem {
+                            url: format!(
+                                "https://mega.nz/folder/{}#{}/file/{}",
+                                d.handle, d.key_b64, e.handle
+                            ),
+                            filename: e
+                                .relative_path
+                                .to_string_lossy()
+                                .replace(['/', '\\'], "_"),
+                            cookie: String::new(),
+                            engine: Engine::Mega,
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        let msg = "MEGA: la carpeta no contiene archivos descargables";
+                        let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.into())));
+                        return;
+                    }
+                    let _ = tx.send(Ev::FileHostResolved(spec.id, items));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(Ev::ErrorDetail(spec.id, detail(&link, &e)));
+                    let _ = tx.send(Ev::Status(spec.id, Status::Error(e.to_string())));
+                    return;
+                }
+            }
+        }
+
+        // ---- Carpeta CON nodo: es UN archivo dentro de la carpeta ----
+        //
+        // Necesita dos cosas: el handle de la carpeta para la API, y su PROPIA
+        // clave de 32 bytes. La de la carpeta son 16 y no sirve para descifrar
+        // un archivo, así que se saca del listado (que está cacheado).
+        mega::MegaLink::Folder(d) => {
+            let node = d.node.clone().unwrap_or_default();
+            match mega::folder::list_cached(client, d).await {
+                Ok(entries) => match entries.iter().find(|e| e.handle == node) {
+                    Some(e) => (
+                        mega::MegaFileLink { handle: node, key_b64: e.key_b64() },
+                        Some(d.handle.clone()),
+                    ),
+                    None => {
+                        let err = mega::MegaError::NotFound;
+                        let _ = tx.send(Ev::ErrorDetail(spec.id, detail(&link, &err)));
+                        let _ = tx.send(Ev::Status(spec.id, Status::Error(err.to_string())));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(Ev::ErrorDetail(spec.id, detail(&link, &e)));
+                    let _ = tx.send(Ev::Status(spec.id, Status::Error(e.to_string())));
+                    return;
+                }
+            }
+        }
+
+        // ---- Enlace de archivo suelto ----
+        mega::MegaLink::File(f) => (f.clone(), None),
+    };
+
+    // A propósito NO se usa el throttle() global: está calibrado para yt-dlp y
+    // gallery-dl raspando perfiles, y mantiene su candado durante 1,8 s. Con 107
+    // archivos de una carpeta eso son más de tres minutos de espera serializada
+    // en los que la aplicación parece colgada. El comando `g` de MEGA es barato,
+    // el listado ya está cacheado, y el límite real lo imponen el semáforo de
+    // concurrencia y el backoff ante los errores -3/-4.
+    mega::gate().await;
+
+    let info = match mega::resolve_file(client, &query_link, folder.as_deref()).await {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = tx.send(Ev::ErrorDetail(spec.id, detail(&link, &e)));
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(e.to_string())));
+            return;
+        }
+    };
+
+    if spec.cancel.load(Ordering::Relaxed) {
+        let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        return;
+    }
+
+    // El tamaño real llega con los metadatos: nunca se muestra un 0 % inventado
+    let _ = tx.send(Ev::Size(spec.id, info.size));
+
+    // El nombre viene cifrado en los atributos: se sanea antes de tocar el disco
+    let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let final_path = dir.join(sanitize(&info.name, 150));
+    let part_path = PathBuf::from(format!("{}.part", final_path.display()));
+
+    let id = spec.id;
+    let tx_p = tx.clone();
+    let tx_f = tx.clone();
+    let cb = mega::Callbacks {
+        progress: &move |done, speed| {
+            let _ = tx_p.send(Ev::Progress(id, done, speed));
+        },
+        phase: &move |ph| {
+            let st = match ph {
+                mega::MegaPhase::FetchingMetadata => Status::Resolving,
+                mega::MegaPhase::Downloading => Status::Downloading,
+                mega::MegaPhase::VerifyingIntegrity => Status::Verifying,
+                mega::MegaPhase::Completed => Status::Done,
+            };
+            let _ = tx_f.send(Ev::Status(id, st));
+        },
+    };
+
+    match mega::download_file(
+        client,
+        &query_link,
+        folder.as_deref(),
+        &info,
+        &part_path,
+        &final_path,
+        &spec.cancel,
+        &cb,
+    )
+    .await
+    {
+        Ok(_) => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Done));
+        }
+        Err(mega::MegaError::Cancelled) => {
+            let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::ErrorDetail(spec.id, detail(&link, &e)));
+            let _ = tx.send(Ev::Status(spec.id, Status::Error(e.to_string())));
+        }
+    }
+}
+
+/// Descarga y decodifica la previsualización de un elemento de galería.
+///
+/// Reutiliza la misma compuerta global que las miniaturas de booru: los CDN de
+/// Instagram y Weibo responden con una página de bloqueo si les llegan treinta
+/// peticiones a la vez. Y el Referer es obligatorio: son CDN anti-hotlink, y
+/// `referer_for` ya sabe cuál toca para cada uno.
+async fn fetch_gallery_thumb(
+    client: reqwest::Client,
+    idx: usize,
+    url: String,
+    tx: UnboundedSender<Ev>,
+) {
+    fetch_preview_thumb(client, idx, url, tx, false).await
+}
+
+/// Descarga la portada de una entrada del análisis de perfil.
+async fn fetch_profile_thumb(
+    client: reqwest::Client,
+    idx: usize,
+    url: String,
+    tx: UnboundedSender<Ev>,
+) {
+    fetch_preview_thumb(client, idx, url, tx, true).await
+}
+
+/// Cuerpo común de ambas: sólo cambia el evento con el que se responde.
+async fn fetch_preview_thumb(
+    client: reqwest::Client,
+    idx: usize,
+    url: String,
+    tx: UnboundedSender<Ev>,
+    es_perfil: bool,
+) {
+    const MAX: usize = 8 * 1024 * 1024;
+    let _permit = thumb_gate().acquire().await.ok();
+
+    // Todo camino que no acaba en imagen tiene que avisar. Si no, la celda se
+    // queda cargando eternamente y encima nunca se reintenta.
+    let fallo = || {
+        let _ = tx.send(Ev::ThumbFailed(idx, es_perfil));
+    };
+
+    let referer = referer_for(&url);
+    let mut req = client.get(&url);
+    if !referer.is_empty() {
+        req = req.header(reqwest::header::REFERER, referer);
+    }
+    let Ok(resp) = req.send().await else {
+        fallo();
+        return;
+    };
+    if !resp.status().is_success() {
+        fallo();
+        return;
+    }
+    let Ok(bytes) = resp.bytes().await else {
+        fallo();
+        return;
+    };
+    // Una respuesta HTML es una página de bloqueo, no una imagen
+    if bytes.is_empty() || bytes.len() > MAX || bytes.starts_with(b"<") {
+        fallo();
+        return;
+    }
+
+    // Decodificar y reescalar fuera del pool async: es trabajo de CPU y
+    // bloquearía a las tareas de descarga.
+    let img = tokio::task::spawn_blocking(move || {
+        let im = image::load_from_memory(&bytes).ok()?;
+        let im = im.thumbnail(320, 320);
+        let rgba = im.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            rgba.as_raw(),
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match img {
+        Some(img) => {
+            let _ = tx.send(if es_perfil {
+                Ev::ProfileThumb(idx, img)
+            } else {
+                Ev::GalleryThumb(idx, img)
+            });
+        }
+        None => fallo(),
+    }
+}
+
+/// Lista una galería con gallery-dl SIN descargar nada.
+///
+/// El ritmo entre peticiones lo marca `galdl_pacing`: Instagram corta sesiones
+/// con facilidad, así que explorar debe ser tan pausado como descargar.
+async fn browse_gallery(
+    program: String,
+    url: String,
+    page: u32,
+    per_page: u32,
+    cookies: Vec<String>,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+) {
+    // Weibo se explora por el muro de fotos, no por el feed: ver weibo_album_url
+    let url = weibo_album_url(&url).unwrap_or(url);
+    browse_gallery_hop(program, url, page, per_page, cookies, tx, 0, epoch).await
+}
+
+/// Tope de redirecciones de extractor. Instagram necesita una
+/// (`/usuario/` → `/usuario/posts/`); más de tres es una cadena rota.
+const MAX_GALLERY_HOPS: u32 = 3;
+
+#[allow(clippy::too_many_arguments)]
+async fn browse_gallery_hop(
+    program: String,
+    url: String,
+    page: u32,
+    per_page: u32,
+    cookies: Vec<String>,
+    tx: UnboundedSender<Ev>,
+    hops: u32,
+    epoch: u64,
+) {
+    let first = (page - 1) * per_page + 1;
+    let last = page * per_page;
+
+    let mut args = gallery::list_args(&url, first, last);
+    // Se clonan porque el salto de extractor vuelve a necesitarlas
+    let cookies_next = cookies.clone();
+    // Las cookies van ANTES del `--`, que cierra la lista de opciones
+    let sep = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    for (i, c) in cookies.into_iter().enumerate() {
+        args.insert(sep + i, c);
+    }
+    let sep = args.iter().position(|a| a == "--").unwrap_or(0);
+    args.insert(sep, galdl_pacing(&url).to_string());
+    args.insert(sep, "--sleep-request".into());
+
+    let mut cmd = tokio::process::Command::new(&program);
+    utf8_env(&mut cmd);
+    cmd.args(&args);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let (estado, stdout, stderr) = match run_capture_timeout(cmd, GALLERY_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = tx.send(Ev::GalleryError(format!("gallery-dl: {e}"), epoch));
+            return;
+        }
+    };
+    let stdout = stdout.as_str();
+    let stderr = stderr.as_str();
+
+    // Comando ejecutado, con la ruta del cookies.txt REDACTADA. Sin esto no hay
+    // forma de saber si el problema es lo que se pide o lo que se responde.
+    let cmdline: String = {
+        let mut v: Vec<String> = Vec::new();
+        let mut saltar = false;
+        for a in &args {
+            if saltar {
+                v.push("[REDACTADO]".into());
+                saltar = false;
+                continue;
+            }
+            if a == "--cookies" {
+                saltar = true;
+            }
+            v.push(a.clone());
+        }
+        format!("gallery-dl {}", v.join(" "))
+    };
+
+    // El stderr se conserva SIEMPRE, no solo cuando no hay JSON. gallery-dl
+    // puede devolver `[]` perfectamente válido y explicar el porqué por stderr
+    // («login required», «no results», un aviso del extractor). Descartarlo
+    // dejaba al usuario con un «no devolvió nada» sin causa, que es justo el
+    // fallo mudo que ya costó caro en el motor de MEGA.
+    let motivo = |extra: &str| -> String {
+        let err: String = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = if err.is_empty() { "(stderr vacío)".to_string() } else { err };
+        // Los primeros caracteres del JSON tal cual: si es `[]`, el extractor
+        // corrió bien y sencillamente no obtuvo nada de Instagram, que es un
+        // diagnóstico completamente distinto a un fallo de argumentos.
+        let crudo: String = stdout.trim().chars().take(300).collect();
+        // Pista específica del sitio. El texto genérico habla de Instagram, que
+        // en un 403 de Weibo despista más de lo que ayuda.
+        let es_weibo = host_of(&url)
+            .map(|h| host_matches(&h, "weibo.com") || host_matches(&h, "weibo.cn"))
+            .unwrap_or(false);
+        let extra = if es_weibo && (err.contains("403") || stdout.contains("403")) {
+            format!(
+                "{extra}\n\nWeibo responde 403 cuando la petición no lleva sesión: \
+gallery-dl necesita las cookies SUB y SUBP del dominio .weibo.com. \
+Comprueba que tienes la sesión abierta en el MISMO navegador que has elegido \
+en Ajustes, o exporta un cookies.txt de Weibo."
+            )
+        } else {
+            extra.to_string()
+        };
+        format!(
+            "{extra}\n\n$ {cmdline}\n\ncódigo de salida: {}\n\nstderr:\n{err}\n\nstdout ({} bytes):\n{crudo}",
+            estado.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            stdout.len(),
+        )
+        .chars()
+        .take(1500)
+        .collect()
+    };
+
+    // Se decide primero y se actúa después: el reintento por el muro de fotos
+    // de Weibo tiene que poder salir tanto de un listado vacío como de un
+    // error, y con la estructura anterior habría que duplicarlo en cada rama.
+    enum Accion {
+        Listado(Vec<gallery::GalleryItem>),
+        Salto(String),
+        Fallo(String),
+    }
+
+    let accion = if stdout.trim().is_empty() {
+        Accion::Fallo(motivo("gallery-dl no devolvió JSON."))
+    } else {
+        match gallery::parse_listing(stdout) {
+            Ok(l) if !l.items.is_empty() => Accion::Listado(l.items),
+            // gallery-dl delega en otro extractor: se sigue la pista.
+            Ok(l) if !l.queued.is_empty() => Accion::Salto(l.queued[0].clone()),
+            Ok(_) => Accion::Fallo(motivo("gallery-dl no encontró archivos en este perfil.")),
+            Err(e) => Accion::Fallo(motivo(&e)),
+        }
+    };
+
+    // Si el muro de fotos no da nada (cuenta sin álbum poblado), se prueba el
+    // feed antes de rendirse, aun sabiendo que su resolución es menor.
+    let accion = match accion {
+        Accion::Fallo(m) => match weibo_feed_url(&url) {
+            Some(alt) => Accion::Salto(alt),
+            None => Accion::Fallo(m),
+        },
+        otro => otro,
+    };
+
+    match accion {
+        Accion::Listado(items) => {
+            let _ = tx.send(Ev::GalleryResults(items, page, epoch));
+        }
+        Accion::Salto(siguiente) => {
+            // Tope de saltos para que una cadena circular no cuelgue la app
+            if hops < MAX_GALLERY_HOPS {
+                Box::pin(browse_gallery_hop(
+                    program, siguiente, page, per_page, cookies_next, tx, hops + 1, epoch,
+                ))
+                .await;
+            } else {
+                let _ = tx.send(Ev::GalleryError(motivo(
+                    "gallery-dl encadena demasiadas redirecciones de extractor.",
+                ), epoch));
+            }
+        }
+        Accion::Fallo(m) => {
+            let _ = tx.send(Ev::GalleryError(m, epoch));
+        }
+    }
 }
 
 // ============================= Hilos auxiliares =============================
@@ -2582,6 +3615,7 @@ async fn galdl_exec(
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut cmd = tokio::process::Command::new(program);
+    utf8_env(&mut cmd);
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2778,6 +3812,7 @@ async fn run_filehost(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSen
             let mapped: Vec<HostItem> = items
                 .into_iter()
                 .map(|r| HostItem {
+                    engine: Engine::Http,
                     url: r.url,
                     filename: r.filename,
                     cookie: r.cookie.unwrap_or_default(),
@@ -2863,6 +3898,7 @@ async fn run_analyze(
     extra_args: &[String],
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = tokio::process::Command::new(program);
+    utf8_env(&mut cmd);
     // --sleep-requests: Bilibili responde 412 (bloqueo temporal) si las
     // peticiones de paginación van demasiado seguidas; espaciarlas lo evita.
     cmd.args([
@@ -3923,6 +4959,10 @@ impl eframe::App for App {
                         ui.label(RichText::new(t(lang, "side.ffmpeg_missing")).size(11.5).color(AMBER()))
                             .on_hover_text(t(lang, "side.ffmpeg_tip"));
                     }
+                    // MEGA no necesita binario auxiliar: va compilado dentro.
+                    // Siempre activo, y se deja claro que es sin cuenta.
+                    ui.label(RichText::new(t(lang, "side.mega_active")).size(11.5).color(GREEN()))
+                        .on_hover_text(t(lang, "set.mega"));
                     // cyberdrop-dl es opcional: solo se anuncia si está presente
                     if self.cyberdrop_cmd.is_some() {
                         ui.label(RichText::new(t(lang, "side.cyberdrop_active")).size(11.5).color(GREEN()));
@@ -4330,7 +5370,10 @@ impl App {
                             row.col(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 match r.status {
-                                    Status::Downloading | Status::Waiting | Status::Resolving => {
+                                    Status::Downloading
+                                    | Status::Waiting
+                                    | Status::Resolving
+                                    | Status::Verifying => {
                                         if ui.small_button("⏸").on_hover_text(t(lang, "tip.pause")).clicked() {
                                             actions.push((i, RowAction::Pause));
                                         }
@@ -4351,10 +5394,13 @@ impl App {
                                         }
                                     }
                                 }
-                                if !r.status.is_active() {
-                                    if ui.small_button("🗑").on_hover_text(t(lang, "tip.remove")).clicked() {
-                                        actions.push((i, RowAction::Remove));
-                                    }
+                                if !r.status.is_active()
+                                    && ui
+                                        .small_button("🗑")
+                                        .on_hover_text(t(lang, "tip.remove"))
+                                        .clicked()
+                                {
+                                    actions.push((i, RowAction::Remove));
                                 }
                             });
                         });
@@ -4442,6 +5488,31 @@ impl App {
                     self.toast(t(lang, "profile.need_url"));
                 } else if is_douyin_profile(&url) {
                     self.toast(t(lang, "profile.douyin_unsupported"));
+                } else if gallery::is_browsable(&host_of(&url).unwrap_or_default()) {
+                    // Instagram y Weibo: en vez de tragarse el perfil entero,
+                    // se LISTA primero y el usuario elige. gallery-dl con
+                    // `-j --no-download` da los metadatos sin bajar un byte.
+                    if let Some(prog) = self.galdl_cmd.clone() {
+                        let url = normalize_profile_url(&url);
+                        // Simétrico: explorar una galería limpia el análisis
+                        self.profile_entries.clear();
+                        self.profile_thumbs.clear();
+                        self.profile_pending.clear();
+                        self.profile_failed.clear();
+
+                        self.gallery_url = url.clone();
+                        self.gallery_items.clear();
+                        self.gallery_error.clear();
+                        self.gallery_loading = true;
+                        self.gallery_page = 1;
+                        let tx = self.tx.clone();
+                        let cookies = cookie_args(&self.settings);
+                        self.gallery_epoch += 1;
+                        let ep = self.gallery_epoch;
+                        self.rt.spawn(browse_gallery(prog, url, 1, GALLERY_PER_PAGE, cookies, tx, ep));
+                    } else {
+                        self.toast(t(lang, "profile.need_galdl"));
+                    }
                 } else if is_gallery_site(&url) {
                     // Instagram, Weibo, Pinterest…: yt-dlp no puede enumerar el
                     // perfil. gallery-dl lo descarga completo de una pasada.
@@ -4471,8 +5542,22 @@ impl App {
                         self.toast(t(lang, "profile.need_galdl"));
                     }
                 } else if let Some(prog) = self.ytdlp_cmd.clone() {
+                    // Son dos flujos distintos en la misma vista: dejar la
+                    // rejilla de una búsqueda anterior de Instagram mientras se
+                    // analiza un perfil de TikTok confunde y además mezcla dos
+                    // conjuntos de casillas en pantalla.
+                    self.gallery_items.clear();
+                    self.gallery_error.clear();
+                    self.gallery_url.clear();
+                    self.gallery_thumbs.clear();
+                    self.gallery_pending.clear();
+                        self.gallery_failed.clear();
+
                     self.profile_analyzing = true;
                     self.profile_entries.clear();
+                    self.profile_thumbs.clear();
+                    self.profile_pending.clear();
+                        self.profile_failed.clear();
                     let args = cookie_args(&self.settings);
                     let tx = self.tx.clone();
                     self.rt.spawn(analyze_profile(prog, url, args, tx));
@@ -4481,6 +5566,280 @@ impl App {
                 }
             }
         });
+
+        // ---------------- Explorador de galerías (Instagram, Weibo) ----------
+        if self.gallery_loading {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(t(lang, "gal.listing")).color(CYAN()));
+            });
+        }
+
+        if !self.gallery_loading && self.gallery_items.is_empty() && !self.gallery_url.is_empty() {
+            ui.add_space(12.0);
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new(t(lang, "gal.empty")).size(12.0).color(AMBER()));
+                if !self.gallery_error.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(t(lang, "gal.reason")).size(11.0).color(MUTED()));
+                    // Seleccionable a propósito: el texto de gallery-dl es lo
+                    // que hace falta copiar para diagnosticar.
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.gallery_error.as_str())
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(12)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                }
+            });
+        }
+
+        if !self.gallery_items.is_empty() {
+            ui.add_space(12.0);
+
+            let visibles: Vec<usize> = self
+                .gallery_items
+                .iter()
+                .enumerate()
+                .filter(|(_, it)| {
+                    if it.is_video { self.gallery_want_videos } else { self.gallery_want_images }
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let marcados = visibles.iter().filter(|&&i| self.gallery_items[i].selected).count();
+
+            card_frame().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut self.gallery_want_images, t(lang, "gal.images"));
+                    ui.checkbox(&mut self.gallery_want_videos, t(lang, "gal.videos"));
+                    ui.separator();
+                    if soft_button(ui, t(lang, "gal.select_all")).clicked() {
+                        for &i in &visibles {
+                            self.gallery_items[i].selected = true;
+                        }
+                    }
+                    if soft_button(ui, t(lang, "gal.select_none")).clicked() {
+                        for it in self.gallery_items.iter_mut() {
+                            it.selected = false;
+                        }
+                    }
+                    // Lo filtrado no puede quedarse marcado a escondidas: si no
+                    // se ve, no se encola.
+                    for (i, it) in self.gallery_items.iter_mut().enumerate() {
+                        if it.selected && !visibles.contains(&i) {
+                            it.selected = false;
+                        }
+                    }
+                    ui.separator();
+                    let ocultos = self.gallery_items.len() - visibles.len();
+                    ui.label(
+                        RichText::new(format!("{} / {}", marcados, visibles.len()))
+                            .size(12.0)
+                            .color(MUTED()),
+                    );
+                    if ocultos > 0 {
+                        // Sin esto, filtrar parece «se ha perdido la mitad»
+                        ui.label(
+                            RichText::new(i18n::hidden_by_filter(lang, ocultos))
+                                .size(11.0)
+                                .color(AMBER()),
+                        );
+                    }
+                });
+
+                ui.add_space(6.0);
+
+                // Rejilla con previsualización.
+                //
+                // OJO CON EL ANCHO: `horizontal_wrapped` decide dónde envolver
+                // usando `available_width()`. Dentro de un ScrollArea ese ancho
+                // no está acotado, así que sin fijarlo la rejilla colocaba las
+                // 60 celdas en UNA fila infinita que se salía de la ventana y
+                // no dejaba nada que desplazar hacia abajo.
+                const CELDA: f32 = 150.0;
+                const ALTO_CELDA: f32 = 250.0;
+                let ancho_util = ui.available_width();
+
+                egui::ScrollArea::vertical()
+                    .max_height(520.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                    ui.set_max_width(ancho_util);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                        for &i in &visibles {
+                            let (thumb_url, is_video, marcado, resumen, pos, carrusel) = {
+                                let it = &self.gallery_items[i];
+                                (
+                                    it.thumb_url.clone(),
+                                    it.is_video,
+                                    it.selected,
+                                    it.summary(),
+                                    it.position(),
+                                    it.is_carousel(),
+                                )
+                            };
+
+                            // Pedir la miniatura una sola vez por elemento
+                            if !thumb_url.is_empty()
+                                && !self.gallery_thumbs.contains_key(&i)
+                                && !self.gallery_pending.contains(&i)
+                                && !self.gallery_failed.contains(&i)
+                            {
+                                self.gallery_pending.insert(i);
+                                self.rt.spawn(fetch_gallery_thumb(
+                                    self.client.clone(),
+                                    i,
+                                    thumb_url.clone(),
+                                    self.tx.clone(),
+                                ));
+                            }
+
+                            // Cada celda va en su propio ámbito de id. Sin esto
+                            // las respuestas de egui colisionan entre celdas y
+                            // los clics se pierden.
+                            let mut sel = marcado;
+                            let descripcion = self.gallery_items[i].description.clone();
+
+                            ui.allocate_ui(egui::vec2(CELDA, ALTO_CELDA), |ui| {
+                            ui.set_max_width(CELDA);
+                            ui.push_id(i, |ui| {
+                                let marco = egui::Frame::none()
+                                    .fill(if marcado { ACCENT().linear_multiply(0.30) } else { CARD() })
+                                    .rounding(6.0)
+                                    .inner_margin(4.0);
+                                marco.show(ui, |ui| {
+                                    ui.set_min_width(CELDA - 10.0);
+                                    ui.set_max_width(CELDA - 10.0);
+                                    ui.vertical_centered(|ui| {
+                                        let alto = CELDA - 10.0;
+
+                                        // ImageButton y checkbox son widgets REALES.
+                                        // Antes se pintaba la celda y se intentaba
+                                        // capturar el clic con `interact()` sobre la
+                                        // respuesta de `allocate_ui`, que no registra
+                                        // la interacción de forma fiable: se podía
+                                        // marcar todo o nada, pero no una sola.
+                                        let clic = if let Some(tex) = self.gallery_thumbs.get(&i) {
+                                            let t = tex.size_vec2();
+                                            let k = (alto / t.x.max(1.0)).min(alto / t.y.max(1.0));
+                                            ui.add(
+                                                egui::ImageButton::new((tex.id(), t * k))
+                                                    .frame(false),
+                                            )
+                                            .clicked()
+                                        } else {
+                                            let etiqueta = if thumb_url.is_empty()
+                                                || self.gallery_failed.contains(&i)
+                                            {
+                                                if is_video { "▶" } else { "—" }
+                                            } else {
+                                                "…"
+                                            };
+                                            ui.add_sized(
+                                                [alto, alto],
+                                                egui::Button::new(
+                                                    RichText::new(etiqueta).size(22.0).color(MUTED()),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        };
+                                        if clic {
+                                            sel = !sel;
+                                        }
+
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut sel, "");
+                                            if is_video {
+                                                ui.label(
+                                                    RichText::new("VÍDEO").size(9.5).color(AMBER()),
+                                                );
+                                            }
+                                            if carrusel && !pos.is_empty() {
+                                                ui.label(
+                                                    RichText::new(format!("❏ {pos}"))
+                                                        .size(9.5)
+                                                        .color(CYAN()),
+                                                );
+                                            }
+                                        });
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(resumen).size(9.0).color(MUTED()),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                })
+                                .response
+                            })
+                            .response
+                            .on_hover_text(if descripcion.is_empty() {
+                                String::from("sin descripción")
+                            } else {
+                                descripcion
+                            });
+                            });
+
+                            if sel != marcado {
+                                self.gallery_items[i].selected = sel;
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if primary_button(ui, t(lang, "gal.queue_selected")).clicked() {
+                        let autor = self
+                            .gallery_items
+                            .iter()
+                            .map(|i| i.author.clone())
+                            .find(|a| !a.is_empty())
+                            .unwrap_or_else(|| {
+                                author_from_url(&self.gallery_url)
+                            });
+                        let elegidos: Vec<gallery::GalleryItem> = self
+                            .gallery_items
+                            .iter()
+                            .filter(|i| i.selected)
+                            .cloned()
+                            .collect();
+                        let n = elegidos.len();
+                        for it in elegidos {
+                            // El enlace de la publicación va como page_url: si la
+                            // URL de CDN caduca, el motor puede reintentar por ahí.
+                            self.add_url(&it.url, &autor, &it.filename, &it.post_url, &it.post_id, "");
+                        }
+                        self.toast(i18n::added_links(lang, n));
+                        if n > 0 {
+                            self.view = View::Downloads;
+                        }
+                    }
+                    if !self.gallery_loading && soft_button(ui, t(lang, "gal.more")).clicked() {
+                        if let Some(prog) = self.galdl_cmd.clone() {
+                            let next = self.gallery_page + 1;
+                            self.gallery_loading = true;
+                            let tx = self.tx.clone();
+                            let cookies = cookie_args(&self.settings);
+                            let url = self.gallery_url.clone();
+                            self.gallery_epoch += 1;
+                            let ep = self.gallery_epoch;
+                            self.rt.spawn(browse_gallery(
+                                prog, url, next, GALLERY_PER_PAGE, cookies, tx, ep,
+                            ));
+                        }
+                    }
+                    ui.label(
+                        RichText::new(t(lang, "gal.expiry_note"))
+                            .size(10.5)
+                            .color(AMBER()),
+                    );
+                });
+            });
+        }
 
         // Resultados del análisis
         if !self.profile_entries.is_empty() {
@@ -4531,23 +5890,129 @@ impl App {
                     });
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
-                    for &i in &visible {
-                        let e = &mut self.profile_entries[i];
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut e.selected, "");
-                            ui.label(if e.is_image { "🖼" } else { "🎬" });
-                            let title: String = e.title.chars().take(64).collect();
-                            ui.label(RichText::new(title).color(TEXT())).on_hover_text(&e.url);
-                            ui.label(RichText::new(&e.id).size(11.0).color(MUTED()));
-                            // Papelera por fila, alineada a la derecha
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("🗑").on_hover_text(t(lang, "tip.remove")).clicked() {
-                                    drop_one = Some(i);
-                                }
+                // Rejilla con portada. yt-dlp ya devuelve una miniatura por
+                // entrada (`ProfileEntry::thumb`), así que la vista de TikTok
+                // puede enseñar lo mismo que la de Instagram en vez de una
+                // lista de títulos con la que se elige a ciegas.
+                const CELDA_P: f32 = 132.0;
+                const ALTO_P: f32 = 210.0;
+                let ancho_p = ui.available_width();
+
+                egui::ScrollArea::vertical()
+                    .max_height(430.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                    ui.set_max_width(ancho_p);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                        for &i in &visible {
+                            let (thumb, es_img, marcada, titulo, id_post, url) = {
+                                let e = &self.profile_entries[i];
+                                (
+                                    e.thumb.clone(),
+                                    e.is_image,
+                                    e.selected,
+                                    e.title.chars().take(48).collect::<String>(),
+                                    e.id.clone(),
+                                    e.url.clone(),
+                                )
+                            };
+
+                            if thumb.starts_with("http")
+                                && !self.profile_thumbs.contains_key(&i)
+                                && !self.profile_pending.contains(&i)
+                                && !self.profile_failed.contains(&i)
+                            {
+                                self.profile_pending.insert(i);
+                                self.rt.spawn(fetch_profile_thumb(
+                                    self.client.clone(),
+                                    i,
+                                    thumb.clone(),
+                                    self.tx.clone(),
+                                ));
+                            }
+
+                            let mut sel = marcada;
+                            let mut borrar = false;
+
+                            ui.allocate_ui(egui::vec2(CELDA_P, ALTO_P), |ui| {
+                            ui.set_max_width(CELDA_P);
+                            ui.push_id(("prof", i), |ui| {
+                                let marco = egui::Frame::none()
+                                    .fill(if marcada { ACCENT().linear_multiply(0.30) } else { CARD() })
+                                    .rounding(6.0)
+                                    .inner_margin(4.0);
+                                marco.show(ui, |ui| {
+                                    ui.set_min_width(CELDA_P - 10.0);
+                                    ui.set_max_width(CELDA_P - 10.0);
+                                    ui.vertical_centered(|ui| {
+                                        let alto = CELDA_P - 12.0;
+                                        let clic = if let Some(tex) = self.profile_thumbs.get(&i) {
+                                            let t = tex.size_vec2();
+                                            let k = (alto / t.x.max(1.0)).min(alto / t.y.max(1.0));
+                                            ui.add(
+                                                egui::ImageButton::new((tex.id(), t * k)).frame(false),
+                                            )
+                                            .clicked()
+                                        } else {
+                                            let etq = if thumb.starts_with("http")
+                                                && !self.profile_failed.contains(&i)
+                                            {
+                                                "…"
+                                            } else if es_img {
+                                                "🖼"
+                                            } else {
+                                                "🎬"
+                                            };
+                                            ui.add_sized(
+                                                [alto, alto],
+                                                egui::Button::new(
+                                                    RichText::new(etq).size(20.0).color(MUTED()),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        };
+                                        if clic {
+                                            sel = !sel;
+                                        }
+
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut sel, "");
+                                            ui.label(
+                                                RichText::new(if es_img { "🖼" } else { "🎬" })
+                                                    .size(10.0),
+                                            );
+                                            if ui
+                                                .small_button("🗑")
+                                                .on_hover_text(t(lang, "tip.remove"))
+                                                .clicked()
+                                            {
+                                                borrar = true;
+                                            }
+                                        });
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(titulo).size(9.0).color(MUTED()),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
+                                })
+                                .response
+                            })
+                            .response
+                            .on_hover_text(format!("{id_post}\n{url}"));
                             });
-                        });
-                    }
+
+                            if sel != marcada {
+                                self.profile_entries[i].selected = sel;
+                            }
+                            if borrar {
+                                drop_one = Some(i);
+                            }
+                        }
+                    });
                 });
                 ui.separator();
                 if primary_button(ui, &i18n::add_selected(lang, selected)).clicked() && selected > 0 {
@@ -4943,7 +6408,9 @@ impl App {
                 let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
                 let tx = self.tx.clone();
                 let page = self.booru_page;
-                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx));
+                self.booru_epoch += 1;
+                let ep = self.booru_epoch;
+                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx, ep));
             } else {
                 self.toast(t(lang, "profile.need_galdl"));
             }
@@ -5120,7 +6587,9 @@ impl App {
                 self.booru_searching = true;
                 let url = booru::search_url(site, &self.booru_tags);
                 let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
-                self.rt.spawn(booru_search(prog, url, self.booru_page, 40, auth, self.tx.clone()));
+                self.booru_epoch += 1;
+                    let ep = self.booru_epoch;
+                    self.rt.spawn(booru_search(prog, url, self.booru_page, 40, auth, self.tx.clone(), ep));
             }
         }
 
@@ -5834,7 +7303,7 @@ impl App {
                 if soft_button(ui, t(lang, "set.magnet_unregister")).clicked() {
                     match set_magnet_handler(false) {
                         Ok(()) => self.toast(t(lang, "set.magnet_removed")),
-                        Err(e) => self.toast(format!("{e}")),
+                        Err(e) => self.toast(e.to_string()),
                     }
                 }
             } else {
@@ -5842,7 +7311,7 @@ impl App {
                 if primary_button(ui, t(lang, "set.magnet_register")).clicked() {
                     match set_magnet_handler(true) {
                         Ok(()) => self.toast(t(lang, "set.magnet_done")),
-                        Err(e) => self.toast(format!("{e}")),
+                        Err(e) => self.toast(e.to_string()),
                     }
                 }
             }
@@ -5895,5 +7364,172 @@ impl App {
             ));
             ui.label(RichText::new(t(lang, "about.tech")).color(MUTED()));
         });
+    }
+}
+
+// ============================= Tests =============================
+//
+// Lógica pura, sin red y sin subprocesos: se ejecutan igual en Windows,
+// Linux y macOS. Cubren las decisiones que rompieron YouTube y el routing.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_of_extrae_el_dominio() {
+        assert_eq!(host_of("https://www.youtube.com/watch?v=abc").as_deref(), Some("www.youtube.com"));
+        assert_eq!(host_of("https://weibo.com/tv/show/1034:53278").as_deref(), Some("weibo.com"));
+        assert_eq!(host_of("https://passport.weibo.com/visitor/visitor?a=1").as_deref(), Some("passport.weibo.com"));
+        // Puerto, userinfo, mayúsculas y punto final no deben confundirlo
+        assert_eq!(host_of("https://EXAMPLE.com:8443/x").as_deref(), Some("example.com"));
+        assert_eq!(host_of("https://user:pass@weibo.com/x").as_deref(), Some("weibo.com"));
+        assert_eq!(host_of("https://weibo.com./x").as_deref(), Some("weibo.com"));
+        // Sin esquema no es una URL absoluta
+        assert_eq!(host_of("weibo.com/tv/show/1"), None);
+        assert_eq!(host_of(""), None);
+    }
+
+    #[test]
+    fn host_matches_rechaza_dominios_impostores() {
+        assert!(host_matches("weibo.com", "weibo.com"));
+        assert!(host_matches("passport.weibo.com", "weibo.com"));
+        assert!(host_matches("m.weibo.cn", "weibo.cn"));
+        // Lo que la comprobación por subcadena dejaba pasar
+        assert!(!host_matches("weibo.com.atacante.net", "weibo.com"));
+        assert!(!host_matches("notweibo.com", "weibo.com"));
+        assert!(!host_matches("weibo.company", "weibo.com"));
+        assert!(!host_matches("pixeldrain.com.evil.net", "pixeldrain.com"));
+    }
+
+    #[test]
+    fn youtube_no_recibe_cookies_de_entrada() {
+        // Regresión de yt-dlp#16569: con cookies de cuenta, YouTube exige un
+        // PO Token y descarta todos los formatos.
+        assert!(!needs_cookies_upfront("https://www.youtube.com/watch?v=95wP2VKGEXE"));
+        assert!(!needs_cookies_upfront("https://youtu.be/95wP2VKGEXE"));
+        // Tampoco los sitios que funcionan bien sin sesión
+        assert!(!needs_cookies_upfront("https://www.tiktok.com/@user/video/123"));
+        assert!(!needs_cookies_upfront("https://www.bilibili.com/video/BV1xx411c7mD"));
+    }
+
+    #[test]
+    fn instagram_y_redes_si_reciben_cookies_de_entrada() {
+        assert!(needs_cookies_upfront("https://www.instagram.com/p/Cxyz/"));
+        assert!(needs_cookies_upfront("https://instagram.com/usuario"));
+        assert!(needs_cookies_upfront("https://weibo.com/u/1234567"));
+        assert!(needs_cookies_upfront("https://m.weibo.cn/status/123"));
+        assert!(needs_cookies_upfront("https://x.com/user/status/1"));
+        // Un dominio que solo *contiene* el nombre no cuenta
+        assert!(!needs_cookies_upfront("https://instagram.com.atacante.net/p/1"));
+    }
+
+    #[test]
+    fn errores_de_autenticacion_se_distinguen_de_los_de_formato() {
+        assert!(needs_auth_error("ERROR: [youtube] abc: Sign in to confirm you're not a bot"));
+        assert!(needs_auth_error("ERROR: Private video. Sign in if you've been granted access"));
+        assert!(needs_auth_error("ERROR: unable to download: HTTP Error 401: Unauthorized"));
+        assert!(needs_auth_error("ERROR: This video is age-restricted"));
+
+        // El error que provocaba el bug NO es de autenticación: si lo fuera,
+        // reintentaríamos con cookies y volveríamos a caer en la misma trampa.
+        assert!(!needs_auth_error(
+            "ERROR: [youtube] abc: Requested format is not available. Use --list-formats"
+        ));
+        assert!(!needs_auth_error("ERROR: Unsupported URL: https://passport.weibo.com/"));
+    }
+
+    #[test]
+    fn is_cookie_error_no_confunde_formato_con_cookies() {
+        assert!(is_cookie_error("Failed to decrypt with DPAPI"));
+        assert!(is_cookie_error("could not copy the cookie database"));
+        assert!(!is_cookie_error("ERROR: Requested format is not available"));
+        assert!(!is_cookie_error("ERROR: HTTP Error 403: Forbidden"));
+    }
+
+    #[test]
+    fn sin_ffmpeg_nunca_se_piden_flujos_separados() {
+        // Pedir bv*+ba sin fusionador aborta con OSError [Errno 2]
+        let sin = format_selector(false);
+        assert!(!sin.contains('+'), "selector sin ffmpeg no debe fusionar: {sin}");
+        assert_eq!(sin, "b");
+        // Con ffmpeg sí, que es como se pasa de 720p en YouTube
+        assert_eq!(format_selector(true), "bv*+ba/b");
+    }
+
+    #[test]
+    fn el_muro_de_fotos_solo_se_propone_para_perfiles_de_weibo() {
+        assert_eq!(
+            weibo_album_url("https://weibo.com/u/2304291523?tabtype=feed").as_deref(),
+            Some("https://weibo.com/u/2304291523?tabtype=album")
+        );
+        assert_eq!(
+            weibo_album_url("https://weibo.com/u/2304291523").as_deref(),
+            Some("https://weibo.com/u/2304291523?tabtype=album")
+        );
+        // Ya se probó el álbum: no se reintenta en bucle
+        assert_eq!(weibo_album_url("https://weibo.com/u/123?tabtype=album"), None);
+        // Y la vuelta atrás solo aplica desde el álbum, nunca al revés
+        assert_eq!(
+            weibo_feed_url("https://weibo.com/u/123?tabtype=album").as_deref(),
+            Some("https://weibo.com/u/123?tabtype=feed")
+        );
+        assert_eq!(weibo_feed_url("https://weibo.com/u/123?tabtype=feed"), None);
+        assert_eq!(weibo_feed_url("https://www.instagram.com/alguien/"), None);
+        // No es un perfil
+        assert_eq!(weibo_album_url("https://weibo.com/tv/show/1034:53278"), None);
+        // Otros sitios
+        assert_eq!(weibo_album_url("https://www.instagram.com/alguien/"), None);
+        // Dominio impostor
+        assert_eq!(weibo_album_url("https://weibo.com.atacante.net/u/1"), None);
+    }
+
+    #[test]
+    fn author_from_url_agrupa_perfiles() {
+        // El caso que dejaba todo suelto en la raíz
+        assert_eq!(author_from_url("https://www.instagram.com/fate_stay_art/posts/"), "fate_stay_art");
+        assert_eq!(author_from_url("https://instagram.com/fate_stay_art"), "fate_stay_art");
+        assert_eq!(author_from_url("https://www.tiktok.com/@usuario/video/123"), "usuario");
+        assert_eq!(author_from_url("https://x.com/alguien/status/1"), "alguien");
+        assert_eq!(author_from_url("https://weibo.com/u/1234567"), "weibo_1234567");
+        assert_eq!(author_from_url("https://www.youtube.com/@canal/videos"), "canal");
+    }
+
+    #[test]
+    fn author_from_url_no_inventa_carpetas() {
+        // Posts sueltos: no hay perfil, no debe crearse carpeta
+        assert_eq!(author_from_url("https://www.instagram.com/p/Cxyz/"), "");
+        assert_eq!(author_from_url("https://www.instagram.com/reel/Cxyz/"), "");
+        assert_eq!(author_from_url("https://www.instagram.com/stories/x/1"), "");
+        // Vídeos de YouTube: «watch» no es un usuario
+        assert_eq!(author_from_url("https://www.youtube.com/watch?v=95wP2VKGEXE"), "");
+        assert_eq!(author_from_url("https://youtu.be/95wP2VKGEXE"), "");
+        // Weibo sin /u/ y sitios sin concepto de perfil
+        assert_eq!(author_from_url("https://weibo.com/tv/show/1034:53278"), "");
+        assert_eq!(author_from_url("https://www.bilibili.com/video/BV1xx411c7mD"), "");
+        assert_eq!(author_from_url("https://cdn.example.com/a/b/c.mp4"), "");
+        // Ni URLs raras ni dominios impostores
+        assert_eq!(author_from_url("https://instagram.com.atacante.net/victima/"), "");
+        assert_eq!(author_from_url("no-es-una-url"), "");
+        assert_eq!(author_from_url("https://www.instagram.com/"), "");
+    }
+
+    #[test]
+    fn author_from_url_rechaza_segmentos_no_plausibles() {
+        // Nada que pueda escaparse de la carpeta de destino ni reventar la ruta
+        assert_eq!(author_from_url("https://instagram.com/..%2F..%2Fetc/"), "");
+        assert_eq!(author_from_url("https://instagram.com/a b c/"), "");
+        let largo = "x".repeat(60);
+        assert_eq!(author_from_url(&format!("https://instagram.com/{largo}/")), "");
+    }
+
+    #[test]
+    fn sanitize_neutraliza_nombres_peligrosos() {
+        assert!(!sanitize("../../etc/passwd", 60).contains('/'));
+        assert!(!sanitize("a\\b:c*d?e", 60).contains('\\'));
+        assert_eq!(sanitize("CON", 60), "_CON");
+        assert_eq!(sanitize("nul.txt", 60), "_nul.txt");
+        assert_eq!(sanitize("   ", 60), "video");
+        assert_eq!(sanitize("nombre.", 60), "nombre");
     }
 }

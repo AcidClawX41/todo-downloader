@@ -49,6 +49,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
 
+      - name: Unit tests
+        run: cargo test --verbose
+
       - name: Build (debug)
         run: cargo build --verbose
 
@@ -75,14 +78,21 @@ jobs:
             artifact: todo-downloader-linux-x86_64
             binary: target/x86_64-unknown-linux-gnu/release/todo-downloader
 
+          # Each macOS target builds on a runner of its OWN architecture.
+          # Cross-compiling x86_64 from Apple Silicon does not work here:
+          # librqbit pulls in native-tls -> OpenSSL, and the Homebrew OpenSSL
+          # on an arm64 runner is arm64-only, so the link step fails.
           - name: macOS Apple Silicon
-            os: macos-latest
+            os: macos-15
             target: aarch64-apple-darwin
             artifact: todo-downloader-macos-aarch64
             binary: target/aarch64-apple-darwin/release/todo-downloader
 
+          # macos-13 was retired in December 2025; macos-15-intel is the
+          # current Intel label. GitHub drops x86_64 macOS after macOS 15 is
+          # retired (Fall 2027), so this job has a known end of life.
           - name: macOS Intel
-            os: macos-latest
+            os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: todo-downloader-macos-x86_64
             binary: target/x86_64-apple-darwin/release/todo-downloader
@@ -109,10 +119,15 @@ jobs:
             libssl-dev pkg-config
 
       # macOS: point openssl-sys at the Homebrew OpenSSL that librqbit needs.
+      # `brew --prefix` prints a path whether or not the formula is installed,
+      # so the install has to be explicit: otherwise openssl-sys is handed a
+      # directory that does not exist and the build fails at link time.
       - name: OpenSSL (macOS only)
         if: runner.os == 'macOS'
         run: |
+          brew install openssl@3 || brew upgrade openssl@3 || true
           PREFIX="$(brew --prefix openssl@3)"
+          test -d "$PREFIX/lib" || { echo "OpenSSL not found at $PREFIX"; exit 1; }
           echo "OPENSSL_DIR=$PREFIX" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
 

@@ -21,12 +21,19 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
+**New in v1.6.0:**
+
+- **Native MEGA.nz public-link downloads** — decrypted on your machine, resumable, and verified against MEGA's own file MAC before the download is considered complete.
+- **Preview grids for Instagram, Weibo, TikTok and Bilibili** — analyze a profile, see the actual photos and video covers, and queue only the ones you want.
+- **YouTube downloads work again** — the per-site cookie policy that broke them is fixed.
+
 ## Features
 
 ### Downloading
 
 - **Universal**: direct file links over native HTTP, and pages from 1000+ sites (YouTube, TikTok, Instagram, X, Reddit, Twitch, Weibo, Bilibili…) through the built-in engines.
 - **File hosts, resolved natively.** Pixeldrain, GoFile and MediaFire links are resolved to their real CDN URLs in pure Rust — no extra binary, no Python — and then downloaded through the native HTTP engine with full resume. A folder link expands into one row per file. For hosts that actively fight scrapers (Bunkr, Cyberdrop…), an **optional** cyberdrop-dl engine can be installed from Settings; it's the only thing here that pulls in Python, and only if you choose to.
+- **MEGA.nz public links, natively.** Public file and folder links are downloaded by an engine compiled into the binary — no MEGAcmd, no browser automation, no helper executable. MEGA never sees your decryption key: it lives only in the URL fragment, so the file is decrypted **on your machine** while it streams to disk. Full `.part` resume works because AES-CTR is seekable, and every download is checked against MEGA's own file MAC before the final filename is created — a corrupt or truncated transfer never appears as a completed file. A folder link expands into one queue row per file, each with its own progress, pause and error. **Account login is not supported and no MEGA credentials are ever requested or stored.**
 - **Native BitTorrent** (magnet + `.torrent`) in its own **Torrent** tab, built on the embedded [librqbit](https://github.com/ikatson/rqbit) engine (Rust, Apache-2.0): DHT so magnets work trackerless, UDP/HTTP trackers, uTP, PEX and UPnP port-forwarding. No external client, no Java, no daemon — it compiles into the single binary. Each torrent shows live progress, download speed, connected peers, ETA and uploaded amount; you can set a **per-download folder** and **download/upload speed limits**, and pause/resume/remove. Downloading via torrent also seeds, so the tab carries a clear legal reminder.
 - **Always maximum quality.** For ByteDance images (TikTok/Douyin) it detects the CDN's `~tplv-` processing template — which applies watermarks and downscaling — and requests the unprocessed original first. The difference is real: from a recompressed thumbnail to **2160×2880, watermark-free**.
 - **Adaptive video quality**: with ffmpeg installed it merges separate video and audio streams (1080p+ on YouTube); without it, it falls back to the best pre-merged file instead of failing.
@@ -51,7 +58,7 @@ Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danb
 ### Capturing links
 
 - **LinkGrabber**: watches the clipboard and queues URLs as you copy them, just like JDownloader.
-- **Profile view**: paste a TikTok profile URL, analyze it, then pick with checkboxes which videos and/or image posts you want. For Instagram, Weibo or Pinterest it downloads the whole profile.
+- **Profile view with previews**: paste a profile URL, analyze it, and pick what to download from a **thumbnail grid** instead of a list of titles. TikTok and Bilibili show each post's cover; Instagram and Weibo show the real photos and video covers with resolution, position in the carousel (`3/10`), format and date. Pinterest and similar sites are still downloaded whole — no extractor exposes a listing worth previewing.
 - **Browser capture (Click'n'Load)**: a local HTTP receiver accepts links captured by a script running inside the profile tab itself. This solves what no external tool can: Douyin profiles and session-gated content, because the script inherits your cookies and the site's API signatures.
 - TXT/JSON import and drag-and-drop onto the window.
 
@@ -122,7 +129,13 @@ cd todo-downloader
 cargo build --release
 ```
 
-The binary lands in `target/release/`. On Windows you can also double-click `Compilar.bat`.
+The binary lands in `target/release/`.
+
+Run the tests first if you are changing anything:
+
+```bash
+cargo test
+```
 
 ## Getting started
 
@@ -147,6 +160,8 @@ The binary lands in `target/release/`. On Windows you can also double-click `Com
 ### About cookies
 
 Some sites (Instagram, Douyin, Weibo, Bilibili above 480p, age-restricted content) require a signed-in session. **Instagram in particular will not list a full profile without one** — it serves the first few dozen posts anonymously and then returns `401 Unauthorized`.
+
+Cookies are sent **only where they are needed**. Public content is tried anonymously first, and your session is attached on retry only if the site actually asks for it. This is not just hygiene: sending account cookies to a public YouTube video makes yt-dlp switch to a client that demands a PO Token, and without one *every* format is dropped and the download dies with `Requested format is not available`. Instagram, Weibo and the social networks still get cookies from the first request, because they list nothing without a session.
 
 > ⚠️ **Chrome 127+, Edge, Brave and Opera encrypt cookies with App-Bound Encryption**: no external tool can read them, not even with the browser closed. This is not a bug in this application.
 
@@ -180,7 +195,9 @@ assets/           App icon (.ico embedded in the Windows .exe, .png for the wind
 build.rs          Embeds the icon and version metadata into the Windows binary
 src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
+├── gallery.rs    Gallery listing for the Instagram/Weibo preview grid
 ├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)
+├── mega/         Native MEGA.nz engine: link parsing, crypto, API, folders, download
 ├── booru.rs      Booru search over gallery-dl's JSON dump, tolerant across APIs
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
@@ -188,7 +205,7 @@ src/
 └── scripts.rs    Browser console scripts for TikTok and Douyin, with an on-page HUD
 ```
 
-**Stack**: [egui/eframe](https://github.com/emilk/egui) for the UI (GPU-accelerated, pure Rust), [tokio](https://tokio.rs) + [reqwest](https://github.com/seanmonstar/reqwest) with rustls for the async engine.
+**Stack**: [egui/eframe](https://github.com/emilk/egui) for the UI (GPU-accelerated, pure Rust), [tokio](https://tokio.rs) + [reqwest](https://github.com/seanmonstar/reqwest) for the async engine. TLS goes through the platform stack (Schannel / Secure Transport / OpenSSL) rather than rustls — see [SECURITY.md](SECURITY.md) for why, and why saying otherwise would be inaccurate.
 
 See [SECURITY.md](SECURITY.md) for the threat model and security audit.
 

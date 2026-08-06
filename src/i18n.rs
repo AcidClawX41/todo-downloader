@@ -7,16 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Default)]
 pub enum Lang {
+    #[default]
     Es,
     En,
 }
 
-impl Default for Lang {
-    fn default() -> Self {
-        Lang::Es
-    }
-}
 
 impl Lang {
     pub const ALL: [Lang; 2] = [Lang::Es, Lang::En];
@@ -200,8 +197,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         ),
         "profile.url_label" => entry!("URL DEL PERFIL", "PROFILE URL"),
         "profile.want" => entry!("Quiero descargar:", "I want to download:"),
-        "profile.videos" => entry!("🎬 Vídeos", "🎬 Videos"),
-        "profile.images" => entry!("🖼 Imágenes", "🖼 Images"),
+        "profile.videos" => entry!("🎬 Vídeos (del análisis)", "🎬 Videos (from analysis)"),
+        "profile.images" => entry!("🖼 Imágenes (del análisis)", "🖼 Images (from analysis)"),
         "profile.cookies_inline" => entry!(
             "Usar cookies del navegador (necesario para Douyin y perfiles privados)",
             "Use browser cookies (required for Douyin and private profiles)"
@@ -228,8 +225,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Install gallery-dl first in Settings (one click)"
         ),
         "profile.gallery_note" => entry!(
-            "ℹ Instagram / Pinterest y similares se descargan enteros con gallery-dl (no hay lista previa). Instagram EXIGE sesión: usa un archivo cookies.txt en Ajustes.",
-            "ℹ Instagram / Pinterest and similar are downloaded whole with gallery-dl (no preview list). Instagram REQUIRES a session: use a cookies.txt file in Settings."
+            "ℹ Instagram y Weibo se exploran con vista previa: analiza y elige qué bajar. Pinterest y similares se descargan enteros. Instagram EXIGE sesión: cookies del navegador o un cookies.txt en Ajustes.",
+            "ℹ Instagram and Weibo are browsed with previews: analyze, then pick what to download. Pinterest and similar are downloaded whole. Instagram REQUIRES a session: browser cookies or a cookies.txt in Settings."
         ),
         "profile.need_ytdlp" => entry!(
             "Instala primero yt-dlp en Ajustes (un clic)",
@@ -358,6 +355,24 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "side.cyberdrop_active" => entry!("● cyberdrop-dl activo", "● cyberdrop-dl active"),
 
         "status.resolving_host" => entry!("Resolviendo…", "Resolving…"),
+        "status.resolving_mega" => entry!("resolviendo MEGA", "resolving MEGA"),
+        "gal.listing" => entry!("Listando publicaciones (sin descargar)…", "Listing posts (nothing downloaded)…"),
+        "gal.images" => entry!("Imágenes", "Images"),
+        "gal.videos" => entry!("Vídeos", "Videos"),
+        "gal.select_all" => entry!("Marcar todo", "Select all"),
+        "gal.select_none" => entry!("Desmarcar", "Select none"),
+        "gal.queue_selected" => entry!("Añadir seleccionados a la cola", "Add selected to queue"),
+        "gal.more" => entry!("Cargar más", "Load more"),
+        "gal.no_more" => entry!("No hay más publicaciones", "No more posts"),
+        "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
+                               "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
+        "gal.reason" => entry!("Lo que dijo gallery-dl:", "What gallery-dl said:"),
+        "gal.expiry_note" => entry!("Los enlaces caducan en horas: descarga pronto lo que marques",
+                                    "Links expire within hours: download your selection soon"),
+        "status.verifying" => entry!("verificando integridad", "verifying integrity"),
+        "set.mega" => entry!("MEGA: enlaces publicos activos (nativo, sin cuenta)",
+                             "MEGA: public links active (native, no account)"),
+        "side.mega_active" => entry!("● MEGA activo", "● MEGA active"),
 
         // ---------- BitTorrent ----------
         "nav.torrents" => entry!("Torrent", "Torrent"),
@@ -760,5 +775,13 @@ pub fn invalid_json(lang: Lang, e: &str) -> String {
     match lang {
         Lang::Es => format!("JSON inválido: {e}"),
         Lang::En => format!("Invalid JSON: {e}"),
+    }
+}
+
+/// Cuántos elementos esconde el filtro de imágenes/vídeos.
+pub fn hidden_by_filter(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es => format!("({n} ocultos por el filtro)"),
+        _ => format!("({n} hidden by the filter)"),
     }
 }
