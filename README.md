@@ -17,14 +17,16 @@ Written in Rust. Single portable executable — no installer, no runtime, no Jav
 
 ## What is this?
 
-A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single ~7 MB executable that starts instantly.
+A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single ~9 MB executable that starts instantly.
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.6.0:**
+**New in v1.6.2:**
 
 - **Native MEGA.nz public-link downloads** — decrypted on your machine, resumable, and verified against MEGA's own file MAC before the download is considered complete.
-- **Preview grids for Instagram, Weibo, TikTok and Bilibili** — analyze a profile, see the actual photos and video covers, and queue only the ones you want.
+- **Preview grids for Instagram, Weibo, TikTok, Bilibili and V2PH** — analyze a profile, see the actual photos and video covers, and queue only the ones you want.
+- **Native V2PH extractor** — full albums and whole model profiles, in original quality, with no external engine, plus a browser-side script for when the site pushes back.
+- **Galleries keep loading in the background** — the first batch appears immediately and more pages arrive while you browse.
 - **YouTube downloads work again** — the per-site cookie policy that broke them is fixed.
 
 ## Features
@@ -55,11 +57,36 @@ Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danb
 
 > **Gelbooru requires API credentials** (`AuthRequired` without them). Add them in *Settings → Booru accounts*; the key field is masked. Everything else works anonymously.
 
+### V2PH albums and profiles
+
+Paste a V2PH album or model URL into the **Profile** tab and pick what to
+download from the preview grid. The extractor is written in Rust: the site
+serves plain server-rendered HTML with the original image URLs in the markup,
+so no external engine, browser automation or Python is involved.
+
+- An album is split into pages of ten photos; all of them are walked, so a
+  38-photo album lists 38 photos.
+- On a model, agency, category or country page, each grid page is one complete
+  album.
+- **Past the tenth photo of an album V2PH requires a session.** Point
+  *Settings → Cookies* at a `cookies.txt` exported from a signed-in browser.
+- V2PH also limits **how many albums an account may open per day**. Nothing in
+  the application can raise that; already-opened albums can be revisited freely.
+
+If the site starts answering `403` — it rate-limits bursts, and an analysis is
+several requests — the **Capture** tab has a V2PH script that does the listing
+from inside your own browser instead. See below.
+
 ### Capturing links
 
 - **LinkGrabber**: watches the clipboard and queues URLs as you copy them, just like JDownloader.
 - **Profile view with previews**: paste a profile URL, analyze it, and pick what to download from a **thumbnail grid** instead of a list of titles. TikTok and Bilibili show each post's cover; Instagram and Weibo show the real photos and video covers with resolution, position in the carousel (`3/10`), format and date. Pinterest and similar sites are still downloaded whole — no extractor exposes a listing worth previewing.
-- **Browser capture (Click'n'Load)**: a local HTTP receiver accepts links captured by a script running inside the profile tab itself. This solves what no external tool can: Douyin profiles and session-gated content, because the script inherits your cookies and the site's API signatures.
+- **Browser capture (Click'n'Load)**: a local HTTP receiver accepts links captured by a script running inside the page itself. This solves what no external tool can, because the script inherits your session, your address and your browser's own TLS fingerprint. Scripts are provided for:
+  - **Douyin** profiles, which no extractor can enumerate.
+  - **TikTok** profiles, as an alternative to the API path.
+  - **V2PH**, for when the site rate-limits the application. The browser walks the album and hands the URLs over; downloading is unaffected because the image CDN is not the part that pushes back.
+  
+  Chrome blocks pages from reaching `127.0.0.1`, so there the script falls back to saving a JSON file you import from *Downloads → Import TXT/JSON*. Firefox delivers directly.
 - TXT/JSON import and drag-and-drop onto the window.
 
 ### Built-in engines
@@ -149,6 +176,7 @@ cargo test
 | Grab a TikTok profile | **Profile** tab → analyze → select → download |
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
+| V2PH keeps returning 403 | **Capture** tab → V2PH script → paste into the album's console |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
 | Browse and grab booru art | **Booru** tab → pick a site → tags → select thumbnails → queue |
 | Download a torrent / magnet | **Torrent** tab → paste the magnet or pick a `.torrent` |
@@ -158,6 +186,15 @@ cargo test
 | Queue a list of links | **Add links** or **Import TXT/JSON** |
 
 ### About cookies
+
+The native engines can read **Firefox's** cookie database directly, so V2PH
+works with *Use browser cookies* selected — no manual export. Firefox stores
+cookies unencrypted; Chromium browsers tie them to your Windows account (and,
+since Chrome 127, to the browser process itself), so for those a `cookies.txt`
+is still required. Only cookies whose domain matches the site being fetched are
+ever sent, compared structurally so that `v2ph.com.attacker.net` is not treated
+as `v2ph.com`.
+
 
 Some sites (Instagram, Douyin, Weibo, Bilibili above 480p, age-restricted content) require a signed-in session. **Instagram in particular will not list a full profile without one** — it serves the first few dozen posts anonymously and then returns `401 Unauthorized`.
 
@@ -184,6 +221,8 @@ Being upfront about these:
 - **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
 - The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
+- **Reading cookies straight from the browser only covers Firefox**, whose cookie database is unencrypted. It also only sees cookies **with an expiry date** — session cookies live in memory and are never on disk, so a login that issues one cannot be picked up this way by any external tool. Use a `cookies.txt` in that case. Chromium browsers are unreadable on Windows (App-Bound Encryption); on Linux and macOS yt-dlp and gallery-dl can read them, with a Keychain prompt on macOS.
+- **V2PH gates its login page behind Cloudflare**, so the in-app sign-in cannot work there and says so. Album pages are not challenged; a `cookies.txt` is the supported route.
 - The Torrent tab shows **connected peers**, not a swarm seeder/leecher split — librqbit's aggregate stats don't expose that cleanly, and per-peer inspection isn't worth the fragility. Peer GeoIP (countries) is intentionally omitted: it needs a multi-MB database and is unreliable behind VPNs.
 - BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
 - **Bilibili requires ffmpeg**, always — it only serves DASH, so video and audio arrive as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast; requests are spaced out to avoid it.
@@ -197,6 +236,8 @@ src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
 ├── gallery.rs    Gallery listing for the Instagram/Weibo preview grid
 ├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)
+├── v2ph.rs       Native V2PH album and profile extractor (plain HTML, no engine)
+├── cookies.rs    Reads Firefox's cookie database for the native engines
 ├── mega/         Native MEGA.nz engine: link parsing, crypto, API, folders, download
 ├── booru.rs      Booru search over gallery-dl's JSON dump, tolerant across APIs
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)

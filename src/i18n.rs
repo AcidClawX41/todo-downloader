@@ -265,8 +265,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Uses the session already signed in on that browser (TikTok, Douyin, YouTube…). Required for Douyin, private profiles or age-restricted content."
         ),
         "set.cookies_warn" => entry!(
-            "⚠ Chrome 127+ (y Edge/Brave/Opera) cifran sus cookies con App-Bound Encryption: NINGUNA herramienta externa puede leerlas, ni con el navegador cerrado. Usa Firefox, o mejor el archivo cookies.txt de abajo.",
-            "⚠ Chrome 127+ (and Edge/Brave/Opera) encrypt cookies with App-Bound Encryption: NO external tool can read them, even with the browser closed. Use Firefox, or better, the cookies.txt file below."
+            "⚠ EN WINDOWS, Chrome 127+ (y Edge/Brave/Opera) cifran sus cookies con App-Bound Encryption y ninguna herramienta externa puede leerlas. Usa Firefox, o el archivo cookies.txt de abajo. En Linux y macOS sí se pueden leer (macOS pedirá permiso del Llavero).",
+            "⚠ ON WINDOWS, Chrome 127+ (and Edge/Brave/Opera) encrypt cookies with App-Bound Encryption and no external tool can read them. Use Firefox, or the cookies.txt file below. On Linux and macOS they can be read (macOS will ask for Keychain permission)."
         ),
 
         // ---------- Motores ----------
@@ -363,6 +363,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "gal.select_none" => entry!("Desmarcar", "Select none"),
         "gal.queue_selected" => entry!("Añadir seleccionados a la cola", "Add selected to queue"),
         "gal.more" => entry!("Cargar más", "Load more"),
+        "gal.prefetching" => entry!("trayendo más en segundo plano…", "fetching more in the background…"),
         "gal.no_more" => entry!("No hay más publicaciones", "No more posts"),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
@@ -417,6 +418,29 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "⚠ Este sitio exige credenciales de API: añádelas en Ajustes → Cuentas de booru.",
             "⚠ This site requires API credentials: add them in Settings → Booru accounts."
         ),
+        "set.ua" => entry!("USER-AGENT (AVANZADO)", "USER-AGENT (ADVANCED)"),
+        "set.ua_clear" => entry!("Por defecto", "Default"),
+        "set.ua_detect" => entry!("🔎  Detectar desde mi navegador", "🔎  Detect from my browser"),
+        "set.ua_detected" => entry!("✓ User-Agent detectado y guardado", "✓ User-Agent detected and saved"),
+        "set.ua_need_receiver" => entry!(
+            "Activa antes «Receptor local» en esta misma pantalla: es quien lee el dato del navegador.",
+            "Enable «Local receiver» above first: it is what reads the value from the browser."
+        ),
+        "set.ua_note" => entry!(
+            "Déjalo vacío salvo que un sitio protegido por Cloudflare te rechace pese a tener un cookies.txt válido. La cookie «cf_clearance» que certifica que superaste la verificación está atada a tu IP Y a tu User-Agent: si no coincide, se descarta. El botón abre una página local en tu navegador predeterminado y lee el dato de la propia petición. Si quieres el de OTRO navegador, pega esa dirección en él.",
+            "Leave empty unless a Cloudflare-protected site rejects you despite a valid cookies.txt. The «cf_clearance» cookie proving you passed the check is tied to your IP AND your User-Agent: a mismatch makes it worthless. The button opens a local page in your default browser and reads the value from the request itself. For a DIFFERENT browser, paste that address into it."
+        ),
+        "set.v2ph" => entry!("CUENTA DE V2PH", "V2PH ACCOUNT"),
+        "set.v2ph_user" => entry!("Usuario:", "Username:"),
+        "set.v2ph_pass" => entry!("Contraseña:", "Password:"),
+        "set.v2ph_login" => entry!("Iniciar sesión", "Sign in"),
+        "set.v2ph_logout" => entry!("Cerrar sesión", "Sign out"),
+        "set.v2ph_note" => entry!(
+            "V2PH solo enseña las 10 primeras fotos de un álbum a quien no ha entrado. La contraseña se envía a V2PH y NO se guarda en ningún sitio: solo se conserva la credencial de sesión que devuelve el sitio, igual que haría un navegador. Cerrar sesión la borra.",
+            "V2PH only shows the first 10 photos of an album to visitors. Your password is sent to V2PH and is NOT stored anywhere: only the session credential the site returns is kept, exactly as a browser would. Signing out deletes it."
+        ),
+        "v2ph.ok" => entry!("Sesión de V2PH iniciada y comprobada", "Signed in to V2PH and verified"),
+        "v2ph.out" => entry!("Sesión de V2PH cerrada", "Signed out of V2PH"),
         "set.booru" => entry!("CUENTAS DE BOORU", "BOORU ACCOUNTS"),
         "set.booru_user" => entry!("Usuario / user-id:", "Username / user-id:"),
         "set.booru_key" => entry!("Clave de API:", "API key:"),
@@ -640,6 +664,13 @@ pub fn saved_to(lang: Lang, path: &str) -> String {
     match lang {
         Lang::Es => format!("Guardado en {path}"),
         Lang::En => format!("Saved to {path}"),
+    }
+}
+
+pub fn v2ph_signed_in(lang: Lang, usuario: &str) -> String {
+    match lang {
+        Lang::Es => format!("Sesión iniciada como {usuario}"),
+        Lang::En => format!("Signed in as {usuario}"),
     }
 }
 

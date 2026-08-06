@@ -28,10 +28,24 @@ pub struct Incoming {
     pub thumb: String,
 }
 
-/// Arranca el receptor. `on_items` se invoca con cada lote recibido.
+/// Lo que el receptor puede entregarle a la aplicación.
+pub enum Recibido {
+    /// Enlaces capturados por el script del navegador
+    Enlaces(Vec<Incoming>),
+    /// User-Agent del navegador que visitó `/ua`.
+    ///
+    /// POR QUÉ AQUÍ: la aplicación no puede preguntarle su User-Agent al
+    /// navegador, pero el navegador lo manda solo en CADA petición. Basta con
+    /// abrirle una dirección propia y leer la cabecera. Sin adivinar versiones,
+    /// sin leer archivos de configuración y sin depender del navegador ni del
+    /// sistema operativo.
+    UserAgent(String),
+}
+
+/// Arranca el receptor. `on_items` se invoca con cada cosa recibida.
 pub fn spawn<F>(port: u16, enabled: Arc<AtomicBool>, on_items: F)
 where
-    F: Fn(Vec<Incoming>) + Send + 'static,
+    F: Fn(Recibido) + Send + 'static,
 {
     std::thread::spawn(move || {
         let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
@@ -45,15 +59,16 @@ where
                 continue;
             }
             match handle(stream) {
-                Some(items) if !items.is_empty() => on_items(items),
-                _ => {}
+                Some(Recibido::Enlaces(items)) if items.is_empty() => {}
+                Some(r) => on_items(r),
+                None => {}
             }
         }
     });
 }
 
 /// Lee la petición, responde y devuelve los enlaces si era un POST válido
-fn handle(mut stream: TcpStream) -> Option<Vec<Incoming>> {
+fn handle(mut stream: TcpStream) -> Option<Recibido> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
     let mut buf = Vec::new();
@@ -81,6 +96,23 @@ fn handle(mut stream: TcpStream) -> Option<Vec<Incoming>> {
         return None;
     }
     if !first_line.starts_with("POST") {
+        // GET /ua: el navegador viene a decirnos quién es. Su cabecera
+        // User-Agent es exactamente la línea que Cloudflare asoció a la
+        // cookie `cf_clearance`, así que es la que la aplicación debe repetir.
+        if first_line.starts_with("GET /ua") {
+            let ua = cabecera(&head, "user-agent").unwrap_or_default();
+            let pagina = if ua.is_empty() {
+                PAGINA_ERROR.to_string()
+            } else {
+                PAGINA_OK.replace("{UA}", &escapar_html(&ua))
+            };
+            let _ = responder_html(stream, &pagina);
+            return if ua.is_empty() {
+                None
+            } else {
+                Some(Recibido::UserAgent(ua))
+            };
+        }
         let _ = respond(stream, 200, "Todo Downloader receiver OK");
         return None;
     }
@@ -98,7 +130,60 @@ fn handle(mut stream: TcpStream) -> Option<Vec<Incoming>> {
 
     let items = parse_body(&body);
     let _ = respond(stream, 200, &format!("{} accepted", items.len()));
-    Some(items)
+    Some(Recibido::Enlaces(items))
+}
+
+/// Valor de una cabecera, sin distinguir mayúsculas.
+fn cabecera(head: &str, nombre: &str) -> Option<String> {
+    let n = format!("{}:", nombre.to_ascii_lowercase());
+    head.lines()
+        .find(|l| l.to_ascii_lowercase().starts_with(&n))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// El User-Agent se pinta en una página: hay que escaparlo aunque venga de la
+/// máquina del propio usuario. Una cabecera es entrada externa, siempre.
+fn escapar_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+const PAGINA_OK: &str = r#"<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Todo Downloader</title><style>
+body{background:#12141c;color:#e6e8ef;font-family:system-ui,sans-serif;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+div{max-width:640px;padding:32px;text-align:center}
+h1{color:#4ade80;font-size:20px;margin:0 0 12px}
+code{display:block;background:#1c2030;padding:12px;border-radius:8px;
+font-size:12px;word-break:break-all;margin:16px 0;color:#9aa4bf}
+p{color:#8b93a8;font-size:13px;margin:0}
+</style></head><body><div>
+<h1>&#10003; User-Agent detectado</h1>
+<code>{UA}</code>
+<p>Ya está guardado en Ajustes. Puedes cerrar esta pestaña.</p>
+</div></body></html>"#;
+
+const PAGINA_ERROR: &str = r#"<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Todo Downloader</title></head><body>
+<p>Tu navegador no ha enviado ningun User-Agent. Escribelo a mano en Ajustes.</p>
+</body></html>"#;
+
+/// Respuesta HTML para la página que ve el usuario en su navegador.
+fn responder_html(mut stream: TcpStream, body: &str) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {

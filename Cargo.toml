@@ -1,6 +1,6 @@
 [package]
 name = "todo-downloader"
-version = "1.6.0"
+version = "1.6.2"
 build = "build.rs"
 edition = "2021"
 description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"
@@ -32,6 +32,11 @@ librqbit = "8.1"
 # attribute CBC and the chunked CBC-MAC are all built on top of the block
 # cipher in src/mega/crypto.rs, to avoid pulling in crates used only in part.
 aes = "0.8"
+# Firefox guarda sus cookies en un SQLite sin cifrar. `bundled` compila SQLite
+# desde el código incluido en el crate: no depende de que el sistema traiga la
+# librería, así que Windows, Linux y macOS se comportan igual. No toca la pila
+# TLS ni OpenSSL, de modo que no interfiere con reqwest ni con librqbit.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Embeds the icon and version metadata into the Windows .exe
 [target.'cfg(windows)'.build-dependencies]

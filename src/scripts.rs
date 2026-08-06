@@ -432,3 +432,148 @@ function collect(aw) {{
         sender = sender(port)
     )
 }
+
+/// Script para V2PH: el NAVEGADOR recorre el álbum y la app solo descarga.
+///
+/// POR QUÉ EXISTE: V2PH pasó a rechazar con 403 las peticiones de la
+/// aplicación aunque llevaran sesión y las cabeceras correctas, mientras el
+/// navegador seguía entrando sin problema. Eso ocurre por debajo de las
+/// cabeceras —en la huella del handshake TLS—, así que no hay cabecera ni
+/// cookie que lo arregle desde fuera.
+///
+/// Aquí las peticiones las hace la pestaña donde el usuario ya está: su
+/// sesión, su IP y su huella. No imita a un navegador, ES el navegador. De
+/// paso resuelve el muro de las 10 fotos, porque la sesión va incluida.
+///
+/// La aplicación solo se queda con la descarga de `cdn.v2ph.com`, que no está
+/// protegido. Si algún día también lo estuviera, queda el botón de guardar
+/// JSON para importarlo a mano.
+pub fn v2ph(port: u16) -> String {
+    format!(
+        r#"{cabecera}
+(async () => {{
+    const hud = tdHud();
+    hud.msg('Analizando la página…');
+
+    const RETARDO = 900;      // ms entre páginas: el navegador también es un cliente
+    const MAX_ALBUMES = 12;   // tope al recorrer un listado
+    const MAX_PAGINAS = 60;   // salvaguarda contra una paginación rota
+
+    const dormir = ms => new Promise(r => setTimeout(r, ms));
+
+    // Descarga una página del sitio y la convierte en documento
+    async function pedir(url) {{
+        const r = await fetch(url, {{ credentials: 'include' }});
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' en ' + url);
+        return new DOMParser().parseFromString(await r.text(), 'text/html');
+    }}
+
+    // Última página según los enlaces de paginación: se toma el máximo en vez
+    // de buscar el rótulo «Último», que está traducido a diez idiomas.
+    function ultimaPagina(doc) {{
+        let max = 1;
+        doc.querySelectorAll('a[href*="page="]').forEach(a => {{
+            const m = a.getAttribute('href').match(/[?&]page=(\d+)/);
+            if (m) max = Math.max(max, parseInt(m[1], 10));
+        }});
+        return Math.min(max, MAX_PAGINAS);
+    }}
+
+    // Las fotos del álbum viven en /photos/. Las portadas de «galerías
+    // relacionadas» están en /album/, otra ruta, y por eso no se cuelan.
+    function fotosDe(doc) {{
+        return [...doc.querySelectorAll('img[src*="cdn.v2ph.com/photos/"]')]
+            .map(i => i.src);
+    }}
+
+    function tituloDe(doc) {{
+        const og = doc.querySelector('meta[property="og:title"]');
+        return (og && og.content) || (doc.title || '').replace(/ - V2PH$/, '');
+    }}
+
+    function modeloDe(doc) {{
+        const a = doc.querySelector('a[href*="/actor/"]');
+        if (!a) return '';
+        return (a.textContent || '').trim()
+            || (a.getAttribute('href').match(/\/actor\/([^/.]+)/) || [])[1] || '';
+    }}
+
+    /** Recorre TODAS las páginas internas de un álbum. */
+    async function album(base, aviso) {{
+        const id = (base.match(/\/album\/([^/?#]+)/) || [])[1] || 'v2ph';
+        const doc1 = await pedir(base);
+        const titulo = tituloDe(doc1);
+        const autor = modeloDe(doc1) || id;
+        const ultima = ultimaPagina(doc1);
+
+        const vistas = new Set();
+        const fotos = [];
+        for (const u of fotosDe(doc1)) if (!vistas.has(u)) {{ vistas.add(u); fotos.push(u); }}
+
+        for (let p = 2; p <= ultima; p++) {{
+            aviso(`${{titulo.slice(0, 40)}} — página ${{p}}/${{ultima}} (${{fotos.length}} fotos)`);
+            await dormir(RETARDO);
+            let doc;
+            try {{ doc = await pedir(base.split('?')[0] + '?page=' + p); }}
+            catch (e) {{ console.warn('[TD]', e.message); break; }}
+            const nuevas = fotosDe(doc).filter(u => !vistas.has(u));
+            // Sin fotos nuevas = fin del álbum, aunque la paginación prometiera más
+            if (!nuevas.length) break;
+            nuevas.forEach(u => {{ vistas.add(u); fotos.push(u); }});
+        }}
+
+        const total = fotos.length;
+        return fotos.map((u, i) => ({{
+            url: u,
+            author: autor,
+            title: `${{titulo}} (${{i + 1}}/${{total}})`,
+            pageUrl: base,
+            id: `${{id}}_${{String(i + 1).padStart(3, '0')}}`,
+            thumb: u
+        }}));
+    }}
+
+    try {{
+        const ruta = location.pathname;
+        let items = [];
+
+        if (/^\/album\//.test(ruta)) {{
+            items = await album(location.origin + ruta, m => hud.msg(m));
+        }} else if (/^\/(actor|company|category|country)\//.test(ruta)) {{
+            // Listado: se recorren los álbumes de ESTA página, no del sitio entero
+            const enlaces = [...new Set(
+                [...document.querySelectorAll('a[href*="/album/"]')]
+                    .map(a => a.href.split('?')[0])
+            )].slice(0, MAX_ALBUMES);
+
+            if (!enlaces.length) throw new Error('No se ven álbumes en esta página');
+            hud.msg(`${{enlaces.length}} álbumes en esta página`);
+
+            for (let k = 0; k < enlaces.length; k++) {{
+                hud.msg(`Álbum ${{k + 1}}/${{enlaces.length}}…`);
+                try {{
+                    items = items.concat(await album(enlaces[k], m => hud.msg(`[${{k + 1}}/${{enlaces.length}}] ${{m}}`)));
+                }} catch (e) {{
+                    console.warn('[TD] álbum omitido:', e.message);
+                }}
+                hud.n(items.length);
+                await dormir(RETARDO);
+            }}
+        }} else {{
+            throw new Error('Abre un álbum o la página de una modelo/agencia');
+        }}
+
+        if (!items.length) throw new Error('No se ha encontrado ninguna foto');
+        hud.n(items.length);
+
+        const ok = await tdSend(items, hud);
+        if (!ok) {{ tdFallbackCopy(items, hud); tdSaveFile(items); }}
+    }} catch (e) {{
+        hud.msg('❌ ' + e.message);
+        console.error('[TD]', e);
+    }}
+}})();
+"#,
+        cabecera = sender(port)
+    )
+}

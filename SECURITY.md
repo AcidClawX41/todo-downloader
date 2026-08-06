@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.6.0.
+Summary of the security audit and the application's threat model. Last reviewed for v1.6.2.
 
 ## Communication channels
 
@@ -24,6 +24,46 @@ No MEGA account credentials are requested or stored. There is no login, no sessi
 
 **BitTorrent engine (librqbit)**: embedded as a Rust library, not a subprocess. It opens a listening port and participates in DHT and the swarm, which is inherently more network-exposed than the rest of the app — this is intrinsic to how BitTorrent works, not a flaw. Its session is created **lazily**, only when you add the first torrent, so if you never use the tab no port is opened and no DHT traffic occurs. Downloading a torrent also **uploads** (seeds) to peers; the tab states this plainly, since it is both a bandwidth and a legal consideration. Torrents download to a dedicated `Torrents/` subfolder. As with any download, content is written to disk and never executed.
 
+**A note on how this section changed**: earlier releases stated flatly that no
+credentials were requested. That stopped being true in v1.6.2 and the claim has
+been rewritten rather than quietly softened. The principle that survived is the
+one that matters: **passwords are never written to disk**.
+
+**Reading browser cookies**: the native engines can read Firefox's
+`cookies.sqlite` to reuse a session you already have open. The database is
+copied to a temporary file before being opened — Firefox locks it while running
+— and the copy, along with any `-wal`/`-shm` companions, is deleted immediately
+afterwards. Nothing is decrypted, no password is ever requested, and cookies are
+filtered by exact domain match before use, so a session for one site is never
+sent to another. Chromium-based browsers are deliberately not supported here, though the reason
+differs by platform and the interface used to state it too broadly. **On
+Windows** their cookies are encrypted with App-Bound Encryption, which requires
+the read to come from the browser process itself — genuinely out of reach. **On
+Linux and macOS** they are protected by gnome-keyring, kwallet or the Keychain,
+which are readable with the user's permission; yt-dlp and gallery-dl do exactly
+that. This module still covers only Firefox: supporting three key stores to save
+one file export is not a trade worth making, and `cookies.txt` works everywhere.
+The warning in Settings is now shown only on Windows, where it is true.
+
+Note a real limitation of that mechanism, found while testing: Firefox writes
+only cookies **with an expiry date** to `cookies.sqlite`. Session cookies live
+in memory and are never on disk, so a login that issues one cannot be picked up
+this way by any external tool. That is precisely why the in-app sign-in exists.
+
+**Browser capture scripts**: the Capture tab hands you JavaScript to paste into
+your own browser's console. Read it before you do — that is why the tab shows
+the full source rather than a download link. The scripts fetch pages from the
+site you are already on, extract media URLs and POST them to the local receiver;
+they do not read cookies, do not touch other origins and do not persist
+anything. The receiver accepts only `http(s)` URLs and merely queues downloads.
+Chrome blocks pages from reaching `127.0.0.1`, in which case the script saves a
+JSON file instead — the same file the application can import.
+
+**SQLite**: `rusqlite` is compiled with the `bundled` feature, so SQLite is
+built from source shipped inside the crate rather than linked against a system
+library. It is used only to read the cookie database; nothing is written and no
+database is created.
+
 **Optional cyberdrop-dl engine**: opt-in from Settings, off by default. It is the only component that pulls in Python: installation runs the official `uv` installer (`astral.sh`) followed by `uv tool install cyberdrop-dl-patched`. If you never enable it, no Python is downloaded and nothing changes. When enabled, it runs as a subprocess under the same pause/kill-tree control as the other engines.
 
 **Downloaded binaries (supply chain)**: after downloading yt-dlp, gallery-dl or ffmpeg, a verification run is performed (`--version` / `-version`); if the binary does not respond correctly it is **deleted** and the user is notified. ffmpeg arrives as an archive, and **only** `ffmpeg.exe` and `ffprobe.exe` are extracted, filtered by exact path (`*/bin/ffmpeg.exe`); no other archive entry is written to disk, and the temporary zip is removed afterwards. The source is the official build maintained by the yt-dlp team itself. Files are written as `.part` first and renamed atomically. Known limitation: release signatures are not verified (GitHub does not publish uniform signatures for these projects); trust rests on TLS + github.com. Keep Windows Defender or your AV enabled as an additional layer.
@@ -34,7 +74,9 @@ No MEGA account credentials are requested or stored. There is no login, no sessi
 
 Cookies are also **not sent to sites that do not need them**. Public content is fetched anonymously on the first attempt, and the session is only attached on retry if the site's error genuinely asks for authentication (login required, private, age-restricted, members-only, 401/403). Sites that refuse to list anything without a session — Instagram, Weibo, the social networks — still get them from the start. Beyond reducing how widely your session is exposed, this is what makes public YouTube downloads work at all: with account cookies present, yt-dlp switches to a client that requires a PO Token, and without a PO Token provider every format is discarded and the download fails with `Requested format is not available` ([yt-dlp#16569](https://github.com/yt-dlp/yt-dlp/issues/16569)).
 
-**Data at rest**: persisted settings are mostly non-sensitive (paths, booleans, browser name), with one exception that must be stated plainly: **if you enter Booru API credentials, the username and key are saved in the settings file in plaintext.** They are masked in the interface, but eframe's settings store is not encrypted. The file lives in the application's data folder inside your user profile, so it is protected by the profile's own ACL and nothing more. If that is not acceptable for you, leave the field empty and use the Booru sites that work anonymously — only Gelbooru actually requires credentials. No other credential or token is stored: cookies are never read or persisted by this application, and no payment or account data exists anywhere in it. The gallery-dl download archive (`descargados.sqlite3`, in the application's own data folder) holds only opaque per-site identifiers of already-fetched items, so retries can resume; it contains no URLs, credentials or file contents, and can be deleted at any time from Settings.
+**Data at rest**: persisted settings are mostly non-sensitive (paths, booleans, browser name), with one exception that must be stated plainly: **if you enter Booru API credentials, the username and key are saved in the settings file in plaintext.** They are masked in the interface, but eframe's settings store is not encrypted. The file lives in the application's data folder inside your user profile, so it is protected by the profile's own ACL and nothing more. If that is not acceptable for you, leave the field empty and use the Booru sites that work anonymously — only Gelbooru actually requires credentials. **V2PH sign-in**, added in v1.6.2, is the second exception. V2PH shows only the first ten photos of an album to visitors, so the application offers an in-app sign-in. **The password is never stored.** It is read from the field, sent in a single request to V2PH's own login form, and destroyed when that request returns — it is never written to the settings file, a log or an error message. What is persisted is the **session cookie the site returns**, which is what a browser stores too: a revocable credential, not a reusable secret. Signing out deletes it. The same plaintext caveat as the Booru keys applies to that cookie, and it is worth understanding what it means — someone with read access to your user profile could reuse that session until it expires or you sign out.
+
+No payment or account data beyond the above exists anywhere in the application. The gallery-dl download archive (`descargados.sqlite3`, in the application's own data folder) holds only opaque per-site identifiers of already-fetched items, so retries can resume; it contains no URLs, credentials or file contents, and can be deleted at any time from Settings.
 
 **Magnet protocol handler**: opt-in from Settings. Registration writes to `HKEY_CURRENT_USER` only — no administrator rights, no machine-wide changes — and is done through `reg.exe` rather than adding a registry crate. Windows still protects the *actual* default with its signed `UserChoice` key, which no application can forge; the app therefore only publishes its capabilities so the user can pick it in Settings. When a magnet is clicked and an instance is already running, the link is handed to it through the same localhost-only receiver and the second process exits immediately.
 

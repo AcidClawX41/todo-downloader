@@ -1,8 +1,8 @@
-# Todo Downloader — v1.6.0 audit and hotfix status
+# Todo Downloader — audit and hotfix status
 
-**Last updated:** 2026-08-06
+**Last updated:** 2026-08-06 (v1.6.2 prepared)
 **Baseline:** v1.5.0, publicly released and working.
-**Target release:** v1.6.0.
+**Target release:** v1.6.2.
 
 This document tracks what was found, what has been fixed, and what is still open. It is kept current: a finding is only marked fixed once the change compiles and its tests pass.
 
@@ -113,7 +113,7 @@ Fix: `Option<u64>` instead of `u64`, and an indeterminate bar when it is `None`.
 
 ### 3.4 P2 — Future features
 
-- Telegram batch downloader — architecture proposal pending, deferred past v1.6.0.
+- Telegram batch downloader — architecture proposal pending, deferred past v1.6.2.
 - MEGA public links — **implemented and verified end-to-end against the live service**: single 140.7 MB file (MAC validated) and a 107-file public folder. See `MEGA-IMPLEMENTATION-DECISION.md`.
 - MEGA account login (Phase 2) — deliberately out of scope; see `MEGA-FEASIBILITY.md`.
 
@@ -124,3 +124,41 @@ Fix: `Option<u64>` instead of `u64`, and an indeterminate bar when it is `None`.
 These work today and are not rewrite targets. Verify before any release:
 
 Bilibili (quality sorting, audio/video merge), Booru (search, pagination, credentials), TikTok (video, profile, carousels, capture import), Douyin (capture), Instagram (cookies, archive resume), torrents (magnet, `.torrent`, pause/resume, instance forwarding), native HTTP with resume, Pixeldrain / GoFile / MediaFire, LinkGrabber, themes and backgrounds, EN/ES localization, Linux and macOS builds.
+
+---
+
+## v1.6.2 — what was added and what was learned
+
+**Shipped**
+
+- Native V2PH extractor (`src/v2ph.rs`): albums, model, agency, category and
+  country pages, with the preview grid and the native HTTP engine.
+- Native Firefox cookie reading (`src/cookies.rs`), new `rusqlite` dependency
+  compiled with `bundled`.
+- In-app sign-in able to parse any HTML login form, with verification against
+  the site rather than trusting a 200.
+- A User-Agent setting and a one-click detector that reads the value from the
+  browser's own request to the local receiver.
+- A V2PH browser-capture script.
+- Background page-chaining for gallery listings, and a Clear list button.
+
+**Corrected during the work, and worth keeping visible**
+
+- ADR-001 claimed V2PH "has no bot protection", drawn from four clean probes.
+  Wrong in the part that mattered: `/login` is behind Cloudflare's challenge and
+  the site rate-limits bursts with `403` elsewhere.
+- ADR-002 recommended an in-app sign-in as the answer for V2PH. It was built,
+  then measured not to work there. Marked superseded, with the evidence.
+- A `403` that persisted for a while was diagnosed as a possible TLS-fingerprint
+  ban. It later lifted on its own, so that was an overreach — it was rate
+  limiting.
+- The App-Bound Encryption warning was stated as a property of Chromium; it is
+  a property of Windows.
+
+**Still open**
+
+- **MEGA pause/resume mid-transfer has never been exercised against a real
+  link.** It is the only engine path in the project with no live verification.
+- `cargo clippy` and the unit tests run on Linux and in CI; macOS builds are
+  produced by CI but have not been run by hand.
+- Telegram batch downloader: still an architecture proposal, deferred.

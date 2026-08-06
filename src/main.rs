@@ -15,6 +15,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod booru;
+mod cookies;
 mod gallery;
 mod hosters;
 mod i18n;
@@ -22,6 +23,7 @@ mod mega;
 mod receiver;
 mod scripts;
 mod torrents;
+mod v2ph;
 use i18n::{t, Lang};
 
 use std::path::PathBuf;
@@ -392,6 +394,19 @@ fn forward_to_running_instance(link: &str) -> bool {
 /// mostrar nada. Mejor traer poco y enseñarlo enseguida.
 const GALLERY_PER_PAGE: u32 = 30;
 
+/// Páginas que se traen SOLAS detrás de la primera.
+///
+/// POR QUÉ NO SE SUBE `GALLERY_PER_PAGE` EN SU LUGAR: a Instagram se le frena
+/// a propósito entre 6 y 12 segundos por petición (ver `galdl_pacing`), y
+/// gallery-dl saca una docena de publicaciones por petición. Pedir 150 de una
+/// vez son ocho peticiones seguidas, o sea más de un minuto mirando una
+/// pantalla vacía, porque no se pinta nada hasta que vuelve la página entera.
+///
+/// Encadenando páginas se ve la primera tanda enseguida y la rejilla sigue
+/// creciendo sola mientras el usuario mira. El tiempo total es el mismo; lo
+/// que cambia es que deja de ser tiempo muerto.
+const GALLERY_AUTO_PAGES: u32 = 4;
+
 // ============================= Modelo =============================
 
 #[derive(Clone, PartialEq)]
@@ -537,6 +552,10 @@ enum Ev {
     /// suspensivos para siempre, dando a entender que seguía cargando.
     /// `true` = rejilla de perfil, `false` = rejilla de galería.
     ThumbFailed(usize, bool),
+    /// Resultado de iniciar sesión en V2PH: (usuario, cookie) o el motivo
+    V2phLogin(Result<(String, String), String>),
+    /// User-Agent que el navegador declaró al visitar el receptor local
+    DetectedUa(String),
     /// Resultados de una búsqueda en un booru, con su número de generación
     BooruResults(Vec<booru::Post>, u64),
     BooruError(String, u64),
@@ -575,6 +594,8 @@ const KNOWN_SITES: &[&str] = &[
     // Hosters de archivos (grupo 2)
     "pixeldrain.com", "gofile.io", "mediafire.com", "bunkr.", "cyberdrop.",
     "saint.to", "saint2.su", "pixl.li",
+    // Álbumes resueltos de forma nativa (src/v2ph.rs)
+    "v2ph.com",
 ];
 
 /// ¿Es un enlace directo a archivo (descargable por HTTP puro)?
@@ -811,6 +832,8 @@ fn referer_for(url: &str) -> &'static str {
         "https://www.bilibili.com/"
     } else if u.contains("tiktok") || u.contains("bytecdn") || u.contains("ibyteimg") {
         "https://www.tiktok.com/"
+    } else if u.contains("v2ph.com") {
+        "https://www.v2ph.com/"
     } else {
         ""
     }
@@ -889,6 +912,22 @@ struct Settings {
     use_browser_cookies: bool,
     cookies_browser: String,
     cookies_file: String,
+    /// Usuario de V2PH, solo para poder enseñar de quién es la sesión
+    /// User-Agent con el que salen las peticiones a los sitios que lo
+    /// necesitan. Vacío = el de la aplicación.
+    ///
+    /// POR QUÉ EXISTE: Cloudflare ata la cookie `cf_clearance` —la que
+    /// certifica que superaste su verificación— a la IP **y al User-Agent**
+    /// del navegador que la obtuvo. Si la aplicación reutiliza ese cookies.txt
+    /// diciendo ser otro navegador, Cloudflare la descarta y vuelve el 403.
+    /// Esto no falsea nada: hace que un permiso ya concedido se pueda usar.
+    user_agent: String,
+    v2ph_user: String,
+    /// Cookie devuelta por V2PH al iniciar sesión.
+    ///
+    /// AQUÍ NO HAY CONTRASEÑA Y NO LA HABRÁ: se guarda lo mismo que guardaría
+    /// un navegador, una credencial de sesión revocable desde el propio sitio.
+    v2ph_session: String,
     lang: Lang,
     /// Skin de la interfaz
     theme: Theme,
@@ -923,6 +962,9 @@ impl Default for Settings {
             use_browser_cookies: false,
             cookies_browser: "firefox".into(),
             cookies_file: String::new(),
+            user_agent: String::new(),
+            v2ph_user: String::new(),
+            v2ph_session: String::new(),
             lang: Lang::detect(),
             theme: Theme::default(),
             bg_image: String::new(),
@@ -1292,6 +1334,14 @@ struct App {
     gallery_want_images: bool,
     gallery_want_videos: bool,
     gallery_loading: bool,
+    /// Páginas que quedan por traer solas detrás de la actual
+    /// Contraseña tecleada en Ajustes. NO se persiste: solo existe mientras
+    /// la ventana está abierta, y se borra en cuanto se usa.
+    v2ph_pass: String,
+    v2ph_busy: bool,
+    gallery_prefetch_left: u32,
+    /// Hay una página viajando en segundo plano (no bloquea la rejilla)
+    gallery_prefetching: bool,
     /// URL del perfil que se está explorando
     gallery_url: String,
     /// Último motivo de fallo, íntegro y legible en la propia vista
@@ -1361,8 +1411,11 @@ impl App {
         let recv_enabled = Arc::new(AtomicBool::new(settings.receiver_enabled));
         {
             let tx_r = tx.clone();
-            receiver::spawn(settings.receiver_port, recv_enabled.clone(), move |items| {
-                let _ = tx_r.send(Ev::Received(items));
+            receiver::spawn(settings.receiver_port, recv_enabled.clone(), move |r| {
+                let _ = tx_r.send(match r {
+                    receiver::Recibido::Enlaces(items) => Ev::Received(items),
+                    receiver::Recibido::UserAgent(ua) => Ev::DetectedUa(ua),
+                });
             });
         }
         // Limpieza defensiva: si la app se cerró de golpe durante una búsqueda,
@@ -1442,6 +1495,10 @@ impl App {
             gallery_want_images: true,
             gallery_want_videos: true,
             gallery_loading: false,
+            v2ph_pass: String::new(),
+            v2ph_busy: false,
+            gallery_prefetch_left: 0,
+            gallery_prefetching: false,
             gallery_url: String::new(),
             gallery_error: String::new(),
             gallery_thumbs: std::collections::HashMap::new(),
@@ -2076,7 +2133,46 @@ impl App {
                 Ev::GalleryError(_, epoch) if epoch != self.gallery_epoch => {}
                 Ev::GalleryResults(items, page, _) => {
                     self.gallery_loading = false;
+                    self.gallery_prefetching = false;
                     self.gallery_page = page;
+
+                    // Encadenar la siguiente página en silencio. Se hace ANTES
+                    // de mover `items`, y solo si esta tanda trajo algo: una
+                    // página vacía significa que el perfil se acabó.
+                    if !items.is_empty() && self.gallery_prefetch_left > 0 {
+                        // El epoch NO se toca en ninguna de las dos ramas: esta
+                        // página pertenece a la misma búsqueda y sus resultados
+                        // deben acumularse, no reemplazar.
+                        if v2ph::is_v2ph(&self.gallery_url) {
+                            self.gallery_prefetch_left -= 1;
+                            self.gallery_prefetching = true;
+                            self.rt.spawn(browse_v2ph(
+                                self.client.clone(),
+                                self.gallery_url.clone(),
+                                page + 1,
+                                self.settings.v2ph_session.clone(),
+                                self.settings.cookies_file.clone(),
+                                self.settings.use_browser_cookies
+                                    && self.settings.cookies_browser == "firefox",
+                                ua_efectivo(&self.settings),
+                                self.tx.clone(),
+                                self.gallery_epoch,
+                            ));
+                        } else if let Some(prog) = self.galdl_cmd.clone() {
+                            self.gallery_prefetch_left -= 1;
+                            self.gallery_prefetching = true;
+                            self.rt.spawn(browse_gallery(
+                                prog,
+                                self.gallery_url.clone(),
+                                page + 1,
+                                GALLERY_PER_PAGE,
+                                cookie_args(&self.settings),
+                                self.tx.clone(),
+                                self.gallery_epoch,
+                            ));
+                        }
+                    }
+
                     if items.is_empty() && page > 1 {
                         self.toast(t(self.settings.lang, "gal.no_more"));
                     } else if page > 1 {
@@ -2095,6 +2191,26 @@ impl App {
                         self.gallery_thumbs.clear();
                         self.gallery_pending.clear();
                         self.gallery_failed.clear();
+                    }
+                }
+                Ev::DetectedUa(ua) => {
+                    self.settings.user_agent = ua;
+                    self.toast(t(self.settings.lang, "set.ua_detected"));
+                }
+                Ev::V2phLogin(r) => {
+                    self.v2ph_busy = false;
+                    // La contraseña se borra pase lo que pase, también si falla
+                    self.v2ph_pass.clear();
+                    match r {
+                        Ok((usuario, cookie)) => {
+                            self.settings.v2ph_user = usuario;
+                            self.settings.v2ph_session = cookie;
+                            self.toast(t(self.settings.lang, "v2ph.ok"));
+                        }
+                        Err(e) => {
+                            self.settings.v2ph_session.clear();
+                            self.toast(e);
+                        }
                     }
                 }
                 Ev::ThumbFailed(idx, es_perfil) => {
@@ -2123,9 +2239,18 @@ impl App {
                 }
                 Ev::GalleryError(msg, _) => {
                     self.gallery_loading = false;
-                    // El texto íntegro se queda en la vista; el toast solo avisa
-                    self.gallery_error = msg.clone();
-                    self.toast(msg.lines().next().unwrap_or("").to_string());
+                    // Si lo que ha fallado es una página que nadie pidió y ya
+                    // hay resultados en pantalla, se corta la cadena y se calla.
+                    // Sacar un error rojo por algo que el usuario no ha hecho,
+                    // teniendo delante una rejilla que funciona, solo asusta.
+                    if self.gallery_prefetching && !self.gallery_items.is_empty() {
+                        self.gallery_prefetching = false;
+                        self.gallery_prefetch_left = 0;
+                    } else {
+                        // El texto íntegro se queda en la vista; el toast avisa
+                        self.gallery_error = msg.clone();
+                        self.toast(msg.lines().next().unwrap_or("").to_string());
+                    }
                 }
                 Ev::BooruResults(posts, epoch) if epoch != self.booru_epoch => {
                     // Respuesta de una búsqueda ya descartada: se ignora sin
@@ -2403,7 +2528,10 @@ fn load_random_tip_gif(ctx: &egui::Context) -> Vec<(egui::TextureHandle, f32)> {
 /// fondo, un problema de ritmo, no de compatibilidad.
 fn thumb_gate() -> &'static Arc<Semaphore> {
     static G: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
-    G.get_or_init(|| Arc::new(Semaphore::new(4)))
+    // Ocho a la vez. Las portadas salen del CDN (scontent.cdninstagram.com,
+    // sinaimg.cn…), NO de la API con límite de ritmo, así que aquí el freno no
+    // protegía de nada y con 150 elementos en pantalla se notaba.
+    G.get_or_init(|| Arc::new(Semaphore::new(8)))
 }
 
 /// Referer del sitio al que pertenece un CDN de booru. Varios lo comprueban
@@ -3569,6 +3697,591 @@ en Ajustes, o exporta un cookies.txt de Weibo."
         }
         Accion::Fallo(m) => {
             let _ = tx.send(Ev::GalleryError(m, epoch));
+        }
+    }
+}
+
+/// Inicia sesión en V2PH y devuelve la cookie resultante.
+///
+/// LA CONTRASEÑA NO SE GUARDA EN NINGÚN SITIO. Entra por parámetro, viaja en
+/// una sola petición hacia el propio V2PH, y se destruye al terminar esta
+/// función. Lo único que sobrevive es la cookie que devuelve el sitio, que es
+/// exactamente lo que guarda un navegador.
+///
+/// Tres pasos, y el tercero no es opcional:
+///   1. Pedir el formulario, para obtener el testigo anti-CSRF y la cookie inicial.
+///   2. Enviarlo SIN seguir redirecciones: la cookie de sesión viaja en la
+///      cabecera del 302, y si reqwest lo sigue solo veríamos la de la página
+///      de destino.
+///   3. COMPROBAR que la sesión sirve de verdad pidiendo la segunda página de
+///      un álbum. Un 200 en el login no significa nada: muchos sitios
+///      devuelven el formulario otra vez cuando la contraseña es incorrecta.
+async fn v2ph_login(
+    client: &reqwest::Client,
+    usuario: &str,
+    clave: &str,
+    album_prueba: &str,
+    ua: &str,
+) -> Result<String, String> {
+    use reqwest::header::{COOKIE, SET_COOKIE};
+
+    const LOGIN: &str = "https://www.v2ph.com/login";
+
+    let recoger = |r: &reqwest::Response| -> Vec<String> {
+        r.headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect()
+    };
+
+    // Cliente propio SIN redirecciones automáticas, solo para el envío
+    let sin_redir = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(ua)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1) Formulario
+    let r1 = v2ph_headers(
+        client
+            .get(LOGIN)
+            .header(reqwest::header::REFERER, "https://www.v2ph.com/"),
+        ua,
+    )
+    .send()
+        .await
+        .map_err(|e| format!("no se pudo abrir la página de acceso: {e}"))?;
+    let estado = r1.status().as_u16();
+    let url_final = r1.url().to_string();
+    let cookies1 = recoger(&r1);
+    let html = r1.text().await.map_err(|e| e.to_string())?;
+
+    let form = match v2ph::parse_login_form(&html, LOGIN) {
+        Some(f) => f,
+        None if v2ph::es_desafio_cloudflare(&html) => {
+            // No es un fallo nuestro ni del usuario: V2PH cierra `/login`
+            // detrás de la verificación de Cloudflare, que exige ejecutar
+            // JavaScript. Ningún cliente HTTP la pasa, por muchas cabeceras
+            // que mande. El camino que SÍ funciona es reutilizar la sesión
+            // que el navegador ya obtuvo superándola.
+            return Err(
+                "V2PH protege su página de acceso con la verificación de Cloudflare, \
+                 que exige un navegador de verdad. El acceso desde la aplicación no \
+                 es posible en esta página.\n\n\
+                 USA ESTO EN SU LUGAR: entra en V2PH con tu navegador, exporta un \
+                 cookies.txt con una extensión como «Get cookies.txt LOCALLY» y \
+                 selecciónalo en Ajustes → Cookies. Los álbumes se listan enteros \
+                 con ese archivo; esa parte del sitio no está protegida."
+                    .into(),
+            );
+        }
+        None => {
+            // Sin esta huella, «no se encuentra el formulario» puede querer
+            // decir cuatro cosas distintas y no hay forma de saber cuál.
+            let titulo = html
+                .split_once("<title>")
+                .and_then(|(_, r)| r.split_once("</title>"))
+                .map(|(t, _)| t.trim().to_string())
+                .unwrap_or_else(|| "(sin título)".into());
+            let formularios = html.matches("<form").count();
+            let hay_clave = html.contains("password");
+            let ya_dentro = v2ph::sesion_iniciada(&html);
+            return Err(format!(
+                "No se encontró el formulario de acceso.\n\n\
+                 HTTP {estado} · {} bytes · {formularios} formulario(s) · \
+                 campo de contraseña: {} · sesión ya iniciada: {}\n\
+                 Título: {titulo}\n\
+                 URL final: {url_final}\n\n\
+                 Primeros caracteres:\n{}",
+                html.len(),
+                if hay_clave { "sí" } else { "NO" },
+                if ya_dentro { "sí" } else { "no" },
+                html.chars().take(400).collect::<String>()
+            ));
+        }
+    };
+
+    let mut cookies = v2ph::merge_cookies("", &cookies1);
+
+    // 2) Envío
+    let mut campos: Vec<(String, String)> = form.ocultos.clone();
+    campos.push((form.campo_usuario.clone(), usuario.to_string()));
+    campos.push((form.campo_clave.clone(), clave.to_string()));
+    if let Some(rec) = &form.campo_recordar {
+        // Marcar «recordarme» SIEMPRE: sin ella el sitio entrega una cookie
+        // que muere al cerrar el navegador, y aquí no hay navegador que cerrar.
+        campos.push((rec.clone(), "1".into()));
+    }
+
+    let r2 = v2ph_headers(
+        sin_redir
+            .post(&form.action)
+            .header(COOKIE, cookies.as_str())
+            .header(reqwest::header::REFERER, LOGIN)
+            .header("Origin", "https://www.v2ph.com")
+            // Un envío de formulario NO es una navegación limpia: el sitio
+            // espera «same-origin» aquí, y decir otra cosa delata al programa.
+            .header("Sec-Fetch-Site", "same-origin"),
+        ua,
+    )
+    .form(&campos)
+    .send()
+        .await
+        .map_err(|e| format!("no se pudo enviar el formulario: {e}"))?;
+
+    cookies = v2ph::merge_cookies(&cookies, &recoger(&r2));
+
+    // 3) Verificación contra el sitio real
+    let prueba = v2ph_headers(
+        client
+            .get(album_prueba)
+            .header(COOKIE, cookies.as_str())
+            .header(reqwest::header::REFERER, "https://www.v2ph.com/"),
+        ua,
+    )
+    .send()
+        .await
+        .map_err(|e| format!("no se pudo comprobar la sesión: {e}"))?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if v2ph::requiere_sesion(&prueba) {
+        return Err(
+            "usuario o contraseña incorrectos, o la cuenta no puede abrir más álbumes hoy"
+                .into(),
+        );
+    }
+    Ok(cookies)
+}
+
+// ============================= Explorador de V2PH =============================
+
+/// Espaciado entre peticiones a V2PH.
+///
+/// Empezó en 400 ms y se subió a 900 tras comerse un 403 durante las pruebas:
+/// el sitio corta cuando ve ráfagas. Un álbum de 38 fotos son 4 peticiones y
+/// un perfil entero pueden ser cientos, así que ir despacio no es prudencia
+/// teórica, es la diferencia entre que funcione y que no.
+const V2PH_GAP: Duration = Duration::from_millis(900);
+
+/// Tope de páginas de un mismo álbum. Un álbum real ronda las 4-9; cualquier
+/// cosa por encima de esto es una respuesta rota o un bucle, no un álbum.
+const V2PH_MAX_ALBUM_PAGES: u32 = 60;
+
+/// Álbum contra el que se comprueba que una sesión sirve, cuando el usuario
+/// no está explorando ninguno. Se pide su SEGUNDA página, que es justo lo que
+/// V2PH niega a quien no ha entrado.
+const V2PH_ALBUM_PRUEBA: &str = "https://www.v2ph.com/album/YTY-12258?page=2";
+
+/// Catálogo de álbumes de un listado, construido a demanda.
+///
+/// POR QUÉ SE CACHEA: la rejilla pide un álbum por página, y sin caché cada
+/// página volvería a descargar el listado entero para localizar el siguiente.
+/// Es el mismo motivo por el que se cachea el listado de carpetas de MEGA.
+struct V2phCatalogo {
+    albums: Vec<v2ph::AlbumCard>,
+    /// Siguiente página del listado que queda por pedir
+    next_page: u32,
+    last_page: u32,
+    when: Instant,
+}
+
+fn v2ph_cache() -> &'static tokio::sync::Mutex<std::collections::HashMap<String, V2phCatalogo>> {
+    static C: std::sync::OnceLock<
+        tokio::sync::Mutex<std::collections::HashMap<String, V2phCatalogo>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+const V2PH_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// User-Agent a usar: el que haya puesto el usuario, o el de la aplicación.
+fn ua_efectivo(s: &Settings) -> String {
+    let u = s.user_agent.trim();
+    if u.is_empty() {
+        UA.to_string()
+    } else {
+        u.to_string()
+    }
+}
+
+/// Cabeceras que manda un navegador de verdad al pedir una página.
+///
+/// POR QUÉ HACEN FALTA: una petición con solo `User-Agent` y `Referer` se
+/// distingue a simple vista de una hecha por Firefox. Los cortafuegos de
+/// aplicación miran justo esto —qué cabeceras vienen y en qué orden— antes de
+/// decidir si eres un navegador o un programa. No es una garantía, pero
+/// parecerse cuesta cero y no parecerse cuesta un 403.
+fn v2ph_headers(req: reqwest::RequestBuilder, ua: &str) -> reqwest::RequestBuilder {
+    // El User-Agent va explícito y no por el del cliente: tiene que coincidir
+    // con el del navegador que ganó la cookie de Cloudflare.
+    req.header(reqwest::header::USER_AGENT, ua)
+        .header(
+        reqwest::header::ACCEPT,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    )
+    .header(reqwest::header::ACCEPT_LANGUAGE, "es-ES,es;q=0.9,en;q=0.8")
+    .header("Upgrade-Insecure-Requests", "1")
+    .header("Sec-Fetch-Dest", "document")
+    .header("Sec-Fetch-Mode", "navigate")
+    .header("Sec-Fetch-Site", "same-origin")
+    .header("Sec-Fetch-User", "?1")
+}
+
+async fn v2ph_get(
+    client: &reqwest::Client,
+    url: &str,
+    cookie: Option<&str>,
+    ua: &str,
+) -> Result<String, String> {
+    let mut req = v2ph_headers(
+        client
+            .get(url)
+            .header(reqwest::header::REFERER, "https://www.v2ph.com/"),
+        ua,
+    );
+    if let Some(c) = cookie {
+        req = req.header(reqwest::header::COOKIE, c);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let estado = resp.status().as_u16();
+    if !resp.status().is_success() {
+        // El 403 no es «no tienes permiso»: es el sitio cortándonos por
+        // parecer un programa. Decirlo importa, porque la reacción correcta
+        // es esperar, no cambiar de ajustes.
+        return Err(match estado {
+            403 => "HTTP 403 — V2PH está rechazando las peticiones de la aplicación. \
+                    Suele ser un bloqueo temporal por hacer demasiadas seguidas: \
+                    espera un rato (o cambia de IP si usas VPN) y reintenta. La \
+                    misma página seguirá abriéndose bien en el navegador."
+                .to_string(),
+            429 => "HTTP 429 — demasiadas peticiones. Espera unos minutos.".to_string(),
+            _ => format!("HTTP {estado}"),
+        });
+    }
+    resp.text().await.map_err(|e| e.to_string())
+}
+
+/// Álbum número `idx` (base 0) de un listado, pidiendo páginas solo hasta
+/// llegar a él.
+async fn v2ph_album_at(
+    client: &reqwest::Client,
+    kind: &str,
+    slug: &str,
+    idx: usize,
+    cookie: Option<&str>,
+    ua: &str,
+) -> Result<Option<v2ph::AlbumCard>, String> {
+    let clave = format!("{kind}/{slug}");
+    let mut cache = v2ph_cache().lock().await;
+
+    // Poda perezosa: sin esto una sesión larga acumularía catálogos caducados
+    cache.retain(|_, c| c.when.elapsed() < V2PH_CACHE_TTL);
+
+    let cat = cache.entry(clave).or_insert_with(|| V2phCatalogo {
+        albums: Vec::new(),
+        next_page: 1,
+        last_page: 1,
+        when: Instant::now(),
+    });
+
+    // Pedir páginas del listado hasta cubrir el índice o agotarlo
+    while cat.albums.len() <= idx && cat.next_page <= cat.last_page {
+        let url = v2ph::listing_url(kind, slug, cat.next_page);
+        let html = v2ph_get(client, &url, cookie, ua).await?;
+        if cat.next_page == 1 {
+            cat.last_page = v2ph::last_page(&html);
+        }
+        let tanda = v2ph::listing_albums(&html);
+        // Una página sin álbumes significa que el listado se acabó de verdad,
+        // aunque la paginación prometiera más
+        if tanda.is_empty() {
+            break;
+        }
+        cat.albums.extend(tanda);
+        cat.next_page += 1;
+        if cat.albums.len() <= idx {
+            tokio::time::sleep(V2PH_GAP).await;
+        }
+    }
+
+    Ok(cat.albums.get(idx).cloned())
+}
+
+/// Descarga todas las páginas de un álbum y devuelve sus fotos en orden.
+///
+/// NO SE FÍA DE LA PAGINACIÓN. La primera versión leía el enlace «Último» para
+/// saber cuántas páginas recorrer, y cuando ese marcado no se reconocía el
+/// álbum se quedaba en las 10 fotos de la primera página SIN DECIR NADA: no
+/// había error, solo un álbum de 38 fotos que parecía tener 10.
+///
+/// Ahora se camina hasta agotar: se pide la página siguiente mientras aporte
+/// fotos que no se hayan visto ya. Un sitio que devuelva la última página, la
+/// primera o una vacía cuando te pasas del final produce el mismo resultado —
+/// ninguna foto nueva — y el recorrido termina solo. La paginación, si se
+/// entiende, se usa solo como cota superior para ahorrar una petición.
+async fn v2ph_album_completo(
+    client: &reqwest::Client,
+    id: &str,
+    cookie: Option<&str>,
+    ua: &str,
+    // De dónde salió (o no salió) la sesión, para poder explicarlo si falla
+    origen: &str,
+) -> Result<(String, Option<String>, Vec<String>), String> {
+    let primera = v2ph_get(client, &v2ph::album_url(id, 1), cookie, ua).await?;
+    let titulo = v2ph::title(&primera);
+    let modelo = v2ph::actor_slug(&primera);
+
+    // Si la paginación se entiende, acota. Si no, se camina a ciegas hasta
+    // que una página no aporte nada nuevo.
+    let declaradas = v2ph::last_page(&primera);
+    let tope = if declaradas > 1 {
+        declaradas.min(V2PH_MAX_ALBUM_PAGES)
+    } else {
+        V2PH_MAX_ALBUM_PAGES
+    };
+
+    let mut vistas: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut fotos: Vec<String> = Vec::new();
+    for u in v2ph::album_photos(&primera) {
+        if vistas.insert(u.clone()) {
+            fotos.push(u);
+        }
+    }
+    if fotos.is_empty() {
+        return Err(format!(
+            "la página del álbum no contiene ninguna imagen de cdn.v2ph.com/photos/.\n\n{}",
+            v2ph::album_url(id, 1)
+        ));
+    }
+
+    let mut p = 2;
+    while p <= tope {
+        tokio::time::sleep(V2PH_GAP).await;
+        let html = match v2ph_get(client, &v2ph::album_url(id, p), cookie, ua).await {
+            Ok(h) => h,
+            // Cortar aquí y devolver 10 de 38 en silencio es justo el fallo
+            // mudo que se acaba de corregir. Si una página no se puede pedir,
+            // se dice: el usuario prefiere reintentar a llevarse un álbum
+            // incompleto creyendo que está entero.
+            Err(e) => {
+                return Err(format!(
+                    "página {p} del álbum: {e}\n\nSe habían reunido {} fotos de las páginas anteriores.",
+                    fotos.len()
+                ))
+            }
+        };
+        // El sitio deja ver la primera página a cualquiera y pide sesión para
+        // el resto. Sin decirlo, un álbum de 38 fotos parece tener 10.
+        if v2ph::requiere_sesion(&html) {
+            return Err(format!(
+                "V2PH pide iniciar sesión para ver más allá de la foto {}.\n\n\
+                 Sesión usada en esta petición:\n{origen}\n\n\
+                 QUÉ HACER: ve a Ajustes → Cuenta de V2PH y entra con tu \
+                 usuario y contraseña. Es la forma directa: la aplicación pide \
+                 la sesión al propio sitio en lugar de intentar rescatarla del \
+                 navegador.\n\n\
+                 Si ya has entrado y aun así sale esto, tu cuenta puede haber \
+                 agotado el cupo de álbumes del día — V2PH limita cuántos se \
+                 pueden abrir por jornada. Compruébalo abriendo {} en el \
+                 navegador.",
+                fotos.len(),
+                v2ph::album_url(id, 2)
+            ));
+        }
+        let nuevas: Vec<String> = v2ph::album_photos(&html)
+            .into_iter()
+            .filter(|u| vistas.insert(u.clone()))
+            .collect();
+        // Ninguna foto nueva = fin del álbum, tanto si la página vino vacía
+        // como si el sitio ha repetido contenido al pasarnos del final.
+        if nuevas.is_empty() {
+            break;
+        }
+        fotos.extend(nuevas);
+        p += 1;
+    }
+
+    Ok((titulo, modelo, fotos))
+}
+
+/// Convierte un álbum ya resuelto en elementos de la rejilla.
+fn v2ph_items(
+    id: &str,
+    titulo: &str,
+    modelo: Option<&str>,
+    fotos: Vec<String>,
+) -> Vec<gallery::GalleryItem> {
+    let total = fotos.len() as u32;
+    let post_url = v2ph::album_url(id, 1);
+    let autor = modelo.unwrap_or(id).to_string();
+    fotos
+        .into_iter()
+        .enumerate()
+        .map(|(i, u)| {
+            let filename = u
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            gallery::GalleryItem {
+                // El sitio sirve el original directamente en la página, así que
+                // la vista previa y la descarga son la MISMA URL. No existe una
+                // miniatura más pequeña que pedir: el propio navegador se baja
+                // la imagen entera para enseñarte el álbum.
+                thumb_url: u.clone(),
+                url: u,
+                filename,
+                ext: "jpg".into(),
+                width: 0,
+                height: 0,
+                filesize: 0,
+                is_video: false,
+                post_id: id.to_string(),
+                index_in_post: i as u32 + 1,
+                count_in_post: total.max(1),
+                author: autor.clone(),
+                description: titulo.chars().take(160).collect(),
+                date: String::new(),
+                post_url: post_url.clone(),
+                selected: false,
+            }
+        })
+        .collect()
+}
+
+/// Explorador nativo de V2PH para la rejilla de vista previa.
+///
+/// El significado de `page` depende del tipo de URL:
+/// - Álbum: la página 1 trae el álbum COMPLETO (todas sus páginas internas).
+///   Cualquier página posterior viene vacía, que es como se señala «no hay más».
+/// - Listado (modelo, agencia, categoría, país): la página N es el álbum N.
+///   Así la carga encadenada que ya existe va trayendo un álbum tras otro sin
+///   que el usuario tenga que pedirlo.
+async fn browse_v2ph(
+    client: reqwest::Client,
+    url: String,
+    page: u32,
+    // Cookie obtenida al iniciar sesión desde Ajustes, si la hay
+    sesion: String,
+    cookies_txt: String,
+    // ¿Está activada la casilla «usar cookies del navegador»?
+    navegador: bool,
+    ua: String,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+) {
+    // La sesión se resuelve UNA vez por exploración, no por petición.
+    //
+    // Orden: primero el cookies.txt si lo hay, porque es una elección explícita
+    // del usuario y debe poder ganarle a la detección automática. Si no, se
+    // lee Firefox directamente. Leer el navegador toca disco y descomprime un
+    // SQLite, así que se hace fuera del hilo asíncrono.
+    let (cookie, origen): (Option<String>, String) = if !sesion.trim().is_empty() {
+        // Sesión iniciada desde la propia aplicación: es la más fiable, porque
+        // la dio el sitio directamente en respuesta al acceso.
+        let n = sesion.matches('=').count();
+        (Some(sesion.clone()), format!("sesión iniciada en la app ({n} cookies)"))
+    } else {
+        let ruta = cookies_txt.trim().to_string();
+        let del_archivo = if ruta.is_empty() {
+            None
+        } else {
+            tokio::fs::read_to_string(&ruta)
+                .await
+                .ok()
+                .and_then(|t| v2ph::cookie_header(&t))
+        };
+        match del_archivo {
+            Some(c) => {
+                let n = c.matches('=').count();
+                (Some(c), format!("cookies.txt: {n} cookies de v2ph.com"))
+            }
+            None if navegador => {
+                let h = tokio::task::spawn_blocking(|| {
+                    cookies::firefox_cookie_header_diag("v2ph.com")
+                })
+                .await
+                .unwrap_or(cookies::Hallazgo {
+                    cookie: None,
+                    traza: "la lectura de Firefox no llegó a terminar".into(),
+                });
+                let extra = if ruta.is_empty() {
+                    String::new()
+                } else {
+                    format!("\ncookies.txt indicado ({ruta}) pero sin cookies de v2ph.com")
+                };
+                (h.cookie, format!("{}{extra}", h.traza))
+            }
+            None if ruta.is_empty() => (
+                None,
+                "no hay cookies.txt y «usar cookies del navegador» está desactivado o \
+                 el navegador elegido no es Firefox"
+                    .into(),
+            ),
+            None => (
+                None,
+                format!("cookies.txt indicado ({ruta}) pero sin cookies de v2ph.com, \
+                         y la lectura del navegador no está activada"),
+            ),
+        }
+    };
+    let cookie = cookie.as_deref();
+    let Some(clase) = v2ph::classify(&url) else {
+        let _ = tx.send(Ev::GalleryError(
+            format!("V2PH: no se reconoce esta URL.\n\n{url}"),
+            epoch,
+        ));
+        return;
+    };
+
+    let resultado = match clase {
+        v2ph::V2phUrl::Album { id, .. } => {
+            if page > 1 {
+                Ok(Vec::new()) // el álbum entero ya vino en la página 1
+            } else {
+                v2ph_album_completo(&client, &id, cookie, &ua, &origen)
+                    .await
+                    .map(|(titulo, modelo, fotos)| v2ph_items(&id, &titulo, modelo.as_deref(), fotos))
+            }
+        }
+        v2ph::V2phUrl::Listing { kind, slug, .. } => {
+            match v2ph_album_at(&client, &kind, &slug, (page - 1) as usize, cookie, &ua).await {
+                Ok(None) => Ok(Vec::new()), // se acabaron los álbumes
+                Ok(Some(card)) => v2ph_album_completo(&client, &card.id, cookie, &ua, &origen).await.map(
+                    |(titulo, modelo, fotos)| {
+                        v2ph_items(&card.id, &titulo, modelo.as_deref(), fotos)
+                    },
+                ),
+                Err(e) => Err(e),
+            }
+        }
+    };
+
+    match resultado {
+        Ok(items) => {
+            let _ = tx.send(Ev::GalleryResults(items, page, epoch));
+        }
+        Err(e) => {
+            // Un 403 con cookies puestas y el User-Agent por defecto tiene una
+            // causa concreta y muy repetida: la `cf_clearance` del cookies.txt
+            // está atada al navegador que la ganó, y si la petición dice ser
+            // otro, Cloudflare la tira. Decirlo ahorra media tarde.
+            let pista = if e.contains("403") && cookie.is_some() && ua == UA {
+                "\n\nPROBABLE CAUSA: estás enviando cookies pero con el User-Agent \
+                 por defecto de la aplicación. Si esas cookies incluyen la \
+                 «cf_clearance» de Cloudflare, solo valen acompañadas del MISMO \
+                 User-Agent del navegador que la obtuvo.\n\
+                 Ve a Ajustes → User-Agent y pulsa «Detectar desde mi navegador»."
+            } else {
+                ""
+            };
+            let _ = tx.send(Ev::GalleryError(format!("V2PH: {e}{pista}"), epoch));
         }
     }
 }
@@ -5488,6 +6201,42 @@ impl App {
                     self.toast(t(lang, "profile.need_url"));
                 } else if is_douyin_profile(&url) {
                     self.toast(t(lang, "profile.douyin_unsupported"));
+                } else if v2ph::is_v2ph(&url) {
+                    // V2PH no lo cubre ningún motor externo: gallery-dl no
+                    // trae extractor y no hace falta, porque el sitio entrega
+                    // HTML plano con las URLs originales dentro.
+                    self.profile_entries.clear();
+                    self.profile_thumbs.clear();
+                    self.profile_pending.clear();
+                    self.profile_failed.clear();
+
+                    self.gallery_url = url.clone();
+                    self.gallery_items.clear();
+                    self.gallery_error.clear();
+                    self.gallery_loading = true;
+                    self.gallery_page = 1;
+                    // SIN carga encadenada en V2PH. En Instagram cada página
+                    // es UNA petición; aquí cada «página» es un álbum entero,
+                    // o sea entre 4 y 9. Encadenar cuatro convierte un análisis
+                    // en un rastreo de treinta peticiones seguidas, que es
+                    // justo lo que el sitio corta con un 403. Aquí se trae un
+                    // álbum y el usuario pide el siguiente si lo quiere.
+                    self.gallery_prefetch_left = 0;
+                    self.gallery_prefetching = false;
+                    self.gallery_epoch += 1;
+                    let ep = self.gallery_epoch;
+                    self.rt.spawn(browse_v2ph(
+                        self.client.clone(),
+                        url,
+                        1,
+                        self.settings.v2ph_session.clone(),
+                        self.settings.cookies_file.clone(),
+                        self.settings.use_browser_cookies
+                            && self.settings.cookies_browser == "firefox",
+                        ua_efectivo(&self.settings),
+                        self.tx.clone(),
+                        ep,
+                    ));
                 } else if gallery::is_browsable(&host_of(&url).unwrap_or_default()) {
                     // Instagram y Weibo: en vez de tragarse el perfil entero,
                     // se LISTA primero y el usuario elige. gallery-dl con
@@ -5505,6 +6254,8 @@ impl App {
                         self.gallery_error.clear();
                         self.gallery_loading = true;
                         self.gallery_page = 1;
+                        self.gallery_prefetch_left = GALLERY_AUTO_PAGES;
+                        self.gallery_prefetching = false;
                         let tx = self.tx.clone();
                         let cookies = cookie_args(&self.settings);
                         self.gallery_epoch += 1;
@@ -5609,6 +6360,13 @@ impl App {
                 .collect();
             let marcados = visibles.iter().filter(|&&i| self.gallery_items[i].selected).count();
 
+            // Vaciar la rejilla se DIFIERE hasta después de pintarla. `visibles`
+            // guarda índices de `gallery_items`, y la cuadrícula de abajo hace
+            // `self.gallery_items[i]` con ellos: limpiar el vector aquí en medio
+            // deja esos índices apuntando a la nada y el acceso revienta.
+            // Es el mismo patrón que ya usaba la lista de perfil.
+            let mut vaciar_galeria = false;
+
             card_frame().show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.gallery_want_images, t(lang, "gal.images"));
@@ -5623,6 +6381,12 @@ impl App {
                         for it in self.gallery_items.iter_mut() {
                             it.selected = false;
                         }
+                    }
+                    // Vaciar la rejilla sin tener que analizar otra cosa. Se
+                    // corta también la precarga: si no, la cadena seguiría
+                    // trayendo páginas para una lista que ya no existe.
+                    if soft_button(ui, t(lang, "btn.clear_list")).clicked() {
+                        vaciar_galeria = true;
                     }
                     // Lo filtrado no puede quedarse marcado a escondidas: si no
                     // se ve, no se encola.
@@ -5819,18 +6583,44 @@ impl App {
                         }
                     }
                     if !self.gallery_loading && soft_button(ui, t(lang, "gal.more")).clicked() {
-                        if let Some(prog) = self.galdl_cmd.clone() {
-                            let next = self.gallery_page + 1;
+                        let next = self.gallery_page + 1;
+                        let url = self.gallery_url.clone();
+                        // Pedirlo a mano rearma la carga automática, salvo en
+                        // V2PH: ver el comentario del análisis.
+                        self.gallery_prefetch_left =
+                            if v2ph::is_v2ph(&url) { 0 } else { GALLERY_AUTO_PAGES };
+                        if v2ph::is_v2ph(&url) {
+                            self.gallery_loading = true;
+                            self.gallery_epoch += 1;
+                            let ep = self.gallery_epoch;
+                            self.rt.spawn(browse_v2ph(
+                                self.client.clone(),
+                                url,
+                                next,
+                                self.settings.v2ph_session.clone(),
+                                self.settings.cookies_file.clone(),
+                                self.settings.use_browser_cookies
+                                    && self.settings.cookies_browser == "firefox",
+                                ua_efectivo(&self.settings),
+                                self.tx.clone(),
+                                ep,
+                            ));
+                        } else if let Some(prog) = self.galdl_cmd.clone() {
                             self.gallery_loading = true;
                             let tx = self.tx.clone();
                             let cookies = cookie_args(&self.settings);
-                            let url = self.gallery_url.clone();
                             self.gallery_epoch += 1;
                             let ep = self.gallery_epoch;
                             self.rt.spawn(browse_gallery(
                                 prog, url, next, GALLERY_PER_PAGE, cookies, tx, ep,
                             ));
                         }
+                    }
+                    if self.gallery_prefetching {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(t(lang, "gal.prefetching")).size(10.5).color(MUTED()),
+                        );
                     }
                     ui.label(
                         RichText::new(t(lang, "gal.expiry_note"))
@@ -5839,6 +6629,24 @@ impl App {
                     );
                 });
             });
+
+            // Ahora sí: la rejilla ya está pintada y nadie usa los índices.
+            if vaciar_galeria {
+                let n = self.gallery_items.len();
+                self.gallery_items.clear();
+                self.gallery_thumbs.clear();
+                self.gallery_pending.clear();
+                self.gallery_failed.clear();
+                self.gallery_error.clear();
+                self.gallery_url.clear();
+                self.gallery_page = 1;
+                self.gallery_prefetch_left = 0;
+                self.gallery_prefetching = false;
+                // Subir el epoch descarta las respuestas de peticiones ya
+                // lanzadas y aún en vuelo, que si no repoblarían la lista.
+                self.gallery_epoch += 1;
+                self.toast(i18n::list_cleared(lang, n));
+            }
         }
 
         // Resultados del análisis
@@ -6097,7 +6905,7 @@ impl App {
             ui.label(RichText::new(t(lang, "cap.site")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for (i, name) in ["TikTok", "Douyin"].iter().enumerate() {
+                for (i, name) in ["TikTok", "Douyin", "V2PH"].iter().enumerate() {
                     let sel = self.capture_site == i;
                     let btn = egui::Button::new(
                         RichText::new(*name).color(if sel { Color32::WHITE } else { MUTED() }),
@@ -6119,6 +6927,8 @@ impl App {
 
             let script = if self.capture_site == 0 {
                 scripts::tiktok(self.settings.receiver_port)
+            } else if self.capture_site == 2 {
+                scripts::v2ph(self.settings.receiver_port)
             } else {
                 scripts::douyin(self.settings.receiver_port)
             };
@@ -6152,6 +6962,8 @@ impl App {
             ui.add_space(4.0);
             let script = if self.capture_site == 0 {
                 scripts::tiktok(self.settings.receiver_port)
+            } else if self.capture_site == 2 {
+                scripts::v2ph(self.settings.receiver_port)
             } else {
                 scripts::douyin(self.settings.receiver_port)
             };
@@ -7112,7 +7924,12 @@ impl App {
                         });
                 });
                 ui.label(RichText::new(t(lang, "set.cookies_note")).size(11.5).color(MUTED()));
-                ui.label(RichText::new(t(lang, "set.cookies_warn")).size(11.5).color(AMBER()));
+                // App-Bound Encryption es una protección de Windows. En Linux
+                // y macOS las cookies de Chromium SÍ se pueden leer, así que
+                // enseñar ahí este aviso desanima de algo que funciona.
+                if cfg!(windows) && self.settings.cookies_browser != "firefox" {
+                    ui.label(RichText::new(t(lang, "set.cookies_warn")).size(11.5).color(AMBER()));
+                }
             }
             ui.add_space(6.0);
             ui.label(RichText::new(t(lang, "set.cookies_file")).size(11.5).color(MUTED()));
@@ -7139,6 +7956,42 @@ impl App {
             if !self.settings.cookies_file.is_empty() {
                 ui.label(RichText::new(t(lang, "set.cookies_file_note")).size(11.5).color(MUTED()));
             }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new(t(lang, "set.ua")).size(11.0).color(MUTED()).strong());
+            ui.horizontal(|ui| {
+                let ancho = (ui.available_width() - 90.0).max(200.0);
+                ui.add_sized(
+                    [ancho, 26.0],
+                    egui::TextEdit::singleline(&mut self.settings.user_agent)
+                        .hint_text(UA),
+                );
+                if soft_button(ui, t(lang, "set.ua_clear")).clicked() {
+                    self.settings.user_agent.clear();
+                }
+            });
+            ui.horizontal(|ui| {
+                // Se le abre al navegador una dirección del receptor local: al
+                // pedirla manda su User-Agent en la cabecera, y de ahí se lee.
+                // Nada que teclear, nada que adivinar, y vale para cualquier
+                // navegador y cualquier sistema.
+                if primary_button(ui, t(lang, "set.ua_detect")).clicked() {
+                    if self.settings.receiver_enabled {
+                        let url = format!("http://127.0.0.1:{}/ua", self.settings.receiver_port);
+                        if open::that(&url).is_err() {
+                            self.toast(url);
+                        }
+                    } else {
+                        // Sin receptor no hay a quién preguntar
+                        self.toast(t(lang, "set.ua_need_receiver"));
+                    }
+                }
+                if !self.settings.user_agent.is_empty() {
+                    ui.label(RichText::new("✓").size(13.0).color(GREEN()));
+                }
+            });
+            ui.label(RichText::new(t(lang, "set.ua_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
@@ -7267,6 +8120,79 @@ impl App {
                 }
                 ui.label(RichText::new(t(lang, "eng.ffmpeg_note")).size(11.5).color(MUTED()));
             }
+        });
+        ui.add_space(12.0);
+
+        // ---- Cuenta de V2PH ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.v2ph")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+
+            if self.settings.v2ph_session.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t(lang, "set.v2ph_user")).size(12.0).color(MUTED()));
+                    ui.add_sized(
+                        [200.0, 26.0],
+                        egui::TextEdit::singleline(&mut self.settings.v2ph_user),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t(lang, "set.v2ph_pass")).size(12.0).color(MUTED()));
+                    // password(true): ni a la vista ni en una captura de pantalla
+                    ui.add_sized(
+                        [200.0, 26.0],
+                        egui::TextEdit::singleline(&mut self.v2ph_pass).password(true),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    let listo = !self.settings.v2ph_user.trim().is_empty()
+                        && !self.v2ph_pass.is_empty()
+                        && !self.v2ph_busy;
+                    if primary_button(ui, t(lang, "set.v2ph_login")).clicked() && listo {
+                        self.v2ph_busy = true;
+                        let usuario = self.settings.v2ph_user.trim().to_string();
+                        // La contraseña se MUEVE a la tarea: no queda copia aquí
+                        let clave = std::mem::take(&mut self.v2ph_pass);
+                        let cliente = self.client.clone();
+                        let ua = ua_efectivo(&self.settings);
+                        let tx = self.tx.clone();
+                        // Se verifica contra la segunda página de un álbum real:
+                        // es justo lo que el sitio niega sin sesión.
+                        let prueba = self.gallery_url.clone();
+                        self.rt.spawn(async move {
+                            let album = if v2ph::is_v2ph(&prueba) {
+                                match v2ph::classify(&prueba) {
+                                    Some(v2ph::V2phUrl::Album { id, .. }) => v2ph::album_url(&id, 2),
+                                    _ => V2PH_ALBUM_PRUEBA.to_string(),
+                                }
+                            } else {
+                                V2PH_ALBUM_PRUEBA.to_string()
+                            };
+                            let r = v2ph_login(&cliente, &usuario, &clave, &album, &ua)
+                                .await
+                                .map(|c| (usuario.clone(), c));
+                            let _ = tx.send(Ev::V2phLogin(r));
+                        });
+                    }
+                    if self.v2ph_busy {
+                        ui.spinner();
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(i18n::v2ph_signed_in(lang, &self.settings.v2ph_user))
+                            .size(12.0)
+                            .color(GREEN()),
+                    );
+                    if soft_button(ui, t(lang, "set.v2ph_logout")).clicked() {
+                        self.settings.v2ph_session.clear();
+                        self.toast(t(lang, "v2ph.out"));
+                    }
+                });
+            }
+            ui.label(RichText::new(t(lang, "set.v2ph_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
