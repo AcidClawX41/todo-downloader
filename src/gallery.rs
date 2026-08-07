@@ -76,7 +76,7 @@ impl GalleryItem {
     pub fn summary(&self) -> String {
         let mut s = String::new();
         if self.is_video {
-            s.push_str("VÍDEO  ");
+            s.push_str(if crate::i18n::lang() == crate::i18n::Lang::Es { "VÍDEO  " } else { "VIDEO  " });
         }
         s.push_str(&self.resolution());
         if self.filesize > 0 {
@@ -177,7 +177,11 @@ pub struct Listing {
 /// informa de un error (por ejemplo Instagram sin sesión válida).
 pub fn parse_listing(json: &str) -> Result<Listing, String> {
     let root: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let arr = root.as_array().ok_or("respuesta inesperada de gallery-dl")?;
+    let arr = root.as_array().ok_or(if crate::i18n::lang() == crate::i18n::Lang::Es {
+        "respuesta inesperada de gallery-dl"
+    } else {
+        "unexpected reply from gallery-dl"
+    })?;
     let mut out: Vec<GalleryItem> = Vec::new();
     let mut queued: Vec<String> = Vec::new();
 

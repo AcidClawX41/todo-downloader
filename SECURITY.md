@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.6.2.
+Summary of the security audit and the application's threat model. Last reviewed for v1.6.5.
 
 ## Communication channels
 

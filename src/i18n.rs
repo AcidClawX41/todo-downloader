@@ -5,6 +5,31 @@
 //!   2. Añade la columna correspondiente en cada `entry!` de la tabla `t()`.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Idioma actual de la interfaz, accesible desde cualquier parte.
+///
+/// POR QUÉ UN GLOBAL: los mensajes de error se generan dentro de tareas
+/// asíncronas —el motor de MEGA, el de V2PH, los resolutores de hosters— que
+/// no reciben ni deben recibir un puntero a los ajustes. La alternativa era
+/// arrastrar un parámetro `Lang` por una docena de firmas que no tienen nada
+/// que ver con la interfaz, o dejar los mensajes en un solo idioma. Esto
+/// último es lo que había, y es un fallo: un usuario con la aplicación en
+/// inglés recibía instrucciones en castellano.
+///
+/// La aplicación tiene un único idioma a la vez, así que un valor global es
+/// una representación fiel de la realidad, no un atajo.
+static IDIOMA: AtomicU8 = AtomicU8::new(0);
+
+/// Fija el idioma que usarán los mensajes generados fuera de la interfaz.
+pub fn set_lang(l: Lang) {
+    IDIOMA.store(match l { Lang::Es => 0, Lang::En => 1 }, Ordering::Relaxed);
+}
+
+/// Idioma actual, para código que no tiene acceso a los ajustes.
+pub fn lang() -> Lang {
+    if IDIOMA.load(Ordering::Relaxed) == 1 { Lang::En } else { Lang::Es }
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[derive(Default)]
@@ -239,6 +264,11 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "set.per_author" => entry!("Crear subcarpeta por autor", "Create a subfolder per author"),
         "set.downloads" => entry!("DESCARGAS", "DOWNLOADS"),
         "set.concurrency" => entry!("Descargas simultáneas:", "Simultaneous downloads:"),
+        "set.prefer_br" => entry!("Priorizar bitrate sobre eficiencia de códec",
+                                  "Prefer bitrate over codec efficiency"),
+        "set.prefer_br_note" => entry!(
+            "Misma resolución y mismos fps, pero de los formatos disponibles se coge el de más bitrate: normalmente H.264, que pesa más y lo reproduce todo. Desactivado se usan códecs modernos (AV1/VP9), con archivos bastante más pequeños.",
+            "Same resolution and same fps, but of the available formats the one with the highest bitrate is taken: usually H.264, which is larger and plays everywhere. Turned off, modern codecs (AV1/VP9) are used, with considerably smaller files."),
         "set.language" => entry!("IDIOMA / LANGUAGE", "LANGUAGE / IDIOMA"),
         "set.language_label" => entry!("Idioma de la interfaz:", "Interface language:"),
         "set.linkgrabber" => entry!("LINKGRABBER (PORTAPAPELES)", "LINKGRABBER (CLIPBOARD)"),

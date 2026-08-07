@@ -210,7 +210,11 @@ fn n(v: &Value, keys: &[&str]) -> u64 {
 /// las que traen un objeto con `file_url` (o `file.url` en e621).
 pub fn parse(json: &str) -> Result<Vec<Post>, String> {
     let root: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let arr = root.as_array().ok_or("respuesta inesperada")?;
+    let arr = root.as_array().ok_or(if crate::i18n::lang() == crate::i18n::Lang::Es {
+        "respuesta inesperada"
+    } else {
+        "unexpected reply"
+    })?;
     let mut out = Vec::new();
 
     for entry in arr {

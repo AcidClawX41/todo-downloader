@@ -25,6 +25,11 @@
 
 use std::path::{Path, PathBuf};
 
+/// Elige un texto según el idioma actual (ver `i18n::lang`).
+fn m(es: &'static str, en: &'static str) -> &'static str {
+    if crate::i18n::lang() == crate::i18n::Lang::Es { es } else { en }
+}
+
 /// Ubicaciones donde Firefox guarda sus perfiles, por sistema operativo.
 ///
 /// En Linux se contemplan además las instalaciones de Snap y Flatpak, que
@@ -156,7 +161,7 @@ fn escanear(dir: &Path) -> Vec<PathBuf> {
             (t, p)
         })
         .collect();
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     v.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -259,7 +264,10 @@ pub fn firefox_cookie_header_diag(dominio: &str) -> Hallazgo {
         return Hallazgo {
             cookie: None,
             traza: format!(
-                "Firefox: no se encontró ningún cookies.sqlite.\nRaíces buscadas:\n  {}",
+                "{}\n{}\n  {}",
+                m("Firefox: no se encontró ningún cookies.sqlite.",
+                  "Firefox: no cookies.sqlite was found."),
+                m("Raíces buscadas:", "Roots searched:"),
                 raices.join("\n  ")
             ),
         };
@@ -277,7 +285,10 @@ pub fn firefox_cookie_header_diag(dominio: &str) -> Hallazgo {
         let tmp = match copia_temporal(base) {
             Ok(t) => t,
             Err(e) => {
-                lineas.push(format!("{etiqueta}: no se pudo copiar ({e})"));
+                lineas.push(format!(
+                    "{etiqueta}: {} ({e})",
+                    m("no se pudo copiar", "could not copy")
+                ));
                 continue;
             }
         };
@@ -287,20 +298,29 @@ pub fn firefox_cookie_header_diag(dominio: &str) -> Hallazgo {
         match resultado {
             Ok(Some((h, nombres))) => {
                 lineas.push(format!(
-                    "{etiqueta}: {} cookie(s) de {dominio} → {}",
+                    "{etiqueta}: {} {} {dominio} → {}",
                     nombres.len(),
+                    m("cookie(s) de", "cookie(s) for"),
                     nombres.join(", ")
                 ));
                 lineas.push(
-                    "NOTA: Firefox guarda en cookies.sqlite solo las cookies CON caducidad. \
-                     Las de sesión (las que caducan al cerrar el navegador) viven en memoria \
-                     y NO están en ese archivo, así que no se pueden leer desde fuera."
-                        .into(),
+                    m(
+                        "NOTA: Firefox guarda en cookies.sqlite solo las cookies CON caducidad. \
+                         Las de sesión (las que caducan al cerrar el navegador) viven en memoria \
+                         y NO están en ese archivo, así que no se pueden leer desde fuera.",
+                        "NOTE: Firefox only writes cookies WITH an expiry date to cookies.sqlite. \
+                         Session cookies (those that die when the browser closes) live in memory \
+                         and are NOT in that file, so they cannot be read from outside.",
+                    )
+                    .into(),
                 );
                 return Hallazgo { cookie: Some(h), traza: lineas.join("\n") };
             }
             Ok(None) => lineas.push(format!("{etiqueta}: sin cookies de {dominio}")),
-            Err(e) => lineas.push(format!("{etiqueta}: error al leer ({e})")),
+            Err(e) => lineas.push(format!(
+                "{etiqueta}: {} ({e})",
+                m("error al leer", "read error")
+            )),
         }
     }
 
@@ -353,7 +373,7 @@ fn leer_cookies(db: &Path, dominio: &str) -> Result<Option<(String, Vec<String>)
     if pares.is_empty() {
         // Distinguir «base vacía» de «base llena sin este dominio»
         if total == 0 {
-            return Err("la tabla moz_cookies está vacía".into());
+            return Err(m("la tabla moz_cookies está vacía", "the moz_cookies table is empty").into());
         }
         return Ok(None);
     }

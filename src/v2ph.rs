@@ -419,7 +419,7 @@ fn absoluta(action: &str, base: &str) -> String {
     }
     if let Some(resto) = a.strip_prefix('/') {
         // Raíz del sitio: esquema + host de `base`
-        let sin_esquema = base.split_once("://").map(|(e, r)| (e, r));
+        let sin_esquema = base.split_once("://");
         if let Some((esquema, resto_base)) = sin_esquema {
             let host = resto_base.split('/').next().unwrap_or("");
             return format!("{esquema}://{host}/{resto}");

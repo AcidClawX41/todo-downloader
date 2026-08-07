@@ -91,44 +91,91 @@ impl MegaError {
 }
 
 impl fmt::Display for MegaError {
-    /// Mensajes accionables. Nunca incluyen la clave ni el fragmento de la URL.
+    /// Mensajes accionables, en el idioma elegido en la aplicación.
+    ///
+    /// Nunca incluyen la clave ni el fragmento de la URL.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::i18n::Lang;
+        let es = crate::i18n::lang() == Lang::Es;
+        macro_rules! m {
+            ($esp:expr, $eng:expr) => {
+                if es { $esp } else { $eng }
+            };
+        }
         match self {
-            MegaError::InvalidUrl(why) => write!(f, "MEGA: enlace no válido ({why})"),
-            MegaError::UnsupportedLinkType => {
-                write!(f, "MEGA: tipo de enlace no soportado (solo archivos y carpetas públicos)")
-            }
-            MegaError::MissingKey => {
-                write!(f, "MEGA: al enlace le falta la clave de descifrado (la parte tras #)")
-            }
-            MegaError::InvalidKey => write!(f, "MEGA: la clave del enlace no es válida"),
-            MegaError::InvalidAttributes => {
-                write!(f, "MEGA: no se pudo descifrar el nombre del archivo; la clave no corresponde")
-            }
-            MegaError::NotFound => write!(f, "MEGA: el archivo ya no existe o el enlace fue retirado"),
-            MegaError::AccessDenied => write!(f, "MEGA: acceso denegado a este enlace"),
-            MegaError::TransferQuotaExceeded => {
-                write!(f, "MEGA: cuota de transferencia agotada; inténtalo más tarde")
-            }
-            MegaError::RateLimited => write!(f, "MEGA: demasiadas peticiones; esperando"),
-            MegaError::TemporaryUnavailable => write!(f, "MEGA: no disponible temporalmente"),
-            MegaError::ExpiredTransferUrl => write!(f, "MEGA: el enlace de transferencia caducó"),
-            MegaError::RangeNotSupported => {
-                write!(f, "MEGA: el servidor ignoró la reanudación; reiniciando de forma segura")
-            }
-            MegaError::InvalidContentRange => write!(f, "MEGA: rango de bytes incoherente"),
-            MegaError::SizeMismatch { expected, got } => {
-                write!(f, "MEGA: tamaño final incorrecto (esperado {expected}, recibido {got})")
-            }
-            MegaError::IntegrityMismatch => write!(
-                f,
-                "MEGA: la verificación de integridad falló; el archivo final NO se ha creado"
+            MegaError::InvalidUrl(why) => write!(
+                f, "{}({why})", m!("MEGA: enlace no válido ", "MEGA: invalid link ")
             ),
-            MegaError::Cancelled => write!(f, "MEGA: cancelado"),
-            MegaError::Io(e) => write!(f, "MEGA: error de disco: {e}"),
-            MegaError::Http(e) => write!(f, "MEGA: error de red: {e}"),
-            MegaError::Api(c) => write!(f, "MEGA: la API devolvió el error {c}"),
-            MegaError::MalformedResponse(w) => write!(f, "MEGA: respuesta inesperada ({w})"),
+            MegaError::UnsupportedLinkType => write!(f, "{}", m!(
+                "MEGA: tipo de enlace no soportado (solo archivos y carpetas públicos)",
+                "MEGA: unsupported link type (public files and folders only)"
+            )),
+            MegaError::MissingKey => write!(f, "{}", m!(
+                "MEGA: al enlace le falta la clave de descifrado (la parte tras #)",
+                "MEGA: the link is missing its decryption key (the part after #)"
+            )),
+            MegaError::InvalidKey => write!(f, "{}", m!(
+                "MEGA: la clave del enlace no es válida",
+                "MEGA: the link's key is not valid"
+            )),
+            MegaError::InvalidAttributes => write!(f, "{}", m!(
+                "MEGA: no se pudo descifrar el nombre del archivo; la clave no corresponde",
+                "MEGA: could not decrypt the file name; the key does not match"
+            )),
+            MegaError::NotFound => write!(f, "{}", m!(
+                "MEGA: el archivo ya no existe o el enlace fue retirado",
+                "MEGA: the file no longer exists or the link was taken down"
+            )),
+            MegaError::AccessDenied => write!(f, "{}", m!(
+                "MEGA: acceso denegado a este enlace",
+                "MEGA: access denied for this link"
+            )),
+            MegaError::TransferQuotaExceeded => write!(f, "{}", m!(
+                "MEGA: cuota de transferencia agotada; inténtalo más tarde",
+                "MEGA: transfer quota exhausted; try again later"
+            )),
+            MegaError::RateLimited => write!(f, "{}", m!(
+                "MEGA: demasiadas peticiones; esperando",
+                "MEGA: too many requests; waiting"
+            )),
+            MegaError::TemporaryUnavailable => write!(f, "{}", m!(
+                "MEGA: no disponible temporalmente",
+                "MEGA: temporarily unavailable"
+            )),
+            MegaError::ExpiredTransferUrl => write!(f, "{}", m!(
+                "MEGA: el enlace de transferencia caducó",
+                "MEGA: the transfer link expired"
+            )),
+            MegaError::RangeNotSupported => write!(f, "{}", m!(
+                "MEGA: el servidor ignoró la reanudación; reiniciando de forma segura",
+                "MEGA: the server ignored the resume request; restarting safely"
+            )),
+            MegaError::InvalidContentRange => write!(f, "{}", m!(
+                "MEGA: rango de bytes incoherente",
+                "MEGA: inconsistent byte range"
+            )),
+            MegaError::SizeMismatch { expected, got } => write!(
+                f, "{}({expected} / {got})",
+                m!("MEGA: tamaño final incorrecto: esperado / recibido ",
+                   "MEGA: wrong final size: expected / received ")
+            ),
+            MegaError::IntegrityMismatch => write!(f, "{}", m!(
+                "MEGA: la verificación de integridad falló; el archivo final NO se ha creado",
+                "MEGA: integrity check failed; the final file was NOT created"
+            )),
+            MegaError::Cancelled => write!(f, "{}", m!("MEGA: cancelado", "MEGA: cancelled")),
+            MegaError::Io(e) => write!(
+                f, "{}{e}", m!("MEGA: error de disco: ", "MEGA: disk error: ")
+            ),
+            MegaError::Http(e) => write!(
+                f, "{}{e}", m!("MEGA: error de red: ", "MEGA: network error: ")
+            ),
+            MegaError::Api(c) => write!(
+                f, "{}{c}", m!("MEGA: la API devolvió el error ", "MEGA: the API returned error ")
+            ),
+            MegaError::MalformedResponse(w) => write!(
+                f, "{}({w})", m!("MEGA: respuesta inesperada ", "MEGA: unexpected response ")
+            ),
         }
     }
 }

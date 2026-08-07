@@ -20,6 +20,12 @@ use std::sync::Arc;
 use librqbit::limits::LimitsConfig;
 use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions, TorrentStatsState};
 
+/// Texto en el idioma activo. Estos mensajes nacen dentro de tareas async, que
+/// no tienen acceso a los ajustes, de ahí el idioma global de `i18n`.
+fn m(es: &'static str, en: &'static str) -> &'static str {
+    if crate::i18n::lang() == crate::i18n::Lang::Es { es } else { en }
+}
+
 /// Un torrent gestionado, tal como lo necesita la UI.
 #[derive(Clone)]
 pub struct Handle {
@@ -152,8 +158,12 @@ impl Client {
                 }),
             )
             .await?;
-        resp.into_handle()
-            .ok_or_else(|| anyhow::anyhow!("no se pudo iniciar el torrent (¿lista solo?)"))
+        resp.into_handle().ok_or_else(|| {
+            anyhow::anyhow!(m(
+                "no se pudo iniciar el torrent (¿lista solo?)",
+                "could not start the torrent (list-only?)",
+            ))
+        })
     }
 
     pub async fn pause(&self, h: &Arc<librqbit::ManagedTorrent>) {

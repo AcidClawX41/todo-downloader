@@ -21,13 +21,20 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.6.2:**
+**New in v1.6.5:**
+
+- **Audio and video are merged on Linux and macOS again** — the application was passing an empty `--ffmpeg-location` to yt-dlp, so the merger was never found and the two streams stayed apart. Windows was never affected.
+- **A bitrate setting** — *Settings → Downloads → Prefer bitrate over codec efficiency*, on by default. Same resolution and same fps, but the highest-bitrate encode of them wins instead of the most compact one.
+- **Galleries load the whole profile** — the background chain now runs to the end instead of stopping after four pages. *Load more* is still there.
+- **Images and videos counted separately** in the gallery header, over the whole list rather than the filtered view.
+- **Engine messages follow the selected language** — errors produced outside the interface were hardcoded in Spanish and now switch with it.
+
+**Also in v1.6.2 and v1.6.0:**
 
 - **Native MEGA.nz public-link downloads** — decrypted on your machine, resumable, and verified against MEGA's own file MAC before the download is considered complete.
 - **Preview grids for Instagram, Weibo, TikTok, Bilibili and V2PH** — analyze a profile, see the actual photos and video covers, and queue only the ones you want.
 - **Native V2PH extractor** — full albums and whole model profiles, in original quality, with no external engine, plus a browser-side script for when the site pushes back.
-- **Galleries keep loading in the background** — the first batch appears immediately and more pages arrive while you browse.
-- **YouTube downloads work again** — the per-site cookie policy that broke them is fixed.
+- **Sign-in from Settings, native Firefox cookie reading and a User-Agent field** — three ways to give the application a session, and honest documentation of what each one cannot do.
 
 ## Features
 

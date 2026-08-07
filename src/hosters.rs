@@ -17,6 +17,12 @@
 
 use regex::Regex;
 
+/// Elige un texto según el idioma actual (ver `i18n::lang`).
+fn m(es: &'static str, en: &'static str) -> &'static str {
+    if crate::i18n::lang() == crate::i18n::Lang::Es { es } else { en }
+}
+
+
 /// Un enlace directo ya resuelto, listo para el motor HTTP.
 pub struct Resolved {
     /// URL directa al archivo en el CDN
@@ -62,7 +68,7 @@ pub async fn resolve(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<
         anyhow::bail!("hoster no soportado de forma nativa");
     };
     if items.is_empty() {
-        anyhow::bail!("no se encontró ningún archivo descargable en el enlace");
+        anyhow::bail!(m("no se encontró ningún archivo descargable en el enlace", "no downloadable file was found at the link"));
     }
     Ok(items)
 }
@@ -110,7 +116,7 @@ async fn pixeldrain(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<R
     }
 
     let id = capture(r"pixeldrain\.com/(?:u|api/file)/([a-zA-Z0-9]+)", url)
-        .ok_or_else(|| anyhow::anyhow!("no se reconoció el ID de Pixeldrain"))?;
+        .ok_or_else(|| anyhow::anyhow!(m("no se reconoció el ID de Pixeldrain", "the Pixeldrain ID was not recognised")))?;
     let info: PdInfo = client
         .get(format!("https://pixeldrain.com/api/file/{id}/info"))
         .send()
@@ -151,7 +157,7 @@ async fn gofile_token(client: &reqwest::Client) -> anyhow::Result<String> {
     r.data
         .and_then(|d| d.token)
         .filter(|t| !t.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("GoFile no devolvió token de invitado"))
+        .ok_or_else(|| anyhow::anyhow!(m("GoFile no devolvió token de invitado", "GoFile returned no guest token")))
 }
 
 /// El website token cambia; se extrae de global.js. Si falla, se usa el último
@@ -177,7 +183,7 @@ async fn gofile_wt(client: &reqwest::Client) -> String {
 
 async fn gofile(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<Resolved>> {
     let code = capture(r"gofile\.io/d/([a-zA-Z0-9]+)", url)
-        .ok_or_else(|| anyhow::anyhow!("no se reconoció el código de GoFile"))?;
+        .ok_or_else(|| anyhow::anyhow!(m("no se reconoció el código de GoFile", "the GoFile code was not recognised")))?;
 
     let token = gofile_token(client).await?;
     let wt = gofile_wt(client).await;
@@ -195,7 +201,7 @@ async fn gofile(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<Resol
         let st = v.get("status").and_then(|s| s.as_str()).unwrap_or("desconocido");
         // Caso típico reciente: listar carpetas de invitado exige premium
         if st.contains("notPremium") {
-            anyhow::bail!("GoFile exige cuenta premium para listar esta carpeta");
+            anyhow::bail!(m("GoFile exige cuenta premium para listar esta carpeta", "GoFile requires a premium account to list this folder"));
         }
         anyhow::bail!("GoFile respondió: {st}");
     }
@@ -253,7 +259,7 @@ async fn mediafire(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<Re
     }
 
     let direct = direct.ok_or_else(|| {
-        anyhow::anyhow!("no se encontró el enlace directo en la página de MediaFire")
+        anyhow::anyhow!(m("no se encontró el enlace directo en la página de MediaFire", "the direct link was not found on the MediaFire page"))
     })?;
 
     // Nombre: de la URL de la página (.../file/{id}/{name}) o del propio enlace

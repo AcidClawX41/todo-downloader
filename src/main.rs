@@ -405,7 +405,14 @@ const GALLERY_PER_PAGE: u32 = 30;
 /// Encadenando páginas se ve la primera tanda enseguida y la rejilla sigue
 /// creciendo sola mientras el usuario mira. El tiempo total es el mismo; lo
 /// que cambia es que deja de ser tiempo muerto.
-const GALLERY_AUTO_PAGES: u32 = 4;
+///
+/// EL TOPE NO ES UN LÍMITE DE DISEÑO, ES UNA RED DE SEGURIDAD. La cadena se
+/// para sola en cuanto una página vuelve vacía —fin del perfil— o falla, así
+/// que en la práctica recorre el perfil entero. Este número solo impide que un
+/// extractor que nunca deje de devolver resultados se quede pidiendo páginas
+/// para siempre. 40 × 30 = 1200 elementos, más de lo que tiene casi cualquier
+/// perfil; si se alcanza, «Cargar más» rearma la cadena.
+const GALLERY_AUTO_PAGES: u32 = 40;
 
 // ============================= Modelo =============================
 
@@ -711,6 +718,39 @@ fn weibo_feed_url(url: &str) -> Option<String> {
     Some(format!("{base}?tabtype=feed"))
 }
 
+/// Elige un texto según el idioma actual de la aplicación.
+///
+/// Los mensajes de los motores se construyen dentro de tareas asíncronas que no
+/// reciben los ajustes, así que consultan el idioma global (ver `i18n::lang`).
+/// Antes estaban fijos en castellano, y quien tuviera la aplicación en inglés
+/// recibía las instrucciones en un idioma que quizá no lee.
+fn msg_lang(es: &'static str, en: &'static str) -> &'static str {
+    if i18n::lang() == i18n::Lang::Es { es } else { en }
+}
+
+/// Directorio que se le pasa a yt-dlp en `--ffmpeg-location`, si procede.
+///
+/// EL CASO QUE ROMPÍA LINUX: la detección devuelve la ruta completa cuando usa
+/// el ffmpeg integrado (solo Windows lo instala solo), pero la palabra
+/// «ffmpeg» a secas cuando lo encuentra en el PATH del sistema, que es lo
+/// normal en Linux y macOS.
+///
+/// Y `Path::new("ffmpeg").parent()` NO devuelve `None`: devuelve una ruta
+/// VACÍA. Así que se acababa pasando `--ffmpeg-location ""`, yt-dlp buscaba el
+/// binario en un directorio inexistente, no lo encontraba, y no podía fusionar
+/// los flujos de vídeo y audio. El vídeo se descargaba pero salía mudo o en
+/// dos archivos, solo fuera de Windows.
+///
+/// Sin el argumento, yt-dlp busca ffmpeg en el PATH él solo, que es justo lo
+/// que hace falta cuando el binario vino del sistema.
+fn ffmpeg_location_arg(ff: &str) -> Option<String> {
+    let dir = std::path::Path::new(ff).parent()?;
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+    Some(dir.to_string_lossy().into_owned())
+}
+
 /// Motor capaz de resolver una URL de PÁGINA cuando el enlace directo falla.
 /// `None` = ningún motor la soporta (p. ej. douyin.com/note/…: yt-dlp no tiene
 /// extractor de notas y gallery-dl no tiene extractor de Douyin).
@@ -942,6 +982,22 @@ struct Settings {
     booru_key: String,
     receiver_enabled: bool,
     receiver_port: u16,
+    /// Al elegir formato de vídeo, ¿mandar el bitrate por delante del códec?
+    ///
+    /// POR QUÉ EXISTE: yt-dlp ordena por `res, fps, hdr, vcodec, …, br`. El
+    /// códec pesa MÁS que el bitrate, y su preferencia por defecto es
+    /// `av01 > vp9 > h264`, o sea el encode más eficiente, que es también el
+    /// de menos bitrate: a 1080p, AV1 ronda los 1500–2000 kbps donde el AVC
+    /// pasa de 4000. Resolución y fps ya salían al máximo; el bitrate no.
+    ///
+    /// Activado, se pasa `-S res,fps,hdr,tbr`: misma resolución y mismos fps,
+    /// pero de los encodes disponibles se coge el de más bitrate. Suele ser
+    /// H.264, que además es el que reproduce y edita cualquier cosa.
+    ///
+    /// Desactivado, manda el criterio de fábrica de yt-dlp: archivos bastante
+    /// más pequeños con códecs modernos. Ninguna de las dos opciones es «la
+    /// buena»; por eso es una casilla y no una constante.
+    prefer_bitrate: bool,
     /// Carpeta de destino de los torrents (vacío = <dest>/Torrents)
     torrent_dir: String,
     /// Límite de descarga de torrents en KiB/s (0 = sin límite)
@@ -972,6 +1028,7 @@ impl Default for Settings {
             bg_blur: 0.0,
             booru_user: String::new(),
             booru_key: String::new(),
+            prefer_bitrate: true,
             receiver_enabled: true,
             receiver_port: 9777,
             torrent_dir: String::new(),
@@ -1176,6 +1233,14 @@ fn author_from_url(url: &str) -> String {
 /// `b/bv*+ba`, que ante la ausencia de un premezclado intentaba fusionar sin
 /// fusionador y abortaba con OSError [Errno 2] — exactamente lo que se quería
 /// evitar.
+/// Orden de preferencia que antepone el bitrate al códec.
+///
+/// `res` y `fps` van primero para no sacrificar nunca resolución ni fluidez:
+/// esto NO baja la calidad, solo desempata entre encodes de la misma imagen.
+/// `hdr` antes que `tbr` porque un HDR de menos bitrate sigue teniendo más
+/// información de color que un SDR de más.
+const FORMAT_SORT_BITRATE: &str = "res,fps,hdr,tbr";
+
 fn format_selector(has_ffmpeg: bool) -> &'static str {
     if has_ffmpeg {
         "bv*+ba/b"
@@ -1365,6 +1430,11 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+
+        // El idioma se publica en un global para que los mensajes generados
+        // fuera de la interfaz —motores de MEGA y V2PH, resolutores— salgan en
+        // el idioma elegido y no en el que se escribió el código.
+        i18n::set_lang(settings.lang);
 
         // Migración de rutas por defecto antiguas (…/TikTok, …/TodoDownloader)
         // a la nueva carpeta genérica "Todo Downloads", solo si nunca se personalizó.
@@ -1868,6 +1938,7 @@ impl App {
             engine: row.engine,
             extra_args: cookie_args(&self.settings),
             ffmpeg: self.ffmpeg_cmd.clone(),
+            prefer_bitrate: self.settings.prefer_bitrate,
             cancel: row.cancel.clone(),
             lang: self.settings.lang,
             cookie: row.dl_cookie.clone(),
@@ -2310,6 +2381,8 @@ struct DlSpec {
     engine: Engine,
     extra_args: Vec<String>,
     ffmpeg: Option<String>,
+    /// Ver `Settings::prefer_bitrate`
+    prefer_bitrate: bool,
     cancel: Arc<AtomicBool>,
     lang: Lang,
     /// Cookie de descarga (GoFile); vacía si no aplica
@@ -2336,11 +2409,11 @@ async fn download_task(
         Err(e) => {
             let _ = tx.send(Ev::ErrorDetail(
                 spec.id,
-                format!("no se pudo reservar hueco de descarga: {e}"),
+                format!("{}: {e}", msg_lang("no se pudo reservar hueco de descarga", "could not reserve a download slot")),
             ));
             let _ = tx.send(Ev::Status(
                 spec.id,
-                Status::Error("cola interrumpida; pulsa Reintentar".into()),
+                Status::Error(msg_lang("cola interrumpida; pulsa Reintentar", "queue interrupted; press Retry").into()),
             ));
             return;
         }
@@ -2646,7 +2719,7 @@ async fn run_capture_timeout(
             let _ = child.wait().await;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "el motor no respondió a tiempo",
+                msg_lang("el motor no respondió a tiempo", "the engine did not respond in time"),
             ));
         }
         tokio::time::sleep(Duration::from_millis(120)).await;
@@ -3066,7 +3139,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     let Some(program) = program else {
         let _ = tx.send(Ev::Status(
             spec.id,
-            Status::Error("yt-dlp no instalado (ver Ajustes)".into()),
+            Status::Error(msg_lang("yt-dlp no instalado (ver Ajustes)", "yt-dlp is not installed (see Settings)").into()),
         ));
         return;
     };
@@ -3075,7 +3148,10 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     // no hay forma de obtener un archivo completo. Mejor un error claro ahora
     // que el críptico «Requested merging of multiple formats» de yt-dlp.
     if is_bilibili(url) && spec.ffmpeg.is_none() {
-        let msg = "Bilibili necesita ffmpeg (Ajustes → instalar ffmpeg)";
+        let msg = msg_lang(
+            "Bilibili necesita ffmpeg (Ajustes → instalar ffmpeg)",
+            "Bilibili requires ffmpeg (Settings → install ffmpeg)",
+        );
         let _ = tx.send(Ev::ErrorDetail(spec.id, msg.into()));
         let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.into())));
         return;
@@ -3119,21 +3195,25 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         // línea relevante; la salida íntegra queda en Ev::ErrorDetail.
     ];
 
-    // Bilibili publica cada resolución en dos códecs (AVC y HEVC) y el AVC
-    // suele llevar bastante más bitrate (p. ej. 4174k vs 2503k a 1080p).
-    // Este orden de preferencia elige resolución > fps > bitrate, ignorando
-    // la preferencia de códec por defecto: máxima calidad real.
-    if is_bilibili(url) {
+    // Orden de preferencia de formato.
+    //
+    // Bilibili lo lleva SIEMPRE, no es opcional: publica cada resolución en
+    // AVC y HEVC, y el AVC suele traer bastante más bitrate (4174k frente a
+    // 2503k a 1080p). Sin esto se elige el peor de los dos.
+    //
+    // Para el resto manda el ajuste del usuario. Ver `Settings::prefer_bitrate`
+    // para el porqué: el criterio de fábrica de yt-dlp pone el códec por
+    // delante del bitrate y acaba prefiriendo AV1, que es el encode más
+    // pequeño.
+    if is_bilibili(url) || spec.prefer_bitrate {
         base.push("-S".into());
-        base.push("res,fps,hdr,tbr".into());
+        base.push(FORMAT_SORT_BITRATE.into());
     }
 
     // Indicar a yt-dlp dónde está nuestro ffmpeg integrado
-    if let Some(ff) = &spec.ffmpeg {
-        if let Some(dir) = std::path::Path::new(ff).parent() {
-            base.push("--ffmpeg-location".into());
-            base.push(dir.to_string_lossy().into_owned());
-        }
+    if let Some(dir) = spec.ffmpeg.as_deref().and_then(ffmpeg_location_arg) {
+        base.push("--ffmpeg-location".into());
+        base.push(dir);
     }
 
     // Throttle global: evita que varios procesos golpeen la API a la vez
@@ -3308,8 +3388,11 @@ async fn run_mega(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSender<
                         })
                         .collect();
                     if items.is_empty() {
-                        let msg = "MEGA: la carpeta no contiene archivos descargables";
-                        let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.into())));
+                        let aviso = msg_lang(
+                            "MEGA: la carpeta no contiene archivos descargables",
+                            "MEGA: the folder contains no downloadable files",
+                        );
+                        let _ = tx.send(Ev::Status(spec.id, Status::Error(aviso.into())));
                         return;
                     }
                     let _ = tx.send(Ev::FileHostResolved(spec.id, items));
@@ -3629,16 +3712,24 @@ async fn browse_gallery_hop(
             .unwrap_or(false);
         let extra = if es_weibo && (err.contains("403") || stdout.contains("403")) {
             format!(
-                "{extra}\n\nWeibo responde 403 cuando la petición no lleva sesión: \
-gallery-dl necesita las cookies SUB y SUBP del dominio .weibo.com. \
-Comprueba que tienes la sesión abierta en el MISMO navegador que has elegido \
-en Ajustes, o exporta un cookies.txt de Weibo."
+                "{extra}\n\n{}",
+                msg_lang(
+                    "Weibo responde 403 cuando la petición no lleva sesión: gallery-dl \
+                     necesita las cookies SUB y SUBP del dominio .weibo.com. Comprueba que \
+                     tienes la sesión abierta en el MISMO navegador que has elegido en \
+                     Ajustes, o exporta un cookies.txt de Weibo.",
+                    "Weibo answers 403 when the request carries no session: gallery-dl needs \
+                     the SUB and SUBP cookies from the .weibo.com domain. Check that you are \
+                     signed in on the SAME browser selected in Settings, or export a Weibo \
+                     cookies.txt.",
+                )
             )
         } else {
             extra.to_string()
         };
         format!(
-            "{extra}\n\n$ {cmdline}\n\ncódigo de salida: {}\n\nstderr:\n{err}\n\nstdout ({} bytes):\n{crudo}",
+            "{extra}\n\n$ {cmdline}\n\n{}: {}\n\nstderr:\n{err}\n\nstdout ({} bytes):\n{crudo}",
+            msg_lang("código de salida", "exit code"),
             estado.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
             stdout.len(),
         )
@@ -3657,13 +3748,13 @@ en Ajustes, o exporta un cookies.txt de Weibo."
     }
 
     let accion = if stdout.trim().is_empty() {
-        Accion::Fallo(motivo("gallery-dl no devolvió JSON."))
+        Accion::Fallo(motivo(msg_lang("gallery-dl no devolvió JSON.", "gallery-dl returned no JSON.")))
     } else {
         match gallery::parse_listing(stdout) {
             Ok(l) if !l.items.is_empty() => Accion::Listado(l.items),
             // gallery-dl delega en otro extractor: se sigue la pista.
             Ok(l) if !l.queued.is_empty() => Accion::Salto(l.queued[0].clone()),
-            Ok(_) => Accion::Fallo(motivo("gallery-dl no encontró archivos en este perfil.")),
+            Ok(_) => Accion::Fallo(motivo(msg_lang("gallery-dl no encontró archivos en este perfil.", "gallery-dl found no files in this profile."))),
             Err(e) => Accion::Fallo(motivo(&e)),
         }
     };
@@ -3691,7 +3782,7 @@ en Ajustes, o exporta un cookies.txt de Weibo."
                 .await;
             } else {
                 let _ = tx.send(Ev::GalleryError(motivo(
-                    "gallery-dl encadena demasiadas redirecciones de extractor.",
+                    msg_lang("gallery-dl encadena demasiadas redirecciones de extractor.", "gallery-dl chains too many extractor redirects."),
                 ), epoch));
             }
         }
@@ -3751,7 +3842,7 @@ async fn v2ph_login(
     )
     .send()
         .await
-        .map_err(|e| format!("no se pudo abrir la página de acceso: {e}"))?;
+        .map_err(|e| format!("{}: {e}", msg_lang("no se pudo abrir la página de acceso", "could not open the sign-in page")))?;
     let estado = r1.status().as_u16();
     let url_final = r1.url().to_string();
     let cookies1 = recoger(&r1);
@@ -3765,16 +3856,21 @@ async fn v2ph_login(
             // JavaScript. Ningún cliente HTTP la pasa, por muchas cabeceras
             // que mande. El camino que SÍ funciona es reutilizar la sesión
             // que el navegador ya obtuvo superándola.
-            return Err(
-                "V2PH protege su página de acceso con la verificación de Cloudflare, \
-                 que exige un navegador de verdad. El acceso desde la aplicación no \
-                 es posible en esta página.\n\n\
-                 USA ESTO EN SU LUGAR: entra en V2PH con tu navegador, exporta un \
-                 cookies.txt con una extensión como «Get cookies.txt LOCALLY» y \
-                 selecciónalo en Ajustes → Cookies. Los álbumes se listan enteros \
-                 con ese archivo; esa parte del sitio no está protegida."
-                    .into(),
-            );
+            return Err(msg_lang(
+                "V2PH protege su página de acceso con la verificación de Cloudflare, que \
+                 exige un navegador de verdad. Entrar desde la aplicación no es posible ahí.\n\n\
+                 USA ESTO EN SU LUGAR: entra en V2PH con tu navegador, exporta un cookies.txt \
+                 con una extensión como «Get cookies.txt LOCALLY» y selecciónalo en Ajustes → \
+                 Cookies. Los álbumes se listan enteros con ese archivo; esa parte del sitio \
+                 no está protegida.",
+                "V2PH protects its login page with Cloudflare's bot challenge, which requires \
+                 a real browser. Signing in from the application is not possible there.\n\n\
+                 USE THIS INSTEAD: sign in to V2PH with your browser, export a cookies.txt \
+                 with an extension such as «Get cookies.txt LOCALLY» and select it in \
+                 Settings → Cookies. Albums list completely with that file; that part of the \
+                 site is not challenged.",
+            )
+            .into());
         }
         None => {
             // Sin esta huella, «no se encuentra el formulario» puede querer
@@ -3828,7 +3924,7 @@ async fn v2ph_login(
     .form(&campos)
     .send()
         .await
-        .map_err(|e| format!("no se pudo enviar el formulario: {e}"))?;
+        .map_err(|e| format!("{}: {e}", msg_lang("no se pudo enviar el formulario", "could not submit the form")))?;
 
     cookies = v2ph::merge_cookies(&cookies, &recoger(&r2));
 
@@ -3842,16 +3938,17 @@ async fn v2ph_login(
     )
     .send()
         .await
-        .map_err(|e| format!("no se pudo comprobar la sesión: {e}"))?
+        .map_err(|e| format!("{}: {e}", msg_lang("no se pudo comprobar la sesión", "could not verify the session")))?
         .text()
         .await
         .map_err(|e| e.to_string())?;
 
     if v2ph::requiere_sesion(&prueba) {
-        return Err(
-            "usuario o contraseña incorrectos, o la cuenta no puede abrir más álbumes hoy"
-                .into(),
-        );
+        return Err(msg_lang(
+            "usuario o contraseña incorrectos, o la cuenta no puede abrir más álbumes hoy",
+            "wrong username or password, or the account cannot open more albums today",
+        )
+        .into());
     }
     Ok(cookies)
 }
@@ -3952,12 +4049,21 @@ async fn v2ph_get(
         // parecer un programa. Decirlo importa, porque la reacción correcta
         // es esperar, no cambiar de ajustes.
         return Err(match estado {
-            403 => "HTTP 403 — V2PH está rechazando las peticiones de la aplicación. \
-                    Suele ser un bloqueo temporal por hacer demasiadas seguidas: \
-                    espera un rato (o cambia de IP si usas VPN) y reintenta. La \
-                    misma página seguirá abriéndose bien en el navegador."
-                .to_string(),
-            429 => "HTTP 429 — demasiadas peticiones. Espera unos minutos.".to_string(),
+            403 => msg_lang(
+                "HTTP 403 — V2PH está rechazando las peticiones de la aplicación. Suele ser \
+                 un bloqueo temporal por hacer demasiadas seguidas: espera un rato (o cambia \
+                 de IP si usas VPN) y reintenta. La misma página seguirá abriéndose bien en \
+                 el navegador.",
+                "HTTP 403 — V2PH is refusing the application's requests. This is usually a \
+                 temporary block for making too many in a row: wait a while (or change IP if \
+                 you use a VPN) and retry. The same page will still open fine in your browser.",
+            )
+            .to_string(),
+            429 => msg_lang(
+                "HTTP 429 — demasiadas peticiones. Espera unos minutos.",
+                "HTTP 429 — too many requests. Wait a few minutes.",
+            )
+            .to_string(),
             _ => format!("HTTP {estado}"),
         });
     }
@@ -4052,7 +4158,11 @@ async fn v2ph_album_completo(
     }
     if fotos.is_empty() {
         return Err(format!(
-            "la página del álbum no contiene ninguna imagen de cdn.v2ph.com/photos/.\n\n{}",
+            "{}\n\n{}",
+            msg_lang(
+                "la página del álbum no contiene ninguna imagen de cdn.v2ph.com/photos/.",
+                "the album page contains no image from cdn.v2ph.com/photos/.",
+            ),
             v2ph::album_url(id, 1)
         ));
     }
@@ -4068,7 +4178,9 @@ async fn v2ph_album_completo(
             // incompleto creyendo que está entero.
             Err(e) => {
                 return Err(format!(
-                    "página {p} del álbum: {e}\n\nSe habían reunido {} fotos de las páginas anteriores.",
+                    "{} {p}: {e}\n\n{} {}.",
+                    msg_lang("página del álbum", "album page"),
+                    msg_lang("Se habían reunido", "Collected so far:"),
                     fotos.len()
                 ))
             }
@@ -4076,17 +4188,29 @@ async fn v2ph_album_completo(
         // El sitio deja ver la primera página a cualquiera y pide sesión para
         // el resto. Sin decirlo, un álbum de 38 fotos parece tener 10.
         if v2ph::requiere_sesion(&html) {
+            let cabecera = msg_lang(
+                "V2PH pide iniciar sesión para ver más allá de la foto",
+                "V2PH requires a session to see past photo",
+            );
+            let que_hacer = msg_lang(
+                "QUÉ HACER: exporta un cookies.txt desde un navegador donde tengas la sesión \
+                 abierta y selecciónalo en Ajustes → Cookies. El acceso desde la propia \
+                 aplicación no sirve en V2PH: su página de login está tras una verificación \
+                 anti-bot que exige un navegador de verdad.",
+                "WHAT TO DO: export a cookies.txt from a browser where you are signed in and \
+                 select it in Settings → Cookies. Signing in from the application does not \
+                 work on V2PH: its login page sits behind a bot challenge that needs a real \
+                 browser.",
+            );
+            let cupo = msg_lang(
+                "Si ya tienes sesión y aun así sale esto, tu cuenta puede haber agotado el \
+                 cupo de álbumes del día. Compruébalo abriendo esta dirección en el navegador:",
+                "If you do have a session and still see this, your account may have used up \
+                 its daily album allowance. Check by opening this address in your browser:",
+            );
+            let sesion = msg_lang("Sesión usada en esta petición:", "Session used for this request:");
             return Err(format!(
-                "V2PH pide iniciar sesión para ver más allá de la foto {}.\n\n\
-                 Sesión usada en esta petición:\n{origen}\n\n\
-                 QUÉ HACER: ve a Ajustes → Cuenta de V2PH y entra con tu \
-                 usuario y contraseña. Es la forma directa: la aplicación pide \
-                 la sesión al propio sitio en lugar de intentar rescatarla del \
-                 navegador.\n\n\
-                 Si ya has entrado y aun así sale esto, tu cuenta puede haber \
-                 agotado el cupo de álbumes del día — V2PH limita cuántos se \
-                 pueden abrir por jornada. Compruébalo abriendo {} en el \
-                 navegador.",
+                "{cabecera} {}.\n\n{sesion}\n{origen}\n\n{que_hacer}\n\n{cupo}\n{}",
                 fotos.len(),
                 v2ph::album_url(id, 2)
             ));
@@ -4163,6 +4287,10 @@ fn v2ph_items(
 /// - Listado (modelo, agencia, categoría, país): la página N es el álbum N.
 ///   Así la carga encadenada que ya existe va trayendo un álbum tras otro sin
 ///   que el usuario tenga que pedirlo.
+// Nueve argumentos porque son nueve datos independientes que la tarea
+// necesita y ninguno se deduce de otro. Agruparlos en un struct es un refactor
+// razonable, pero no uno que toque hacer dentro de un hotfix.
+#[allow(clippy::too_many_arguments)]
 async fn browse_v2ph(
     client: reqwest::Client,
     url: String,
@@ -4186,7 +4314,13 @@ async fn browse_v2ph(
         // Sesión iniciada desde la propia aplicación: es la más fiable, porque
         // la dio el sitio directamente en respuesta al acceso.
         let n = sesion.matches('=').count();
-        (Some(sesion.clone()), format!("sesión iniciada en la app ({n} cookies)"))
+        (
+            Some(sesion.clone()),
+            format!(
+                "{} ({n})",
+                msg_lang("sesión iniciada en la app, cookies", "signed in from the app, cookies")
+            ),
+        )
     } else {
         let ruta = cookies_txt.trim().to_string();
         let del_archivo = if ruta.is_empty() {
@@ -4200,7 +4334,7 @@ async fn browse_v2ph(
         match del_archivo {
             Some(c) => {
                 let n = c.matches('=').count();
-                (Some(c), format!("cookies.txt: {n} cookies de v2ph.com"))
+                (Some(c), format!("cookies.txt: {n} · v2ph.com"))
             }
             None if navegador => {
                 let h = tokio::task::spawn_blocking(|| {
@@ -4209,32 +4343,53 @@ async fn browse_v2ph(
                 .await
                 .unwrap_or(cookies::Hallazgo {
                     cookie: None,
-                    traza: "la lectura de Firefox no llegó a terminar".into(),
+                    traza: msg_lang(
+                        "la lectura de Firefox no llegó a terminar",
+                        "reading Firefox did not finish",
+                    )
+                    .into(),
                 });
                 let extra = if ruta.is_empty() {
                     String::new()
                 } else {
-                    format!("\ncookies.txt indicado ({ruta}) pero sin cookies de v2ph.com")
+                    format!(
+                        "\n{} ({ruta})",
+                        msg_lang(
+                            "cookies.txt indicado, pero sin cookies de v2ph.com",
+                            "cookies.txt selected, but it holds no v2ph.com cookies",
+                        )
+                    )
                 };
                 (h.cookie, format!("{}{extra}", h.traza))
             }
             None if ruta.is_empty() => (
                 None,
-                "no hay cookies.txt y «usar cookies del navegador» está desactivado o \
-                 el navegador elegido no es Firefox"
-                    .into(),
+                msg_lang(
+                    "no hay cookies.txt y «usar cookies del navegador» está desactivado, o el \
+                     navegador elegido no es Firefox",
+                    "no cookies.txt, and «use browser cookies» is off or the selected browser \
+                     is not Firefox",
+                )
+                .into(),
             ),
             None => (
                 None,
-                format!("cookies.txt indicado ({ruta}) pero sin cookies de v2ph.com, \
-                         y la lectura del navegador no está activada"),
+                format!(
+                    "{} ({ruta})",
+                    msg_lang(
+                        "cookies.txt indicado pero sin cookies de v2ph.com, y la lectura del \
+                         navegador no está activada",
+                        "cookies.txt selected but with no v2ph.com cookies, and browser \
+                         reading is not enabled",
+                    )
+                ),
             ),
         }
     };
     let cookie = cookie.as_deref();
     let Some(clase) = v2ph::classify(&url) else {
         let _ = tx.send(Ev::GalleryError(
-            format!("V2PH: no se reconoce esta URL.\n\n{url}"),
+            format!("{}\n\n{url}", msg_lang("V2PH: no se reconoce esta URL.", "V2PH: unrecognised URL.")),
             epoch,
         ));
         return;
@@ -4273,11 +4428,17 @@ async fn browse_v2ph(
             // está atada al navegador que la ganó, y si la petición dice ser
             // otro, Cloudflare la tira. Decirlo ahorra media tarde.
             let pista = if e.contains("403") && cookie.is_some() && ua == UA {
-                "\n\nPROBABLE CAUSA: estás enviando cookies pero con el User-Agent \
-                 por defecto de la aplicación. Si esas cookies incluyen la \
-                 «cf_clearance» de Cloudflare, solo valen acompañadas del MISMO \
-                 User-Agent del navegador que la obtuvo.\n\
-                 Ve a Ajustes → User-Agent y pulsa «Detectar desde mi navegador»."
+                msg_lang(
+                    "\n\nPROBABLE CAUSA: estás enviando cookies pero con el User-Agent por \
+                     defecto de la aplicación. Si esas cookies incluyen la «cf_clearance» de \
+                     Cloudflare, solo valen acompañadas del MISMO User-Agent del navegador \
+                     que la obtuvo.\nVe a Ajustes → User-Agent y pulsa «Detectar desde mi \
+                     navegador».",
+                    "\n\nLIKELY CAUSE: you are sending cookies but with the application's \
+                     default User-Agent. If those cookies include Cloudflare's «cf_clearance», \
+                     they only work alongside the SAME User-Agent of the browser that earned \
+                     it.\nGo to Settings → User-Agent and press «Detect from my browser».",
+                )
             } else {
                 ""
             };
@@ -4438,7 +4599,7 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
     let Some(program) = program else {
         let _ = tx.send(Ev::Status(
             spec.id,
-            Status::Error("gallery-dl no instalado (ver Ajustes)".into()),
+            Status::Error(msg_lang("gallery-dl no instalado (ver Ajustes)", "gallery-dl is not installed (see Settings)").into()),
         ));
         return;
     };
@@ -4959,7 +5120,7 @@ async fn install_cyberdrop(tx: UnboundedSender<Ev>) {
                 }
             }
             let _ = tx.send(Ev::CyberdropError(
-                "instalado, pero no se encontró en el PATH; reinicia la app".into(),
+                msg_lang("instalado, pero no se encontró en el PATH; reinicia la app", "installed, but not found on PATH; restart the app").into(),
             ));
         }
         Ok(o) => {
@@ -5022,10 +5183,10 @@ async fn ensure_uv(tx: &UnboundedSender<Ev>) -> Result<String, String> {
                     return Ok(cand);
                 }
             }
-            Err("uv se instaló pero no se encuentra; reinicia la app".into())
+            Err(msg_lang("uv se instaló pero no se encuentra; reinicia la app", "uv was installed but cannot be found; restart the app").into())
         }
-        Ok(_) => Err("no se pudo instalar uv (gestor de Python)".into()),
-        Err(e) => Err(format!("no se pudo instalar uv: {e}")),
+        Ok(_) => Err(msg_lang("no se pudo instalar uv (gestor de Python)", "could not install uv (the Python manager)").into()),
+        Err(e) => Err(format!("{}: {e}", msg_lang("no se pudo instalar uv", "could not install uv"))),
     }
 }
 
@@ -5070,7 +5231,7 @@ async fn install_ffmpeg(client: reqwest::Client, tx: UnboundedSender<Ev>) {
             } else {
                 let _ = tokio::fs::remove_file(&path).await;
                 let _ = tx.send(Ev::FfmpegError(
-                    "el binario extraído no superó la verificación".into(),
+                    msg_lang("el binario extraído no superó la verificación", "the extracted binary failed verification").into(),
                 ));
             }
         }
@@ -5085,7 +5246,7 @@ async fn install_ffmpeg(client: reqwest::Client, tx: UnboundedSender<Ev>) {
 
 /// Extrae ffmpeg.exe y ffprobe.exe del zip, ignorando la estructura de carpetas
 #[cfg(windows)]
-fn extract_ffmpeg(zip_path: &PathBuf, dest_dir: &PathBuf) -> anyhow::Result<()> {
+fn extract_ffmpeg(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let mut found = 0;
@@ -5105,7 +5266,7 @@ fn extract_ffmpeg(zip_path: &PathBuf, dest_dir: &PathBuf) -> anyhow::Result<()> 
     }
 
     if found == 0 {
-        anyhow::bail!("no se encontró ffmpeg.exe dentro del paquete");
+        anyhow::bail!(msg_lang("no se encontró ffmpeg.exe dentro del paquete", "ffmpeg.exe was not found inside the package"));
     }
     Ok(())
 }
@@ -5113,7 +5274,7 @@ fn extract_ffmpeg(zip_path: &PathBuf, dest_dir: &PathBuf) -> anyhow::Result<()> 
 #[cfg(not(windows))]
 async fn install_ffmpeg(_client: reqwest::Client, tx: UnboundedSender<Ev>) {
     let _ = tx.send(Ev::FfmpegError(
-        "instalación automática disponible solo en Windows: usa el gestor de paquetes del sistema".into(),
+        msg_lang("instalación automática disponible solo en Windows: usa el gestor de paquetes del sistema", "automatic installation is Windows-only: use your system package manager").into(),
     ));
 }
 
@@ -5152,7 +5313,7 @@ async fn install_gallerydl(client: reqwest::Client, tx: UnboundedSender<Ev>) {
             } else {
                 let _ = tokio::fs::remove_file(&dest).await;
                 let _ = tx.send(Ev::GalDlError(
-                    "el binario descargado no superó la verificación y fue eliminado".into(),
+                    msg_lang("el binario descargado no superó la verificación y fue eliminado", "the downloaded binary failed verification and was removed").into(),
                 ));
             }
         }
@@ -5225,7 +5386,7 @@ async fn install_ytdlp(client: reqwest::Client, tx: UnboundedSender<Ev>) {
             } else {
                 let _ = tokio::fs::remove_file(&dest).await;
                 let _ = tx.send(Ev::YtDlpError(
-                    "el binario descargado no superó la verificación y fue eliminado".into(),
+                    msg_lang("el binario descargado no superó la verificación y fue eliminado", "the downloaded binary failed verification and was removed").into(),
                 ));
             }
         }
@@ -6402,6 +6563,16 @@ impl App {
                             .size(12.0)
                             .color(MUTED()),
                     );
+                    // Cuántos hay de cada clase, contando SOBRE EL TOTAL y no
+                    // sobre lo visible: al filtrar por vídeos, saber cuántas
+                    // imágenes hay detrás es justo lo que se quiere ver.
+                    let n_vid = self.gallery_items.iter().filter(|i| i.is_video).count();
+                    let n_img = self.gallery_items.len() - n_vid;
+                    ui.label(
+                        RichText::new(format!("🖼 {n_img}   🎬 {n_vid}"))
+                            .size(11.5)
+                            .color(CYAN()),
+                    );
                     if ocultos > 0 {
                         // Sin esto, filtrar parece «se ha perdido la mitad»
                         ui.label(
@@ -6518,7 +6689,7 @@ impl App {
                                             ui.checkbox(&mut sel, "");
                                             if is_video {
                                                 ui.label(
-                                                    RichText::new("VÍDEO").size(9.5).color(AMBER()),
+                                                    RichText::new(msg_lang("VÍDEO", "VIDEO")).size(9.5).color(AMBER()),
                                                 );
                                             }
                                             if carrusel && !pos.is_empty() {
@@ -7723,6 +7894,7 @@ impl App {
                     gloss_paint(ui, &resp);
                     if resp.clicked() {
                         self.settings.lang = l;
+                        i18n::set_lang(l);
                     }
                 }
             });
@@ -7764,7 +7936,7 @@ impl App {
             ui.horizontal(|ui| {
                 if soft_button(ui, t(lang, "set.bg_pick")).clicked() {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Imagen", &["png", "jpg", "jpeg", "webp", "bmp"])
+                        .add_filter(msg_lang("Imagen", "Image"), &["png", "jpg", "jpeg", "webp", "bmp"])
                         .pick_file()
                     {
                         self.settings.bg_image = p.to_string_lossy().into_owned();
@@ -7853,6 +8025,9 @@ impl App {
                 ui.label(t(lang, "set.concurrency"));
                 ui.add(egui::Slider::new(&mut self.settings.concurrency, 1..=8));
             });
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.settings.prefer_bitrate, t(lang, "set.prefer_br"));
+            ui.label(RichText::new(t(lang, "set.prefer_br_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
@@ -8381,6 +8556,36 @@ mod tests {
         assert_eq!(sin, "b");
         // Con ffmpeg sí, que es como se pasa de 720p en YouTube
         assert_eq!(format_selector(true), "bv*+ba/b");
+    }
+
+    /// El orden por defecto de yt-dlp es `res, fps, hdr, vcodec, …, br`: el
+    /// códec pesa más que el bitrate y prefiere AV1, el encode más pequeño.
+    /// Este orden mete `tbr` donde iba `vcodec`, sin tocar `res` ni `fps`.
+    #[test]
+    fn el_orden_por_bitrate_no_sacrifica_resolucion_ni_fps() {
+        let campos: Vec<&str> = FORMAT_SORT_BITRATE.split(',').collect();
+        assert_eq!(campos[0], "res", "la resolución tiene que decidir primero");
+        assert_eq!(campos[1], "fps");
+        assert!(!campos.contains(&"vcodec"), "el códec no debe desempatar antes que el bitrate");
+        assert_eq!(campos.last(), Some(&"tbr"));
+    }
+
+    #[test]
+    fn el_ffmpeg_del_path_no_genera_una_ubicacion_vacia() {
+        // Caso de Linux y macOS: la detección devuelve la palabra a secas.
+        // Pasar `--ffmpeg-location ""` impedía fusionar vídeo y audio.
+        assert_eq!(ffmpeg_location_arg("ffmpeg"), None);
+        assert_eq!(ffmpeg_location_arg("ffmpeg.exe"), None);
+        assert_eq!(ffmpeg_location_arg(""), None);
+    }
+
+    #[test]
+    fn el_ffmpeg_integrado_si_aporta_su_directorio() {
+        assert_eq!(
+            ffmpeg_location_arg("/home/eric/.local/share/td/bin/ffmpeg").as_deref(),
+            Some("/home/eric/.local/share/td/bin")
+        );
+        assert_eq!(ffmpeg_location_arg("/usr/bin/ffmpeg").as_deref(), Some("/usr/bin"));
     }
 
     #[test]
