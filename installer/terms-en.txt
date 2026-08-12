@@ -1,0 +1,212 @@
+﻿TODO DOWNLOADER — TERMS OF USE AND DISCLAIMER
+
+Version 1.6.7 — Copyright (c) 2026 Eric Valls Gramunt
+
+Please read this before installing. By choosing "I accept" you confirm that
+you have read and understood these terms. If you do not accept them, cancel
+this installation and delete the downloaded files.
+
+
+1. WHAT THIS SOFTWARE IS
+
+Todo Downloader is a general-purpose download manager. It retrieves files
+over HTTP, from public links on file-hosting services, from the BitTorrent
+network, and — by driving separate third-party programs — from video and
+gallery websites.
+
+It is a tool. Like a web browser, an FTP client or a command-line downloader,
+it performs the network requests that the person operating it asks it to
+perform. It has no opinion about, and no knowledge of, the content it moves.
+
+
+2. NO WARRANTY
+
+This program is distributed under the GNU General Public License, version 3
+or later. Sections 15 and 16 of that licence apply in full and are reproduced
+here in substance:
+
+  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE
+  LAW. THE PROGRAM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE RISK AS TO
+  THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM
+  PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR
+  CORRECTION.
+
+In particular, and without limiting the above, no guarantee is given that the
+program will work with any specific website, that it will continue to work
+with a website it works with today, that downloads will be complete or
+uncorrupted, or that it is free of defects. The websites this program can
+reach are operated by third parties who change them without notice and who
+are under no obligation to remain compatible with anything.
+
+
+3. LIMITATION OF LIABILITY
+
+To the fullest extent permitted by applicable law, Eric Valls Gramunt shall
+not be liable for any damages arising from the use or the inability to use
+this software. This includes, without limitation: loss of data, loss of
+profit, business interruption, damage to hardware or to other software,
+consumption of metered bandwidth, suspension or termination of an account on
+a third-party service, and any claim brought by a third party.
+
+This applies whether the damage is direct, indirect, incidental, special or
+consequential, and whether or not the author was advised of its possibility.
+
+NOTHING IN THESE TERMS EXCLUDES OR LIMITS LIABILITY THAT CANNOT LAWFULLY BE
+EXCLUDED OR LIMITED. Under Spanish and European Union law this includes, at
+minimum, liability for death or personal injury caused by negligence, for
+fraud or fraudulent misrepresentation, and for wilful misconduct or gross
+negligence. Where a jurisdiction does not permit some of the exclusions above,
+those exclusions apply only to the extent that jurisdiction permits, and the
+remainder of these terms continue in force.
+
+
+4. YOUR RESPONSIBILITY FOR WHAT YOU DOWNLOAD
+
+You, and only you, decide which addresses this program contacts and which
+files it retrieves. You are solely responsible for that decision and for
+everything you subsequently do with the resulting files.
+
+You agree that you will use this software only to obtain material that you
+are legally entitled to obtain. That includes, by way of example: your own
+uploads; content published under a licence that permits downloading; content
+in the public domain; backup copies permitted by the law applicable to you;
+and material for which you hold the rights or the rightsholder's permission.
+
+You are responsible for observing, at your own risk and on your own
+assessment:
+
+  a) copyright, related rights and database rights in your jurisdiction and
+     in the jurisdiction of the server you contact;
+  b) the terms of service, terms of use and robots policies of the websites
+     you access, including any prohibition on automated access;
+  c) data protection law, where the material you download contains personal
+     data of identifiable people — including images of them;
+  d) rules on image rights, honour and privacy, which in Spain are governed
+     by Organic Law 1/1982 and are independent of copyright;
+  e) any age restriction, geographical restriction or contractual restriction
+     attached to the content;
+  f) the law applicable to you regarding the possession and distribution of
+     the material in question.
+
+The author does not monitor, cannot monitor, and does not wish to monitor
+what any user downloads. No usage data of any kind is collected or
+transmitted (see section 8).
+
+
+5. WHAT THIS SOFTWARE DOES NOT DO
+
+This software does not circumvent, and must not be used to attempt to
+circumvent, technological protection measures within the meaning of Article 6
+of Directive 2001/29/EC and Article 160 of the consolidated text of the
+Spanish Intellectual Property Act. It does not decrypt DRM-protected
+commercial streaming services, it does not break access controls, and it does
+not defeat paywalls.
+
+Where the program uses a session cookie, it uses a session that you already
+hold, provided by you, in order to access content that your own account can
+already see. That is authentication, not circumvention. Supplying credentials
+or session data belonging to someone else, or obtained without authorisation,
+is a misuse of this software and is entirely your responsibility.
+
+This software is not intended for, and must not be used for, obtaining or
+distributing material whose possession or distribution is unlawful — in
+particular, and without limitation, material depicting the sexual abuse or
+exploitation of minors. Such use is an absolute misuse, is prohibited without
+exception, and constitutes a serious criminal offence in Spain and in
+substantially every other jurisdiction.
+
+
+6. THIRD-PARTY COMPONENTS
+
+Some functions of this program depend on separate programs that are NOT part
+of it and are NOT distributed with it:
+
+  - yt-dlp        (Unlicense)      video extraction
+  - gallery-dl    (GPL-2.0)        gallery extraction
+  - ffmpeg        (LGPL/GPL)       merging audio and video
+  - cyberdrop-dl  (GPL-3.0)        optional, for certain file hosts
+
+When you ask for them from within the application, they are downloaded from
+their official distribution points, at your request, and executed as separate
+processes. They are governed by their own licences and their own terms. The
+author of Todo Downloader is not their author, does not endorse them, does
+not control what they do, and provides no warranty in respect of them.
+
+BitTorrent support is provided by the librqbit library (Apache-2.0), which is
+compiled into this program.
+
+
+7. BITTORRENT IN PARTICULAR
+
+While a torrent is active, this program does not only download: it also
+UPLOADS data to other participants in the swarm. That is how the protocol
+works and it cannot be otherwise while participating.
+
+This means that (i) your IP address is visible to every other participant and
+to anyone monitoring the swarm, and (ii) depending on the material, you may
+be making it available to the public, which in many jurisdictions is a
+distinct and more serious act than downloading it. Consider this carefully
+before using the Torrent tab.
+
+
+8. PRIVACY
+
+This program contains no telemetry, no analytics, no crash reporting and no
+automatic update check. It opens no connection that you have not asked it to
+open, other than downloading the optional helper programs listed in section 6
+when you explicitly request them.
+
+Any credentials or session cookies you provide are stored on your own
+computer, in your own user profile, and are never transmitted anywhere except
+to the site they belong to. Passwords entered for the in-application sign-in
+are destroyed as soon as the request that uses them returns and are never
+written to disk. Full details are published in SECURITY.md in the source
+repository.
+
+
+9. SOURCE CODE AND LICENCE
+
+This program is free software: you may redistribute it and modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of that licence or, at your option, any later
+version. The complete text is installed alongside the program as LICENSE and
+is available at https://www.gnu.org/licenses/gpl-3.0.html
+
+The complete corresponding source code is published at:
+https://github.com/AcidClawX41/todo-downloader
+
+Releases up to and including v1.4.0 were published under the MIT licence and
+remain available under it.
+
+These terms of use do not modify, restrict or add conditions to the GNU
+General Public License, and nothing in them may be read as doing so. They set
+out the author's disclaimer of warranty and of liability, and record your
+acknowledgement of your own responsibilities. Where any provision of these
+terms conflicts with the GPL, the GPL prevails.
+
+
+10. GOVERNING LAW
+
+These terms are governed by the law of Spain, without prejudice to any
+mandatory provision of the law of your country of habitual residence that
+applies to you and that you cannot be deprived of by agreement.
+
+
+11. ACCEPTANCE
+
+Installing or using this software indicates that you have read these terms,
+that you understand them, and that you accept them. If you do not accept
+them, do not install or use this software.
+
+
+---
+
+This document is a statement of terms by the author. It is not legal advice
+and it is not a substitute for it. If your intended use raises questions
+under the law applicable to you, consult a qualified lawyer in your
+jurisdiction.
+
+Eric Valls Gramunt — 2026
+https://github.com/AcidClawX41/todo-downloader

@@ -21,13 +21,14 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.6.5:**
+**New in v1.6.7:**
 
-- **Audio and video are merged on Linux and macOS again** — the application was passing an empty `--ffmpeg-location` to yt-dlp, so the merger was never found and the two streams stayed apart. Windows was never affected.
-- **A bitrate setting** — *Settings → Downloads → Prefer bitrate over codec efficiency*, on by default. Same resolution and same fps, but the highest-bitrate encode of them wins instead of the most compact one.
-- **Galleries load the whole profile** — the background chain now runs to the end instead of stopping after four pages. *Load more* is still there.
-- **Images and videos counted separately** in the gallery header, over the whole list rather than the filtered view.
-- **Engine messages follow the selected language** — errors produced outside the interface were hardcoded in Spanish and now switch with it.
+- **Capture a single Douyin or TikTok post** — a button on the post itself sends its photos, or the video, straight to the app. Install it once as a userscript or a bookmarklet from the Capture tab.
+- **Original quality, no watermark** — the unprocessed `~noop` variant is taken directly, and a post's whole carousel is read from the page rather than clicked through.
+- **Douyin videos download again** — the extractor needs a visitor session, and cookies were neither sent upfront nor retried.
+- **CJK titles no longer show as boxes on Arch-based systems** — the font was looked for at Debian's paths only.
+- **Engine detection cannot hang** — a broken helper on the PATH used to stall the check forever.
+- **A Windows installer** — published alongside the portable executable, for anyone who prefers a Setup with a Start-menu entry and an uninstaller. It installs without administrator rights and shows the terms of use for acceptance.
 
 **Also in v1.6.2 and v1.6.0:**
 

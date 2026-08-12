@@ -1,0 +1,221 @@
+﻿TODO DOWNLOADER — CONDICIONES DE USO Y EXENCIÓN DE RESPONSABILIDAD
+
+Versión 1.6.7 — Copyright (c) 2026 Eric Valls Gramunt
+
+Lee esto antes de instalar. Al pulsar «Acepto» confirmas que has leído y
+entendido estas condiciones. Si no las aceptas, cancela la instalación y
+elimina los archivos descargados.
+
+
+1. QUÉ ES ESTE PROGRAMA
+
+Todo Downloader es un gestor de descargas de propósito general. Obtiene
+archivos por HTTP, desde enlaces públicos de servicios de alojamiento, desde
+la red BitTorrent y —dirigiendo programas de terceros independientes— desde
+sitios de vídeo y de galerías.
+
+Es una herramienta. Igual que un navegador web, un cliente FTP o un
+descargador de línea de comandos, realiza las peticiones de red que le pide
+quien lo maneja. No tiene criterio alguno sobre el contenido que mueve, ni
+conocimiento de él.
+
+
+2. AUSENCIA DE GARANTÍA
+
+Este programa se distribuye bajo la Licencia Pública General de GNU, versión
+3 o posterior. Las secciones 15 y 16 de esa licencia se aplican íntegramente
+y se reproducen aquí en lo sustancial:
+
+  NO EXISTE GARANTÍA ALGUNA PARA EL PROGRAMA, EN LA MEDIDA EN QUE LO PERMITA
+  LA LEY APLICABLE. EL PROGRAMA SE PROPORCIONA «TAL CUAL», SIN GARANTÍA DE
+  NINGÚN TIPO, NI EXPRESA NI IMPLÍCITA, INCLUIDAS, ENTRE OTRAS, LAS GARANTÍAS
+  IMPLÍCITAS DE COMERCIABILIDAD Y DE ADECUACIÓN A UN FIN DETERMINADO. LA
+  TOTALIDAD DEL RIESGO EN CUANTO A LA CALIDAD Y AL RENDIMIENTO DEL PROGRAMA
+  RECAE SOBRE TI. SI EL PROGRAMA RESULTARA DEFECTUOSO, ASUMES EL COSTE DE
+  TODA REPARACIÓN, SERVICIO O CORRECCIÓN NECESARIOS.
+
+En particular, y sin que ello limite lo anterior, no se garantiza que el
+programa funcione con ningún sitio web concreto, que siga funcionando mañana
+con un sitio con el que funciona hoy, que las descargas sean completas o no
+estén corruptas, ni que el programa esté libre de defectos. Los sitios web a
+los que este programa puede llegar los operan terceros que los modifican sin
+previo aviso y que no tienen obligación alguna de seguir siendo compatibles
+con nada.
+
+
+3. LIMITACIÓN DE RESPONSABILIDAD
+
+En la máxima medida que permita la ley aplicable, Eric Valls Gramunt no será
+responsable de ningún daño derivado del uso o de la imposibilidad de uso de
+este software. Ello incluye, sin carácter limitativo: pérdida de datos, lucro
+cesante, interrupción de la actividad, daños al equipo o a otro software,
+consumo de ancho de banda medido, suspensión o cancelación de una cuenta en
+un servicio de terceros, y cualquier reclamación presentada por un tercero.
+
+Esto se aplica tanto si el daño es directo, indirecto, incidental, especial o
+consecuente, y con independencia de que se hubiera advertido de su
+posibilidad.
+
+NADA EN ESTAS CONDICIONES EXCLUYE NI LIMITA LA RESPONSABILIDAD QUE NO PUEDA
+EXCLUIRSE O LIMITARSE LEGALMENTE. Conforme al Derecho español y de la Unión
+Europea, ello comprende, como mínimo, la responsabilidad por muerte o daños
+personales causados por negligencia, por dolo o declaración fraudulenta, y
+por conducta dolosa o culpa grave. Cuando una jurisdicción no permita alguna
+de las exclusiones anteriores, dicha exclusión se aplicará solo en la medida
+en que esa jurisdicción lo permita, y el resto de estas condiciones seguirá
+plenamente vigente.
+
+
+4. TU RESPONSABILIDAD SOBRE LO QUE DESCARGAS
+
+Tú, y solamente tú, decides qué direcciones contacta este programa y qué
+archivos obtiene. Eres el único responsable de esa decisión y de todo lo que
+hagas después con los archivos resultantes.
+
+Te comprometes a usar este software únicamente para obtener material que
+tengas derecho legítimo a obtener. Ello incluye, a modo de ejemplo: tus
+propias publicaciones; contenido publicado bajo una licencia que permita su
+descarga; contenido en dominio público; copias de seguridad permitidas por la
+ley que te sea aplicable; y material sobre el que ostentes los derechos o
+cuentes con la autorización del titular.
+
+Eres responsable de observar, por tu cuenta y riesgo y bajo tu propio
+criterio:
+
+  a) los derechos de autor, derechos afines y derechos «sui generis» sobre
+     bases de datos, tanto en tu jurisdicción como en la del servidor que
+     contactes;
+  b) las condiciones de servicio, condiciones de uso y políticas de robots de
+     los sitios a los que accedas, incluida cualquier prohibición de acceso
+     automatizado;
+  c) la normativa de protección de datos, cuando el material que descargues
+     contenga datos personales de personas identificables, incluidas sus
+     imágenes;
+  d) los derechos al honor, a la intimidad y a la propia imagen, regulados en
+     España por la Ley Orgánica 1/1982 y de aplicación independiente de la
+     propiedad intelectual;
+  e) cualquier restricción de edad, geográfica o contractual asociada al
+     contenido;
+  f) la ley que te sea aplicable en cuanto a la posesión y distribución del
+     material de que se trate.
+
+El autor no supervisa, no puede supervisar y no desea supervisar lo que
+descarga ningún usuario. No se recoge ni se transmite dato de uso alguno
+(véase la sección 8).
+
+
+5. LO QUE ESTE SOFTWARE NO HACE
+
+Este software no elude, y no debe utilizarse para intentar eludir, medidas
+tecnológicas de protección en el sentido del artículo 6 de la Directiva
+2001/29/CE y del artículo 160 del texto refundido de la Ley de Propiedad
+Intelectual. No descifra servicios comerciales de streaming protegidos con
+DRM, no rompe controles de acceso y no burla muros de pago.
+
+Cuando el programa emplea una cookie de sesión, emplea una sesión que ya
+posees, facilitada por ti, para acceder a contenido que tu propia cuenta ya
+puede ver. Eso es autenticación, no elusión. Facilitar credenciales o datos
+de sesión ajenos, u obtenidos sin autorización, constituye un uso indebido de
+este software y es responsabilidad exclusivamente tuya.
+
+Este software no está destinado, y no debe utilizarse, para obtener o
+distribuir material cuya posesión o distribución sea ilícita; en particular,
+y sin carácter limitativo, material que represente el abuso o la explotación
+sexual de menores. Tal uso constituye un abuso absoluto, queda prohibido sin
+excepción y es un delito grave en España y en prácticamente cualquier otra
+jurisdicción.
+
+
+6. COMPONENTES DE TERCEROS
+
+Algunas funciones de este programa dependen de programas independientes que
+NO forman parte de él y NO se distribuyen con él:
+
+  - yt-dlp        (Unlicense)      extracción de vídeo
+  - gallery-dl    (GPL-2.0)        extracción de galerías
+  - ffmpeg        (LGPL/GPL)       fusión de audio y vídeo
+  - cyberdrop-dl  (GPL-3.0)        opcional, para ciertos alojamientos
+
+Cuando los solicitas desde la aplicación, se descargan de sus puntos de
+distribución oficiales, a petición tuya, y se ejecutan como procesos
+separados. Se rigen por sus propias licencias y sus propias condiciones. El
+autor de Todo Downloader no es su autor, no los respalda, no controla lo que
+hacen y no ofrece garantía alguna respecto de ellos.
+
+El soporte de BitTorrent lo proporciona la biblioteca librqbit (Apache-2.0),
+que sí se compila dentro de este programa.
+
+
+7. BITTORRENT EN PARTICULAR
+
+Mientras un torrent está activo, este programa no solo descarga: también
+ENVÍA datos a otros participantes del enjambre. Así funciona el protocolo y
+no puede ser de otro modo mientras se participa en él.
+
+Esto significa que (i) tu dirección IP es visible para todos los demás
+participantes y para quien monitorice el enjambre, y (ii) según el material,
+puedes estar poniéndolo a disposición del público, lo que en muchas
+jurisdicciones es un acto distinto y más grave que descargarlo. Tenlo en
+cuenta antes de usar la pestaña Torrent.
+
+
+8. PRIVACIDAD
+
+Este programa no contiene telemetría, ni analítica, ni envío de informes de
+error, ni comprobación automática de actualizaciones. No abre ninguna
+conexión que no le hayas pedido, salvo la descarga de los programas auxiliares
+opcionales de la sección 6 cuando los solicitas explícitamente.
+
+Las credenciales o cookies de sesión que facilites se guardan en tu propio
+ordenador, en tu perfil de usuario, y nunca se transmiten a ningún sitio
+salvo al que pertenecen. Las contraseñas introducidas para el inicio de
+sesión desde la aplicación se destruyen en cuanto retorna la petición que las
+usa y no se escriben nunca en disco. El detalle completo está publicado en
+SECURITY.md, en el repositorio del código fuente.
+
+
+9. CÓDIGO FUENTE Y LICENCIA
+
+Este programa es software libre: puedes redistribuirlo y modificarlo bajo los
+términos de la Licencia Pública General de GNU publicada por la Free Software
+Foundation, ya sea la versión 3 de dicha licencia o, a tu elección, cualquier
+versión posterior. El texto completo se instala junto al programa como
+LICENSE y está disponible en https://www.gnu.org/licenses/gpl-3.0.html
+
+El código fuente correspondiente completo está publicado en:
+https://github.com/AcidClawX41/todo-downloader
+
+Las versiones hasta la v1.4.0 inclusive se publicaron bajo licencia MIT y
+siguen disponibles bajo ella.
+
+Estas condiciones de uso no modifican, no restringen y no añaden condiciones
+a la Licencia Pública General de GNU, y nada en ellas puede interpretarse en
+tal sentido. Recogen la exención de garantía y de responsabilidad del autor,
+y dejan constancia de que reconoces tus propias responsabilidades. En caso de
+conflicto entre cualquier disposición de estas condiciones y la GPL,
+prevalece la GPL.
+
+
+10. LEY APLICABLE
+
+Estas condiciones se rigen por el Derecho español, sin perjuicio de cualquier
+disposición imperativa de la ley de tu país de residencia habitual que te sea
+aplicable y de la que no puedas ser privado por acuerdo.
+
+
+11. ACEPTACIÓN
+
+Instalar o usar este software indica que has leído estas condiciones, que las
+entiendes y que las aceptas. Si no las aceptas, no instales ni uses este
+software.
+
+
+---
+
+Este documento es una declaración de condiciones del autor. No es
+asesoramiento jurídico ni lo sustituye. Si tu uso previsto plantea dudas
+conforme a la ley que te sea aplicable, consulta con un abogado colegiado en
+tu jurisdicción.
+
+Eric Valls Gramunt — 2026
+https://github.com/AcidClawX41/todo-downloader

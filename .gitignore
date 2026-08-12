@@ -2,8 +2,15 @@
 /target
 *.part
 
-# Locally built binary
+# Local build caches from Build.bat: several GB each, never published.
+#   target-fast  -> `Build.bat fast`  (no LTO, all cores)
+#   target-bench -> `Build.bat bench` (profile comparison)
+/target-fast
+/target-bench
+
+# Locally built binaries
 Todo Downloader.exe
+Todo Downloader (test).exe
 
 # IDE
 /.idea
@@ -13,6 +20,12 @@ Todo Downloader.exe
 # The README stays, so anyone cloning the repo learns what the folder is for.
 /tips/*
 !/tips/README.txt
+
+# Release artwork: goes in the Releases page and the social preview, not here.
+todo-downloader-banner-*.png
+
+# Release descriptions: they go in the GitHub Releases page, not in the repo.
+GITHUB-RELEASE-TEXT-*.md
 
 # Internal working notes: implementation reasoning, not user documentation.
 # Kept locally, never published.

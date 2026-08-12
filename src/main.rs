@@ -518,7 +518,7 @@ enum Ev {
     Size(u64, u64),
     Progress(u64, u64, f64),
     Clipboard(Vec<String>),
-    Received(Vec<receiver::Incoming>),
+    Received(Vec<receiver::Incoming>, receiver::Destino),
     /// (id, nº de archivos completados, nombre del que acaba de escribirse)
     GalFiles(u64, u64, String),
     ErrorDetail(u64, String),
@@ -552,6 +552,13 @@ enum Ev {
     GalleryError(String, u64),
     /// Miniatura de un elemento de galería ya decodificada (índice, imagen)
     GalleryThumb(usize, egui::ColorImage),
+    /// Dimensiones REALES del archivo previsualizado, antes de reducirlo.
+    ///
+    /// La miniatura descarga y decodifica la imagen completa y luego la encoge
+    /// a 320 px. Hasta ahora esas dimensiones se tiraban, y un item capturado
+    /// del navegador —que no las trae— se quedaba con «—» para siempre aunque
+    /// la aplicación acabara de tener el archivo entero en memoria.
+    GalleryDims(usize, u32, u32),
     /// Miniatura de una entrada del análisis de perfil (TikTok, Bilibili…)
     ProfileThumb(usize, egui::ColorImage),
     /// La miniatura no se pudo obtener (CDN caducado, anti-hotlink, formato
@@ -982,6 +989,17 @@ struct Settings {
     booru_key: String,
     receiver_enabled: bool,
     receiver_port: u16,
+    /// Un post suelto capturado del navegador, ¿va a la rejilla de selección?
+    ///
+    /// Capturar un perfil y capturar un post son gestos distintos: del perfil
+    /// quieres todo, del post sueles querer elegir dos o tres fotos de un
+    /// carrusel. Activado, un post llega a la rejilla con miniaturas y
+    /// casillas; desactivado, entra entero en la cola.
+    ///
+    /// El script manda su propia preferencia (`mode`), y esta solo decide
+    /// cuando no la manda —texto plano, scripts antiguos— o cuando el script
+    /// dice explícitamente «que lo decida la app».
+    post_to_grid: bool,
     /// Al elegir formato de vídeo, ¿mandar el bitrate por delante del códec?
     ///
     /// POR QUÉ EXISTE: yt-dlp ordena por `res, fps, hdr, vcodec, …, br`. El
@@ -1028,6 +1046,7 @@ impl Default for Settings {
             bg_blur: 0.0,
             booru_user: String::new(),
             booru_key: String::new(),
+            post_to_grid: true,
             prefer_bitrate: true,
             receiver_enabled: true,
             receiver_port: 9777,
@@ -1123,6 +1142,12 @@ fn needs_cookies_upfront(url: &str) -> bool {
         "facebook.com",
         "twitter.com",
         "x.com",
+        // Douyin rechaza al extractor de yt-dlp sin cookies con «Fresh cookies
+        // (not necessarily logged in) are needed». No pide cuenta: pide una
+        // sesión de visitante. La propia vista Perfil ya lo avisaba —«necesario
+        // para Douyin»— pero esta política no se había enterado, así que el
+        // primer intento salía a pelo y fallaba siempre.
+        "douyin.com",
     ];
     let Some(host) = host_of(url) else { return false };
     AUTH_FIRST.iter().any(|s| host_matches(&host, s))
@@ -1146,6 +1171,11 @@ fn needs_auth_error(msg: &str) -> bool {
         || m.contains("account associated with this")
         || m.contains("http error 401")
         || m.contains("http error 403")
+        // Douyin. No dice «login», dice que la sesión de visitante caducó, así
+        // que ninguna de las frases de arriba lo pillaba y la descarga moría
+        // sin llegar a reintentar con las cookies que el usuario ya tenía
+        // configuradas.
+        || m.contains("fresh cookies")
 }
 
 /// Nombre del autor/perfil deducido de la propia URL.
@@ -1483,7 +1513,7 @@ impl App {
             let tx_r = tx.clone();
             receiver::spawn(settings.receiver_port, recv_enabled.clone(), move |r| {
                 let _ = tx_r.send(match r {
-                    receiver::Recibido::Enlaces(items) => Ev::Received(items),
+                    receiver::Recibido::Enlaces(items, destino) => Ev::Received(items, destino),
                     receiver::Recibido::UserAgent(ua) => Ev::DetectedUa(ua),
                 });
             });
@@ -1698,6 +1728,65 @@ impl App {
         }
         ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
         ctx.request_repaint(); // movimiento continuo mientras esté activo
+    }
+
+    /// Vuelca lo capturado del navegador en la rejilla de selección.
+    ///
+    /// Se ACUMULA en vez de reemplazar: capturar tres posts seguidos de la
+    /// misma cosplayer y elegir al final entre todos es el uso natural. Para
+    /// vaciar ya está el botón «Limpiar lista».
+    ///
+    /// Los duplicados se descartan por URL, que es lo que de verdad identifica
+    /// un archivo: el mismo post capturado dos veces no debe aparecer doble.
+    fn recibir_en_galeria(&mut self, items: Vec<receiver::Incoming>) {
+        let ya: std::collections::HashSet<String> =
+            self.gallery_items.iter().map(|g| g.url.clone()).collect();
+
+        let mut nuevos = 0usize;
+        for it in items {
+            if it.url.is_empty() || ya.contains(&it.url) {
+                continue;
+            }
+            let ext = url_extension(&it.url).unwrap_or_else(|| "jpg".into());
+            // Por extensión para los archivos directos, y por FORMA DE LA URL
+            // para las páginas: un post de vídeo de Douyin o TikTok llega como
+            // `…/video/<id>`, sin extensión, y lo resuelve yt-dlp al
+            // descargarlo. Sin esto se contaba como imagen y la rejilla lo
+            // mezclaba con las fotos.
+            let u = it.url.to_ascii_lowercase();
+            let es_pagina_video = u.contains("/video/")
+                && (u.contains("douyin.com") || u.contains("tiktok.com"));
+            let es_video =
+                es_pagina_video || matches!(ext.as_str(), "mp4" | "mov" | "webm" | "mkv" | "m4v");
+            self.gallery_items.push(gallery::GalleryItem {
+                url: it.url,
+                filename: it.title.clone(),
+                ext,
+                width: 0,
+                height: 0,
+                filesize: 0,
+                is_video: es_video,
+                post_id: it.id.clone(),
+                index_in_post: 0,
+                count_in_post: 0,
+                author: it.author,
+                description: it.title,
+                date: String::new(),
+                post_url: it.page_url,
+                thumb_url: it.thumb,
+                selected: false,
+            });
+            nuevos += 1;
+        }
+
+        if nuevos > 0 {
+            // La captura no es una búsqueda: no se toca el epoch ni la página,
+            // para no cancelar una exploración que estuviera en marcha.
+            self.gallery_error.clear();
+            self.view = View::Profile;
+            let msg = i18n::received(self.settings.lang, nuevos);
+            self.toast(msg);
+        }
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -2034,7 +2123,7 @@ impl App {
                     }
                 }
                 Ev::Clipboard(links) => clip_batch.extend(links),
-                Ev::Received(items) => {
+                Ev::Received(items, destino) => {
                     // Los magnet van al motor BitTorrent, no a la cola HTTP.
                     // Es la vía por la que llega un clic en un magnet cuando la
                     // app ya estaba abierta (la lanza forward_to_running_instance).
@@ -2047,16 +2136,29 @@ impl App {
                     }
                     let items = links;
 
-                    let before = self.rows.len();
-                    for it in &items {
-                        self.add_url(&it.url, &it.author, &it.title, &it.page_url, &it.id, &it.thumb);
-                    }
-                    let added = self.rows.len() - before;
-                    if added > 0 {
-                        let msg = i18n::received(self.settings.lang, added);
-                        self.toast(msg);
-                        if self.settings.auto_start_clipboard {
-                            self.start_all();
+                    // El script dice QUÉ capturó, no a dónde va. Para un post
+                    // suelto manda el ajuste, que así se puede cambiar sin
+                    // reinstalar nada en el navegador.
+                    let a_rejilla = match destino {
+                        receiver::Destino::Seleccion => true,
+                        receiver::Destino::Post => self.settings.post_to_grid,
+                        receiver::Destino::Cola | receiver::Destino::Auto => false,
+                    };
+
+                    if a_rejilla && !items.is_empty() {
+                        self.recibir_en_galeria(items);
+                    } else {
+                        let before = self.rows.len();
+                        for it in &items {
+                            self.add_url(&it.url, &it.author, &it.title, &it.page_url, &it.id, &it.thumb);
+                        }
+                        let added = self.rows.len() - before;
+                        if added > 0 {
+                            let msg = i18n::received(self.settings.lang, added);
+                            self.toast(msg);
+                            if self.settings.auto_start_clipboard {
+                                self.start_all();
+                            }
                         }
                     }
                 }
@@ -2298,6 +2400,19 @@ impl App {
                     let tex =
                         ctx.load_texture(format!("prof_{idx}"), img, egui::TextureOptions::LINEAR);
                     self.profile_thumbs.insert(idx, tex);
+                }
+                Ev::GalleryDims(idx, w, h) => {
+                    // Solo si el extractor no las sabía. Un dato medido por
+                    // nosotros no debe pisar al que vino de la fuente.
+                    if let Some(it) = self.gallery_items.get_mut(idx) {
+                        // En un vídeo lo que se ha decodificado es la PORTADA,
+                        // no el vídeo. Enseñar «360×640» al lado de un 1080p
+                        // sería mentir, así que se deja en blanco.
+                        if it.width == 0 && it.height == 0 && !it.is_video {
+                            it.width = w;
+                            it.height = h;
+                        }
+                    }
                 }
                 Ev::GalleryThumb(idx, img) => {
                     self.gallery_pending.remove(&idx);
@@ -3580,12 +3695,14 @@ async fn fetch_preview_thumb(
     // bloquearía a las tareas de descarga.
     let img = tokio::task::spawn_blocking(move || {
         let im = image::load_from_memory(&bytes).ok()?;
+        // ANTES de encoger: estas son las dimensiones del archivo de verdad.
+        let reales = (im.width(), im.height());
         let im = im.thumbnail(320, 320);
         let rgba = im.to_rgba8();
         let (w, h) = rgba.dimensions();
-        Some(egui::ColorImage::from_rgba_unmultiplied(
-            [w as usize, h as usize],
-            rgba.as_raw(),
+        Some((
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw()),
+            reales,
         ))
     })
     .await
@@ -3593,12 +3710,19 @@ async fn fetch_preview_thumb(
     .flatten();
 
     match img {
-        Some(img) => {
-            let _ = tx.send(if es_perfil {
-                Ev::ProfileThumb(idx, img)
+        Some((img, (rw, rh))) => {
+            if es_perfil {
+                let _ = tx.send(Ev::ProfileThumb(idx, img));
             } else {
-                Ev::GalleryThumb(idx, img)
-            });
+                // El tamaño en bytes NO se manda a propósito. La vista previa
+                // baja la variante que trae el extractor, pero la descarga
+                // prueba antes `~noop` —el original sin procesar—, así que el
+                // archivo final puede pesar otra cosa. Las dimensiones sí
+                // valen: describen la imagen, y las variantes de ByteDance
+                // cambian la compresión, no el número de píxeles.
+                let _ = tx.send(Ev::GalleryDims(idx, rw, rh));
+                let _ = tx.send(Ev::GalleryThumb(idx, img));
+            }
         }
         None => fallo(),
     }
@@ -4952,14 +5076,7 @@ fn spawn_galdl_check(tx: UnboundedSender<Ev>) {
             let _ = tx.send(Ev::GalDl(Some(bundled.to_string_lossy().into_owned())));
             return;
         }
-        let mut cmd = std::process::Command::new("gallery-dl");
-        cmd.arg("--version");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = responde("gallery-dl", "--version", LIMITE_DETECCION);
         let _ = tx.send(Ev::GalDl(if ok { Some("gallery-dl".into()) } else { None }));
     });
 }
@@ -5031,6 +5148,56 @@ fn ffmpeg_release_url() -> &'static str {
     }
 }
 
+/// Lanza un binario solo para saber si responde, con límite de tiempo.
+///
+/// POR QUÉ HACE FALTA UN LÍMITE: `Command::output()` espera indefinidamente. Un
+/// lanzador de Python huérfano —un `cyberdrop-dl.exe` cuyo intérprete ya no
+/// existe— o un antivirus que intercepta el ejecutable para analizarlo pueden
+/// dejar el proceso parado, y con él el hilo de detección. La aplicación se
+/// queda entonces sin saber NUNCA si ese motor está disponible: ni presente ni
+/// ausente, simplemente sin respuesta, y en la barra lateral no aparece nada.
+///
+/// La salida se tira a `null` a propósito. A estas comprobaciones solo les
+/// importa el código de salida, y así el hijo tampoco puede bloquearse
+/// llenando una tubería que nadie lee.
+fn responde(programa: &str, arg: &str, limite: Duration) -> bool {
+    let mut cmd = std::process::Command::new(programa);
+    cmd.arg(arg)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let Ok(mut hijo) = cmd.spawn() else {
+        return false; // no está en el PATH: respuesta legítima, no un fallo
+    };
+
+    let fin = Instant::now() + limite;
+    loop {
+        match hijo.try_wait() {
+            Ok(Some(estado)) => return estado.success(),
+            Ok(None) => {
+                if Instant::now() >= fin {
+                    // Se mata y se recoge: un zombi por cada arranque no.
+                    let _ = hijo.kill();
+                    let _ = hijo.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Margen para que un binario conteste a `--version`. Cinco segundos es mucho
+/// para un proceso sano y poco para dejar la interfaz sin información.
+const LIMITE_DETECCION: Duration = Duration::from_secs(5);
+
 fn spawn_ffmpeg_check(tx: UnboundedSender<Ev>) {
     std::thread::spawn(move || {
         let bundled = ffmpeg_bundled_path();
@@ -5038,14 +5205,7 @@ fn spawn_ffmpeg_check(tx: UnboundedSender<Ev>) {
             let _ = tx.send(Ev::Ffmpeg(Some(bundled.to_string_lossy().into_owned())));
             return;
         }
-        let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.arg("-version");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = responde("ffmpeg", "-version", LIMITE_DETECCION);
         let _ = tx.send(Ev::Ffmpeg(if ok { Some("ffmpeg".into()) } else { None }));
     });
 }
@@ -5056,14 +5216,10 @@ fn spawn_ffmpeg_check(tx: UnboundedSender<Ev>) {
 fn spawn_cyberdrop_check(tx: UnboundedSender<Ev>) {
     std::thread::spawn(move || {
         for cand in cyberdrop_candidates() {
-            let mut cmd = std::process::Command::new(&cand);
-            cmd.arg("--version");
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0800_0000);
-            }
-            if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
+            // El caso real que motivó el límite: un `cyberdrop-dl.exe` dejado
+            // por un Python que ya se desinstaló. El lanzador no encuentra su
+            // intérprete y se queda ahí, a veces con el antivirus de por medio.
+            if responde(&cand, "--version", LIMITE_DETECCION) {
                 let _ = tx.send(Ev::Cyberdrop(Some(cand)));
                 return;
             }
@@ -5331,14 +5487,7 @@ fn spawn_ytdlp_check(tx: UnboundedSender<Ev>) {
             let _ = tx.send(Ev::YtDlp(Some(bundled.to_string_lossy().into_owned())));
             return;
         }
-        let mut cmd = std::process::Command::new("yt-dlp");
-        cmd.arg("--version");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = responde("yt-dlp", "--version", LIMITE_DETECCION);
         let _ = tx.send(Ev::YtDlp(if ok { Some("yt-dlp".into()) } else { None }));
     });
 }
@@ -5398,24 +5547,103 @@ async fn install_ytdlp(client: reqwest::Client, tx: UnboundedSender<Ev>) {
 
 // ============================= Tema =============================
 
+/// Busca una fuente CJK recorriendo los directorios donde la deja cada
+/// distribución, en vez de dar por buena una ruta concreta.
+///
+/// EL FALLO QUE ARREGLA: las dos rutas de Linux que había codificadas eran de
+/// Debian y Ubuntu (`/usr/share/fonts/opentype/noto/…`). En Arch —y por tanto
+/// en Manjaro y Garuda— Noto CJK vive en `/usr/share/fonts/noto-cjk/`, así que
+/// no se encontraba nada, la función salía sin decir palabra y los títulos
+/// chinos de Douyin y TikTok se veían como «□□□».
+///
+/// Se comparan NOMBRES de archivo, no rutas completas, porque el nombre del
+/// paquete cambia entre distribuciones pero el de la fuente no.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn buscar_cjk_linux() -> Option<Vec<u8>> {
+    const DIRS: &[&str] = &[
+        "/usr/share/fonts/noto-cjk",        // Arch, Manjaro, Garuda
+        "/usr/share/fonts/opentype/noto",   // Debian, Ubuntu
+        "/usr/share/fonts/truetype/wqy",    // Debian, Ubuntu (WenQuanYi)
+        "/usr/share/fonts/google-noto-cjk", // Fedora
+        "/usr/share/fonts/noto",            // openSUSE y varias
+        "/usr/share/fonts/adobe-source-han-sans-otc-fonts",
+        "/usr/share/fonts/truetype",
+        "/usr/share/fonts/opentype",
+        "/usr/share/fonts",
+    ];
+    // Por orden de preferencia. Sans antes que Serif porque la interfaz es sans.
+    const PATRONES: &[&str] = &[
+        "notosanscjk",
+        "sourcehansans",
+        "wqy-microhei",
+        "wqy-zenhei",
+        "notoserifcjk",
+        "sourcehanserif",
+    ];
+
+    // Un nivel de subdirectorios: suficiente para `/usr/share/fonts/<paquete>/`
+    // sin recorrer el árbol entero, que en un sistema con muchas fuentes
+    // instaladas costaría más que el arranque.
+    let mut candidatos: Vec<std::path::PathBuf> = Vec::new();
+    for d in DIRS {
+        let Ok(entradas) = std::fs::read_dir(d) else { continue };
+        for e in entradas.flatten() {
+            let ruta = e.path();
+            if ruta.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(&ruta) {
+                    candidatos.extend(sub.flatten().map(|x| x.path()).filter(|p| p.is_file()));
+                }
+            } else {
+                candidatos.push(ruta);
+            }
+        }
+    }
+
+    for patron in PATRONES {
+        for ruta in &candidatos {
+            let Some(nombre) = ruta.file_name().and_then(|n| n.to_str()) else { continue };
+            let n = nombre.to_ascii_lowercase();
+            if !n.contains(patron) {
+                continue;
+            }
+            if !(n.ends_with(".ttc") || n.ends_with(".otf") || n.ends_with(".ttf")) {
+                continue;
+            }
+            if let Ok(datos) = std::fs::read(ruta) {
+                return Some(datos);
+            }
+        }
+    }
+    None
+}
+
+/// En Windows y macOS las rutas exactas bastan, así que no hay nada que buscar.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn buscar_cjk_linux() -> Option<Vec<u8>> {
+    None
+}
+
 /// Carga una fuente del sistema con glifos CJK (chino/japonés/coreano).
 /// Sin esto, los títulos de Douyin/TikTok en chino se ven como cuadrados «□».
 fn load_cjk_font(ctx: &egui::Context) {
-    const CANDIDATES: &[&str] = &[
+    // Rutas exactas: Windows y macOS instalan siempre las mismas.
+    const EXACTAS: &[&str] = &[
         // Windows — .ttf primero por ser el formato más simple de parsear
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/msgothic.ttc",
-        // Linux
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         // macOS
         "/System/Library/Fonts/PingFang.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
     ];
 
-    let Some(data) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
+    let data = EXACTAS
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+        .or_else(buscar_cjk_linux);
+
+    let Some(data) = data else {
         return; // sin fuente CJK: se mantiene la de por defecto
     };
 
@@ -5850,7 +6078,13 @@ impl eframe::App for App {
                     if !cookie_args(&self.settings).is_empty() {
                         ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN()));
                     } else {
-                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()));
+                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()))
+                            .on_hover_ui(|ui| {
+                                // Sin `set_max_width` el tooltip sale en una
+                                // columna de una palabra, igual que el toast.
+                                ui.set_max_width(420.0);
+                                ui.label(t(lang, "side.cookies_off_tip"));
+                            });
                     }
                 });
             });
@@ -5920,6 +6154,11 @@ impl eframe::App for App {
                                     .inner_margin(Margin::symmetric(16.0, 9.0))
                                     .stroke(Stroke::new(1.0f32,ACCENT().gamma_multiply(0.5)))
                                     .show(ui, |ui| {
+                                        // Un `Area` no hereda ancho de nadie, así
+                                        // que sin esto egui estruja el texto a la
+                                        // anchura mínima y un aviso largo sale en
+                                        // una columna de una palabra por línea.
+                                        ui.set_max_width(480.0);
                                         ui.label(RichText::new(&self.toast).color(TEXT()));
                                     });
                             });
@@ -5991,6 +6230,28 @@ impl App {
                 ACCENT(),
             );
         });
+        // Aviso de sesión. Solo aparece cuando REALMENTE viene a cuento: hay un
+        // fallo que parece de autenticación y, además, no se están mandando
+        // cookies. Un aviso permanente se ignora; este señala la causa justo
+        // cuando el usuario está mirando el error.
+        let sin_cookies = cookie_args(&self.settings).is_empty();
+        let fallo_de_sesion = sin_cookies
+            && self.rows.iter().any(|r| match &r.status {
+                Status::Error(e) => needs_auth_error(e),
+                _ => false,
+            });
+        if fallo_de_sesion {
+            ui.add_space(10.0);
+            egui::Frame::none()
+                .fill(CARD())
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(12.0, 8.0))
+                .stroke(Stroke::new(1.0f32, AMBER().gamma_multiply(0.6)))
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.label(RichText::new(t(lg, "queue.no_session")).size(11.5).color(AMBER()));
+                });
+        }
         ui.add_space(14.0);
 
         // Barra de acciones
@@ -7126,6 +7387,51 @@ impl App {
         });
         ui.add_space(12.0);
 
+        // ---- Captura de un post suelto ----
+        // Va en su propia tarjeta a propósito: los tres de arriba se pegan en
+        // la consola cada vez, estos dos se instalan UNA vez. Mezclarlos hacía
+        // pensar que también había que pegarlos en cada post.
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(760.0));
+            ui.label(RichText::new(t(lang, "cap.post_title")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "cap.post_help")).size(11.5).color(MUTED()));
+            ui.add_space(8.0);
+
+            let puerto = self.settings.receiver_port;
+
+            ui.horizontal(|ui| {
+                if primary_button(ui, t(lang, "cap.post_us")).clicked() {
+                    let s = scripts::userscript(puerto);
+                    ui.output_mut(|o| o.copied_text = s);
+                    self.toast(t(lang, "cap.post_copied"));
+                }
+                if soft_button(ui, t(lang, "cap.post_us_save")).clicked() {
+                    let s = scripts::userscript(puerto);
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_file_name("todo-downloader-post.user.js")
+                        .save_file()
+                    {
+                        match std::fs::write(&p, &s) {
+                            Ok(_) => self.toast(i18n::saved_to(lang, &p.display().to_string())),
+                            Err(e) => self.toast(format!("{e}")),
+                        }
+                    }
+                }
+                if soft_button(ui, t(lang, "cap.post_bm")).clicked() {
+                    let s = scripts::bookmarklet(puerto);
+                    ui.output_mut(|o| o.copied_text = s);
+                    self.toast(t(lang, "cap.post_copied"));
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.label(RichText::new(t(lang, "cap.post_us_note")).size(11.5).color(MUTED()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "cap.post_bm_note")).size(11.5).color(AMBER()));
+        });
+        ui.add_space(12.0);
+
         // Vista previa del script
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
@@ -8028,6 +8334,9 @@ impl App {
             ui.add_space(6.0);
             ui.checkbox(&mut self.settings.prefer_bitrate, t(lang, "set.prefer_br"));
             ui.label(RichText::new(t(lang, "set.prefer_br_note")).size(11.5).color(MUTED()));
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.settings.post_to_grid, t(lang, "set.post_grid"));
+            ui.label(RichText::new(t(lang, "set.post_grid_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
@@ -8561,6 +8870,24 @@ mod tests {
     /// El orden por defecto de yt-dlp es `res, fps, hdr, vcodec, …, br`: el
     /// códec pesa más que el bitrate y prefiere AV1, el encode más pequeño.
     /// Este orden mete `tbr` donde iba `vcodec`, sin tocar `res` ni `fps`.
+    /// El caso real: un post suelto de Douyin moría con «Fresh cookies … are
+    /// needed» sin llegar a reintentar, teniendo cookies configuradas.
+    #[test]
+    fn douyin_lleva_cookies_desde_el_primer_intento() {
+        assert!(needs_cookies_upfront("https://www.douyin.com/video/7395513031184190772"));
+        assert!(needs_cookies_upfront("https://www.douyin.com/note/123"));
+        // Y no se le pegan a quien no las necesita
+        assert!(!needs_cookies_upfront("https://www.youtube.com/watch?v=abc"));
+        assert!(!needs_cookies_upfront("https://www.tiktok.com/@u/video/1"));
+    }
+
+    #[test]
+    fn la_sesion_caducada_de_douyin_pide_reintento_con_cookies() {
+        assert!(needs_auth_error(
+            "ERROR: [Douyin] 7395513031184190772: Fresh cookies (not necessarily logged in) are needed"
+        ));
+    }
+
     #[test]
     fn el_orden_por_bitrate_no_sacrifica_resolucion_ni_fps() {
         let campos: Vec<&str> = FORMAT_SORT_BITRATE.split(',').collect();

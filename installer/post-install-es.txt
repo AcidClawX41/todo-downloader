@@ -1,0 +1,59 @@
+﻿Todo Downloader
+===============
+
+ANTES DE EMPEZAR
+
+Los enlaces directos, MEGA, los alojamientos de archivos y BitTorrent
+funcionan de entrada: esos motores van compilados dentro de la propia
+aplicación.
+
+Para los sitios de vídeo y de galerías hacen falta dos programas auxiliares,
+y la aplicación te los descarga desde Ajustes:
+
+  - yt-dlp      páginas de vídeo (YouTube, TikTok, Bilibili, 1000+ sitios)
+  - gallery-dl  galerías y perfiles
+  - ffmpeg      fusiona vídeo y audio; necesario para pasar de 720p en
+                YouTube y para Bilibili sin excepción
+
+No van empaquetados a propósito: yt-dlp en particular se actualiza
+constantemente porque los sitios que soporta cambian sin parar, y una copia
+congelada dentro de este instalador dejaría de funcionar en YouTube en
+cuestión de semanas.
+
+SESIONES
+
+Instagram, Weibo, Douyin, los perfiles privados y el contenido con
+restricción de edad necesitan la sesión de tu navegador. Ajustes -> Cookies
+del navegador, o indícale un cookies.txt exportado con una extensión. Sin
+sesión, solo son fiables los enlaces directos y YouTube público.
+
+ENLACES MAGNET
+
+Si quieres que los enlaces magnet: se abran con Todo Downloader, actívalo
+desde Ajustes. No se hace durante la instalación porque modifica una
+asociación de protocolo de tu sistema, y esa decisión debería ser tuya y no
+del instalador.
+
+QUÉ NO BORRA EL DESINSTALADOR
+
+Tus descargas y tu configuración. Los ajustes viven en tu perfil de usuario y
+se dejan intactos, así que si reinstalas conservas tu configuración.
+
+GIFS ANIMADOS
+
+La carpeta «tips» que hay junto al ejecutable puede contener archivos .gif
+que se muestran en la pestaña de apoyo. Se instala vacía, solo con un README:
+esos GIF serían material de terceros y no se distribuyen con la aplicación.
+
+RESPONSABILIDAD
+
+Recuerda lo que aceptaste al instalar: tú decides qué se descarga y eres el
+único responsable de ello. El texto completo de las condiciones está en el
+archivo LICENSE y en el repositorio del proyecto.
+
+---
+
+Código fuente, incidencias y versiones:
+https://github.com/AcidClawX41/todo-downloader
+
+GPL-3.0-or-later. (c) 2026 Eric Valls Gramunt

@@ -1,8 +1,8 @@
 # Todo Downloader — audit and hotfix status
 
-**Last updated:** 2026-08-07 (v1.6.5 hotfix)
+**Last updated:** 2026-08-12 (v1.6.7)
 **Baseline:** v1.5.0, publicly released and working.
-**Target release:** v1.6.5.
+**Target release:** v1.6.7.
 
 This document tracks what was found, what has been fixed, and what is still open. It is kept current: a finding is only marked fixed once the change compiles and its tests pass.
 

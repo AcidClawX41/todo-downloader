@@ -69,10 +69,15 @@ impl Lang {
         // Windows: preguntar al sistema por el idioma de la UI
         #[cfg(windows)]
         {
-            if let Ok(out) = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "(Get-Culture).TwoLetterISOLanguageName"])
-                .output()
-            {
+            // CREATE_NO_WINDOW: la aplicación es `windows_subsystem = "windows"`
+            // y no tiene consola, así que sin este flag Windows le regala una
+            // ventana nueva al proceso hijo. Se veía parpadear en el PRIMER
+            // arranque, que es el único momento en que se detecta el idioma.
+            use std::os::windows::process::CommandExt;
+            let mut ps = std::process::Command::new("powershell");
+            ps.args(["-NoProfile", "-Command", "(Get-Culture).TwoLetterISOLanguageName"])
+                .creation_flags(0x0800_0000);
+            if let Ok(out) = ps.output() {
                 let code = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
                 if code == "es" {
                     return Lang::Es;
@@ -382,6 +387,42 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
 
         "side.cookies_on" => entry!("● cookies activas", "● cookies enabled"),
         "side.cookies_off" => entry!("○ sin cookies", "○ no cookies"),
+        "side.cookies_off_tip" => entry!(
+            "Sin sesión del navegador solo funcionan con garantía los enlaces directos y \
+             YouTube público.\n\nInstagram, Weibo, Douyin, TikTok privado, V2PH y la mayoría \
+             de galerías necesitan cookies: sin ellas el sitio responde 401 o 403, o entrega \
+             una versión recortada.\n\nActívalas en Ajustes → Cookies del navegador, o \
+             indica un cookies.txt exportado con una extensión.",
+            "Without a browser session, only direct links and public YouTube are reliable.\
+             \n\nInstagram, Weibo, Douyin, private TikTok, V2PH and most galleries need \
+             cookies: without them the site answers 401 or 403, or serves a cut-down \
+             version.\n\nTurn them on in Settings → Browser cookies, or point to a \
+             cookies.txt exported with an extension."),
+        "cap.post_title" => entry!("CAPTURAR UN POST SUELTO", "CAPTURE A SINGLE POST"),
+        "cap.post_help" => entry!(
+            "Para bajar las fotos de UN post sin capturar el perfil entero. Se instala una vez y a partir de ahí aparece un botón «⬇ Capturar este post» en cada publicación de Douyin y TikTok.",
+            "For grabbing the photos of ONE post without capturing the whole profile. You install it once, and from then on a «⬇ Capture this post» button appears on every Douyin and TikTok publication."),
+        "cap.post_us" => entry!("Copiar userscript", "Copy userscript"),
+        "cap.post_us_save" => entry!("Guardar .user.js", "Save .user.js"),
+        "cap.post_bm" => entry!("Copiar bookmarklet", "Copy bookmarklet"),
+        "cap.post_us_note" => entry!(
+            "USERSCRIPT — necesita Tampermonkey o Violentmonkey. Es la opción recomendada en Chrome y Vivaldi: usa GM_xmlhttpRequest, que llega a la aplicación sin tropezar con el bloqueo de red privada del navegador.",
+            "USERSCRIPT — needs Tampermonkey or Violentmonkey. This is the recommended option on Chrome and Vivaldi: it uses GM_xmlhttpRequest, which reaches the application without hitting the browser's private-network block."),
+        "cap.post_bm_note" => entry!(
+            "BOOKMARKLET — sin instalar nada: pega el texto copiado como DIRECCIÓN de un marcador nuevo y arrástralo a la barra. Ojo: al correr dentro de la página, en Chrome y Vivaldi no puede hablar con la aplicación y cae al respaldo de guardar JSON. En Firefox llega directo.",
+            "BOOKMARKLET — nothing to install: paste the copied text as the ADDRESS of a new bookmark and drag it to the bar. Careful: running inside the page, on Chrome and Vivaldi it cannot reach the application and falls back to saving a JSON. On Firefox it arrives directly."),
+        "cap.post_copied" => entry!("Copiado. Ahora pégalo donde toque.", "Copied. Now paste it where it belongs."),
+        "set.post_grid" => entry!(
+            "Los posts sueltos van a la rejilla de selección",
+            "Single posts go to the selection grid"),
+        "set.post_grid_note" => entry!(
+            "Activado, capturar un post lo abre en Perfil con miniaturas y casillas para que elijas qué bajar. Desactivado, entra entero en la cola. La captura de un PERFIL completo no se ve afectada: esa siempre va a la rejilla.",
+            "Turned on, capturing a post opens it in Profile with thumbnails and checkboxes so you can pick what to download. Turned off, it goes straight into the queue in full. Capturing a whole PROFILE is unaffected: that always goes to the grid."),
+        "queue.no_session" => entry!(
+            "⚠ Este fallo parece falta de sesión y ahora mismo no se están enviando cookies. \
+             Actívalas en Ajustes → Cookies del navegador, o carga un cookies.txt, y pulsa Reintentar.",
+            "⚠ This failure looks like a missing session, and no cookies are being sent right \
+             now. Turn them on in Settings → Browser cookies, or load a cookies.txt, then press Retry."),
         "side.cyberdrop_active" => entry!("● cyberdrop-dl activo", "● cyberdrop-dl active"),
 
         "status.resolving_host" => entry!("Resolviendo…", "Resolving…"),

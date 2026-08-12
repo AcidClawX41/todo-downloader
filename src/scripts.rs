@@ -10,11 +10,99 @@
 /// Toda la información se muestra en un panel flotante dentro de la página, no
 /// en la consola: los sitios como Douyin escupen cientos de errores propios
 /// (CORS, xgplayer, zijieapi) y el progreso se perdía entre el ruido.
+/// Texto en el idioma activo de la aplicación.
+fn m(es: &'static str, en: &'static str) -> &'static str {
+    if crate::i18n::lang() == crate::i18n::Lang::Es { es } else { en }
+}
+
+/// Comillas y barras escapadas para meter el texto en un literal de JavaScript.
+fn js(t: &str) -> String {
+    format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Diccionario `T` que se inyecta al principio de cada script.
+///
+/// POR QUÉ AQUÍ Y NO EN `i18n.rs`: estos textos no los pinta la aplicación,
+/// los pinta el NAVEGADOR. Viajan dentro del JavaScript que el usuario pega en
+/// la consola, así que el idioma se resuelve al generar el script y se manda
+/// ya traducido. El script no puede preguntarle nada a la aplicación: puede
+/// estar ejecutándose sin que el receptor esté siquiera encendido.
+fn dic() -> String {
+    let pares: &[(&str, &str, &str)] = &[
+        ("capturando", "Capturando…", "Capturing…"),
+        ("enlaces", "enlaces", "links"),
+        ("archivos", "archivos", "files"),
+        ("detener", "■ Detener y enviar", "■ Stop and send"),
+        ("guardar", "💾 Guardar JSON", "💾 Save JSON"),
+        ("deteniendo", "Deteniendo…", "Stopping…"),
+        ("cerrar", "Cerrar", "Close"),
+        ("enviando", "Enviando…", "Sending…"),
+        ("enviado", "Enviado a la app ✓", "Sent to the app ✓"),
+        ("terminado", "Terminado", "Finished"),
+        ("enCola", "Ya están en la cola de descargas", "They are in the download queue now"),
+        ("enviadosLog", "enlaces enviados a Todo Downloader", "links sent to Todo Downloader"),
+        ("respondio", "El receptor respondió ", "The receiver replied "),
+        ("noApp", "App no encontrada — copiando al portapapeles",
+                  "App not found — copying to the clipboard"),
+        ("noRecep", "Receptor no disponible:", "Receiver unavailable:"),
+        ("copiados", "📋 Copiados al portapapeles", "📋 Copied to the clipboard"),
+        ("copiadosLog", "📋 Enlaces copiados — el LinkGrabber los detectará",
+                        "📋 Links copied — LinkGrabber will pick them up"),
+        ("usaGuardar", "Usa el botón 💾 Guardar JSON", "Use the 💾 Save JSON button"),
+        ("jsonGuardado", "JSON guardado con", "JSON saved with"),
+        ("elementos", "elementos", "items"),
+        ("sinApi", "Sin respuestas de la API", "No replies from the API"),
+        ("scrollBloqueado", "¿scroll bloqueado o login?", "scroll blocked, or sign-in needed?"),
+        ("analizados", "analizados", "scanned"),
+        ("sinUrl", "sin URL", "no URL"),
+        ("capturados", "capturados", "captured"),
+        ("diagnostico", "Diagnóstico:", "Diagnostics:"),
+        ("apiNoResp", "La API no respondió: inicia sesión y recarga el perfil",
+                      "The API did not reply: sign in and reload the profile"),
+        ("respRecibidas", "Respuestas recibidas", "Replies received"),
+        ("sinUtiles", "pero sin enlaces utilizables", "but no usable links"),
+        ("ejecutaDouyin", "Todo Downloader: ejecuta esto en una página de perfil de Douyin (/user/...)",
+                          "Todo Downloader: run this on a Douyin profile page (/user/...)"),
+        ("leyendo", "Leyendo publicaciones…", "Reading posts…"),
+        ("iniciada", "Captura iniciada — sigue el progreso en el panel de la esquina",
+                     "Capture started — follow the progress in the corner panel"),
+        ("vacia", "Respuesta vacía, reintentando", "Empty reply, retrying"),
+        ("publicaciones", "publicaciones", "posts"),
+        ("videos", "vídeos", "videos"),
+        ("imagenes", "imágenes", "images"),
+        ("reintentando", "Reintentando", "Retrying"),
+        ("analizandoPag", "Analizando la página…", "Analyzing the page…"),
+        ("pagina", "página", "page"),
+        ("fotos", "fotos", "photos"),
+        ("sinAlbumes", "No se ven álbumes en esta página", "No albums visible on this page"),
+        ("albumesPag", "álbumes en esta página", "albums on this page"),
+        ("album", "Álbum", "Album"),
+        ("albumOmitido", "álbum omitido:", "album skipped:"),
+        ("abreAlbum", "Abre un álbum o la página de una modelo/agencia",
+                      "Open an album, or a model/agency page"),
+        ("sinFotos", "No se ha encontrado ninguna foto", "No photo was found"),
+        ("postSinId", "Abre un post concreto: la URL no lleva ningún identificador",
+                      "Open a specific post: the URL carries no identifier"),
+        ("postBuscando", "Buscando los archivos del post…", "Looking for the post files…"),
+        ("postAytdlp", "El reproductor no expone una URL descargable (blob:). Se manda el post a la cola para que lo resuelva yt-dlp.",
+                       "The player exposes no downloadable URL (blob:). The post is sent to the queue for yt-dlp to resolve."),
+        ("postNada", "No se ha encontrado ninguna imagen en este post. Pasa el carrusel una vez a mano y vuelve a intentarlo.",
+                     "No image was found in this post. Step through the carousel once by hand and try again."),
+    ];
+    let cuerpo: String = pares
+        .iter()
+        .map(|&(k, es, en)| format!("  {k}: {},\n", js(m(es, en))))
+        .collect();
+    format!("const T = {{\n{cuerpo}}};\n")
+}
+
 fn sender(port: u16) -> String {
+    let dic = dic();
     format!(
         r#"
 // ---- Panel visual de Todo Downloader ----
 const TD_PORT = {port};
+{dic}
 
 function tdHud() {{
     document.getElementById('__td_hud')?.remove();
@@ -34,13 +122,13 @@ function tdHud() {{
                     display:flex;align-items:center;justify-content:center;font-size:15px">⬇</div>
         <div style="line-height:1.15">
           <div style="font-weight:600">Todo <span style="color:#25F4EE">Downloader</span></div>
-          <div id="__td_sub" style="font-size:10.5px;color:#8A90A0">Capturando…</div>
+          <div id="__td_sub" style="font-size:10.5px;color:#8A90A0">${{T.capturando}}</div>
         </div>
         <div id="__td_x" style="margin-left:auto;cursor:pointer;color:#8A90A0;font-size:16px;padding:0 4px">×</div>
       </div>
       <div style="display:flex;align-items:baseline;gap:7px">
         <div id="__td_n" style="font-size:30px;font-weight:600;color:#25F4EE">0</div>
-        <div style="font-size:11px;color:#8A90A0" id="__td_lbl">enlaces</div>
+        <div style="font-size:11px;color:#8A90A0" id="__td_lbl">${{T.enlaces}}</div>
       </div>
       <div style="height:5px;background:#262B39;border-radius:3px;margin:10px 0 4px;overflow:hidden">
         <div id="__td_bar" style="height:100%;width:30%;background:linear-gradient(90deg,#FE2C55,#25F4EE);
@@ -48,15 +136,15 @@ function tdHud() {{
       </div>
       <div id="__td_msg" style="font-size:11px;color:#8A90A0;min-height:15px"></div>
       <button id="__td_stop" style="width:100%;margin-top:9px;padding:7px;border:0;border-radius:8px;
-              background:#262B39;color:#E8EAF0;font-size:12px;cursor:pointer">■ Detener y enviar</button>
+              background:#262B39;color:#E8EAF0;font-size:12px;cursor:pointer">${{T.detener}}</button>
       <button id="__td_save" style="width:100%;margin-top:6px;padding:7px;border:0;border-radius:8px;
-              background:#FE2C55;color:#fff;font-size:12px;cursor:pointer;display:none">💾 Guardar JSON</button>
+              background:#FE2C55;color:#fff;font-size:12px;cursor:pointer;display:none">${{T.guardar}}</button>
       <style>@keyframes __tdp{{0%{{transform:translateX(-100%)}}100%{{transform:translateX(340%)}}}}</style>`;
     document.body.appendChild(el);
     el.querySelector('#__td_x').onclick = () => el.remove();
     el.querySelector('#__td_stop').onclick = () => {{
         window.__tdStop = true;
-        el.querySelector('#__td_msg').textContent = 'Deteniendo…';
+        el.querySelector('#__td_msg').textContent = T.deteniendo;
     }};
     // Guardar a archivo: vía manual siempre disponible al terminar
     el.querySelector('#__td_save').onclick = () => tdSaveFile(window.__tdItems || []);
@@ -69,35 +157,59 @@ function tdHud() {{
             const bar = document.getElementById('__td_bar');
             if (bar) {{ bar.style.animation = 'none'; bar.style.width = '100%'; }}
             const btn = document.getElementById('__td_stop');
-            if (btn) {{ btn.textContent = 'Cerrar'; btn.onclick = () => document.getElementById('__td_hud')?.remove(); }}
+            if (btn) {{ btn.textContent = T.cerrar; btn.onclick = () => document.getElementById('__td_hud')?.remove(); }}
             // El botón de guardar aparece al terminar, haya ido bien el envío o no
             const sv = document.getElementById('__td_save');
             if (sv && v > 0) sv.style.display = 'block';
             const sub = document.getElementById('__td_sub');
-            if (sub) {{ sub.textContent = ok ? 'Enviado a la app ✓' : 'Terminado'; sub.style.color = ok ? '#3DDC84' : '#FFB454'; }}
+            if (sub) {{ sub.textContent = ok ? T.enviado : T.terminado; sub.style.color = ok ? '#3DDC84' : '#FFB454'; }}
             this.n(v);
             this.msg(extra || '');
         }}
     }};
 }}
 
-async function tdSend(items, hud) {{
+async function tdSend(items, hud, mode) {{
     if (!items.length) return false;
+    const cuerpo = JSON.stringify({{ source: location.hostname, items, mode: mode || '' }});
+
+    // Chrome y Vivaldi bloquean que una PÁGINA hable con 127.0.0.1 (Private
+    // Network Access). GM_xmlhttpRequest corre en el contexto de la extensión
+    // del gestor de userscripts, que no tiene esa restricción. Si no existe
+    // —bookmarklet, o consola pelada— se cae a fetch, que en Firefox va bien.
+    if (typeof GM_xmlhttpRequest === 'function') {{
+        const ok = await new Promise(res => GM_xmlhttpRequest({{
+            method: 'POST',
+            url: `http://127.0.0.1:${{TD_PORT}}/add`,
+            headers: {{ 'Content-Type': 'application/json' }},
+            data: cuerpo,
+            onload: r => res(r.status >= 200 && r.status < 300),
+            onerror: () => res(false),
+            ontimeout: () => res(false)
+        }}));
+        if (ok) {{
+            hud && hud.done(items.length, true, T.enCola);
+            return true;
+        }}
+        hud && hud.msg(T.noApp);
+        return false;
+    }}
+
     try {{
         const res = await fetch(`http://127.0.0.1:${{TD_PORT}}/add`, {{
             method: 'POST',
             headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ source: location.hostname, items }})
+            body: cuerpo
         }});
         if (res.ok) {{
-            hud && hud.done(items.length, true, 'Ya están en la cola de descargas');
-            console.log(`[TD] ✅ ${{items.length}} enlaces enviados a Todo Downloader`);
+            hud && hud.done(items.length, true, T.enCola);
+            console.log(`[TD] ✅ ${{items.length}} ${{T.enviadosLog}}`);
             return true;
         }}
-        hud && hud.msg('El receptor respondió ' + res.status);
+        hud && hud.msg(T.respondio + res.status);
     }} catch (e) {{
-        hud && hud.msg('App no encontrada — copiando al portapapeles');
-        console.warn('[TD] Receptor no disponible:', e.message);
+        hud && hud.msg(T.noApp);
+        console.warn('[TD]', T.noRecep, e.message);
     }}
     return false;
 }}
@@ -106,11 +218,11 @@ function tdFallbackCopy(items, hud) {{
     const txt = items.map(i => i.url).join('\n');
     navigator.clipboard.writeText(txt).then(
         () => {{
-            hud && hud.done(items.length, false, '📋 Copiados al portapapeles');
-            console.log('[TD] 📋 Enlaces copiados — el LinkGrabber los detectará');
+            hud && hud.done(items.length, false, T.copiados);
+            console.log('[TD]', T.copiadosLog);
         }},
         () => {{
-            hud && hud.done(items.length, false, 'Usa el botón 💾 Guardar JSON');
+            hud && hud.done(items.length, false, T.usaGuardar);
             console.log(txt);
         }}
     );
@@ -136,7 +248,7 @@ function tdSaveFile(items) {{
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {{ URL.revokeObjectURL(a.href); a.remove(); }}, 5000);
-    console.log(`[TD] 💾 JSON guardado con ${{items.length}} elementos`);
+    console.log(`[TD] 💾 ${{T.jsonGuardado}} ${{items.length}} ${{T.elementos}}`);
 }}
 "#
     )
@@ -144,9 +256,12 @@ function tdSaveFile(items) {{
 
 /// Script para perfiles de TikTok (interceptor de API + auto-scroll)
 pub fn tiktok(port: u16) -> String {
+    let rotulo = m("Capturador de TikTok", "TikTok capturer");
+    let donde = m("Ejecutar en", "Run this on");
+    let consola = m("Consola", "Console");
     format!(
-        r#"/* Todo Downloader — Capturador de TikTok — By Eric V. Gramunt
-   Ejecutar en https://www.tiktok.com/@usuario (F12 → Consola) */
+        r#"/* Todo Downloader — {rotulo} — By Eric V. Gramunt
+   {donde} https://www.tiktok.com/@usuario (F12 → {consola}) */
 (() => {{
 {sender}
 const items = new Map();
@@ -265,7 +380,7 @@ try {{
 (async () => {{
     const hud = tdHud();
     hud.sub('Desplazando el perfil…');
-    console.log('[TD] Captura iniciada — sigue el progreso en el panel de la esquina');
+    console.log('[TD]', T.iniciada);
     let idle = 0, last = 0;
     window.__tdStop = false;
     while (!window.__tdStop && idle < 8) {{
@@ -276,25 +391,25 @@ try {{
             // Diagnóstico: distingue «no llegan respuestas» de «llegan pero no
             // se extrae nada». Sin esto era imposible saber qué falla.
             hud.msg(diag.hits === 0
-                ? `Sin respuestas de la API (${{idle}}/8) — ¿scroll bloqueado o login?`
-                : `API: ${{diag.hits}} · analizados: ${{diag.scanned}} · sin URL: ${{diag.noUrl}} (${{idle}}/8)`);
+                ? `${{T.sinApi}} (${{idle}}/8) — ${{T.scrollBloqueado}}`
+                : `API: ${{diag.hits}} · ${{T.analizados}}: ${{diag.scanned}} · ${{T.sinUrl}}: ${{diag.noUrl}} (${{idle}}/8)`);
         }} else {{
             idle = 0;
             last = items.size;
-            hud.msg(`API: ${{diag.hits}} · capturados: ${{diag.added}}`);
+            hud.msg(`API: ${{diag.hits}} · ${{T.capturados}}: ${{diag.added}}`);
         }}
         hud.n(items.size);
     }}
     const arr = [...items.values()];
     window.__tdItems = arr;   // lo usa el botón «💾 Guardar JSON»
-    console.log('[TD] Diagnóstico:', diag);
+    console.log('[TD]', T.diagnostico, diag);
     if (!arr.length) {{
         hud.done(0, false, diag.hits === 0
-            ? 'La API no respondió: inicia sesión y recarga el perfil'
-            : `Respuestas recibidas (${{diag.hits}}) pero sin enlaces utilizables`);
+            ? T.apiNoResp
+            : `${{T.respRecibidas}} (${{diag.hits}}) ${{T.sinUtiles}}`);
         return;
     }}
-    hud.sub('Enviando…');
+    hud.sub(T.enviando);
     if (!(await tdSend(arr, hud))) tdFallbackCopy(arr, hud);
 }})();
 }})();
@@ -306,9 +421,12 @@ try {{
 /// Script para perfiles de Douyin — vídeos e imágenes (API directa, como el
 /// script original que ya funciona: Douyin no firma estas peticiones)
 pub fn douyin(port: u16) -> String {
+    let rotulo = m("Capturador de Douyin (vídeos + imágenes)", "Douyin capturer (videos + images)");
+    let donde = m("Ejecutar en", "Run this on");
+    let consola = m("Consola", "Console");
     format!(
-        r#"/* Todo Downloader — Capturador de Douyin (vídeos + imágenes) — By Eric V. Gramunt
-   Ejecutar en https://www.douyin.com/user/... (F12 → Consola) */
+        r#"/* Todo Downloader — {rotulo} — By Eric V. Gramunt
+   {donde} https://www.douyin.com/user/... (F12 → {consola}) */
 (() => {{
 {sender}
 const SEC = location.pathname.replace('/user/', '').split('?')[0];
@@ -384,12 +502,12 @@ function collect(aw) {{
 
 (async () => {{
     if (!SEC || !location.pathname.includes('/user/')) {{
-        alert('Todo Downloader: ejecuta esto en una página de perfil de Douyin (/user/...)');
+        alert(T.ejecutaDouyin);
         return;
     }}
     const hud = tdHud();
-    hud.sub('Leyendo publicaciones…');
-    console.log('[TD] Captura iniciada — sigue el progreso en el panel de la esquina');
+    hud.sub(T.leyendo);
+    console.log('[TD]', T.iniciada);
 
     let cursor = 0, more = true, fails = 0, pages = 0;
     window.__tdStop = false;
@@ -398,7 +516,7 @@ function collect(aw) {{
             const d = await api(cursor);
             if (!d || !d.aweme_list) {{
                 fails++;
-                hud.msg(`Respuesta vacía, reintentando (${{fails}}/5)`);
+                hud.msg(`${{T.vacia}} (${{fails}}/5)`);
                 await new Promise(r => setTimeout(r, 2000));
                 continue;
             }}
@@ -408,18 +526,18 @@ function collect(aw) {{
             more = d.has_more === 1;
             cursor = d.max_cursor;
             hud.n(items.length);
-            hud.lbl('archivos');
-            hud.msg(`${{posts.size}} publicaciones · ${{vids}} vídeos · ${{imgs}} imágenes`);
+            hud.lbl(T.archivos);
+            hud.msg(`${{posts.size}} ${{T.publicaciones}} · ${{vids}} ${{T.videos}} · ${{imgs}} ${{T.imagenes}}`);
             await new Promise(r => setTimeout(r, 1500));
         }} catch (e) {{
             fails++;
-            hud.msg(`Reintentando (${{fails}}/5)…`);
+            hud.msg(`${{T.reintentando}} (${{fails}}/5)…`);
             await new Promise(r => setTimeout(r, 3000));
         }}
     }}
-    hud.sub('Enviando…');
+    hud.sub(T.enviando);
     window.__tdItems = items;   // lo usa el botón «💾 Guardar JSON»
-    const resumen = `${{posts.size}} publicaciones → ${{vids}} vídeos + ${{imgs}} imágenes`;
+    const resumen = `${{posts.size}} ${{T.publicaciones}} → ${{vids}} ${{T.videos}} + ${{imgs}} ${{T.imagenes}}`;
     if (await tdSend(items, hud)) {{
         hud.msg(resumen);
     }} else {{
@@ -453,7 +571,7 @@ pub fn v2ph(port: u16) -> String {
         r#"{cabecera}
 (async () => {{
     const hud = tdHud();
-    hud.msg('Analizando la página…');
+    hud.msg(T.analizandoPag);
 
     const RETARDO = 900;      // ms entre páginas: el navegador también es un cliente
     const MAX_ALBUMES = 12;   // tope al recorrer un listado
@@ -511,7 +629,7 @@ pub fn v2ph(port: u16) -> String {
         for (const u of fotosDe(doc1)) if (!vistas.has(u)) {{ vistas.add(u); fotos.push(u); }}
 
         for (let p = 2; p <= ultima; p++) {{
-            aviso(`${{titulo.slice(0, 40)}} — página ${{p}}/${{ultima}} (${{fotos.length}} fotos)`);
+            aviso(`${{titulo.slice(0, 40)}} — ${{T.pagina}} ${{p}}/${{ultima}} (${{fotos.length}} ${{T.fotos}})`);
             await dormir(RETARDO);
             let doc;
             try {{ doc = await pedir(base.split('?')[0] + '?page=' + p); }}
@@ -546,24 +664,24 @@ pub fn v2ph(port: u16) -> String {
                     .map(a => a.href.split('?')[0])
             )].slice(0, MAX_ALBUMES);
 
-            if (!enlaces.length) throw new Error('No se ven álbumes en esta página');
-            hud.msg(`${{enlaces.length}} álbumes en esta página`);
+            if (!enlaces.length) throw new Error(T.sinAlbumes);
+            hud.msg(`${{enlaces.length}} ${{T.albumesPag}}`);
 
             for (let k = 0; k < enlaces.length; k++) {{
-                hud.msg(`Álbum ${{k + 1}}/${{enlaces.length}}…`);
+                hud.msg(`${{T.album}} ${{k + 1}}/${{enlaces.length}}…`);
                 try {{
                     items = items.concat(await album(enlaces[k], m => hud.msg(`[${{k + 1}}/${{enlaces.length}}] ${{m}}`)));
                 }} catch (e) {{
-                    console.warn('[TD] álbum omitido:', e.message);
+                    console.warn('[TD]', T.albumOmitido, e.message);
                 }}
                 hud.n(items.length);
                 await dormir(RETARDO);
             }}
         }} else {{
-            throw new Error('Abre un álbum o la página de una modelo/agencia');
+            throw new Error(T.abreAlbum);
         }}
 
-        if (!items.length) throw new Error('No se ha encontrado ninguna foto');
+        if (!items.length) throw new Error(T.sinFotos);
         hud.n(items.length);
 
         const ok = await tdSend(items, hud);
@@ -576,4 +694,269 @@ pub fn v2ph(port: u16) -> String {
 "#,
         cabecera = sender(port)
     )
+}
+
+// ============================================================================
+//  Captura de un post suelto (Douyin y TikTok)
+// ============================================================================
+
+/// Cuerpo compartido del capturador de un post suelto.
+///
+/// POR QUÉ NO SE LLAMA A LA API: la de Douyin va firmada (X-Bogus, msToken) y
+/// pedirla desde fuera devuelve vacío. El capturador de perfiles lo esquiva
+/// interceptando las respuestas mientras haces scroll, pero para un post ya
+/// abierto esa respuesta YA PASÓ. Así que se lee lo que la página tiene
+/// delante, que además resultó ser más completo de lo esperado.
+///
+/// CÓMO SE IDENTIFICAN LAS DIAPOSITIVAS, medido sobre el DOM real de Douyin:
+///
+/// Cada diapositiva se pinta dos veces. Una pequeña y centrada, que es la que
+/// se ve, y otra a ANCHO COMPLETO por detrás, desenfocada, que hace de fondo.
+/// El visor es un feed vertical de posts y cada uno ocupa una franja:
+///
+/// ```text
+///     2100x415 @ (0, -415)     post anterior
+///     2100x415 @ (0, 0)        ESTE post, diapositiva 1
+///     2100x415 @ (2100, 0)     ESTE post, diapositiva 2
+///     2100x415 @ (0, +415)     post siguiente
+/// ```
+///
+/// Las diapositivas de un mismo post comparten `top` y se separan en `left`;
+/// los posts distintos se separan en `top`. Con eso se identifica el post
+/// entero sin depender de nombres de clase (ofuscados), sin pulsar flechas y
+/// sin esperar a que cargue nada: ya está todo en la página.
+///
+/// Lo que hubo antes —recorrer el carrusel a golpe de clic— nunca funcionó:
+/// el botón no se encontraba porque su clase cambia en cada despliegue, y
+/// aunque se hubiera encontrado habría sido dar un rodeo para llegar a algo
+/// que ya estaba ahí. Se descubrió volcando el DOM en vez de suponiéndolo.
+///
+/// LOS VÍDEOS NO SE EXTRAEN. En un post de vídeo el `<video>` expone un
+/// `blob:` de Media Source Extensions, que solo existe dentro de esa pestaña.
+/// Y lo que SÍ tiene URL en la página es la música (`ies-music/….mp3`) y los
+/// vídeos de otros posts del feed: cogerlos sería descargar cualquier cosa
+/// menos lo que se pidió. Se le pasa el post a yt-dlp, que para eso está.
+///
+/// LA CALIDAD NO SE RESUELVE AQUÍ. Douyin sirve el `~noop` —el original sin
+/// marca de agua ni recompresión— directamente en el DOM, así que se coge tal
+/// cual. Y para lo que no lo traiga, `quality_variants()` en la aplicación ya
+/// lo intenta. Repetir esa lógica en JavaScript sería tener dos sitios donde
+/// equivocarse.
+///
+/// Los comentarios DENTRO del script van en inglés y son cortos a propósito:
+/// es un archivo que el usuario pega en su navegador, no código que nadie
+/// vaya a mantener desde ahí. El razonamiento vive aquí, que es donde se lee.
+fn post_core() -> &'static str {
+    r#"
+const TD_IMG = /(douyinpic|byteimg|ibyteimg|tiktokcdn|bytecdn)\.com\//i;
+
+// Post id, from the URL.
+function tdPostId() {
+    const u = new URL(location.href);
+    const modal = u.searchParams.get('modal_id');
+    if (modal) return modal;
+    const m = u.pathname.match(/\/(?:note|video|photo)\/(\d+)/);
+    return m ? m[1] : '';
+}
+
+// Key for one photo, ignoring the CDN processing: `~noop` and `~tplv-…` of the
+// same original share this prefix.
+function tdBase(u) {
+    const i = u.indexOf('~');
+    return (i > 0 ? u.slice(0, i) : u.split('?')[0]);
+}
+
+// Slides of the open post. Each slide is painted twice: small and centred (the
+// one you see) and full width behind it, blurred. Slides of one post share
+// `top` and differ in `left`; different posts differ in `top`. `~noop` is the
+// unprocessed original and is preferred when present.
+function tdSlides() {
+    const anchos = [];
+    for (const img of document.querySelectorAll('img')) {
+        const u = img.currentSrc || img.src || '';
+        if (!u || !TD_IMG.test(u)) continue;
+        const r = img.getBoundingClientRect();
+        if (r.width < innerWidth * 0.85) continue;
+        anchos.push({ u, top: r.top, alto: r.height });
+    }
+    if (!anchos.length) return { urls: [] };
+
+    const cy = innerHeight / 2;
+    let ref = anchos.find(o => o.top <= cy && o.top + o.alto >= cy);
+    if (!ref) {
+        ref = anchos.reduce((a, b) =>
+            Math.abs(a.top + a.alto / 2 - cy) < Math.abs(b.top + b.alto / 2 - cy) ? a : b);
+    }
+    const tol = Math.max(20, ref.alto * 0.3);
+
+    const porFoto = new Map();
+    for (const o of anchos) {
+        if (Math.abs(o.top - ref.top) > tol) continue;
+        const b = tdBase(o.u);
+        const previa = porFoto.get(b);
+        if (!previa || (o.u.indexOf('~noop') >= 0 && previa.indexOf('~noop') < 0)) {
+            porFoto.set(b, o.u);
+        }
+    }
+    return { urls: [...porFoto.values()] };
+}
+
+// Is the centre of the window a video player?
+function tdEsVideo() {
+    const el = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (el && el.tagName === 'VIDEO') return true;
+    for (const v of document.querySelectorAll('video')) {
+        const r = v.getBoundingClientRect();
+        if (r.width > innerWidth * 0.15 && r.height > innerHeight * 0.3
+            && r.top < innerHeight / 2 && r.bottom > innerHeight / 2) return true;
+    }
+    return false;
+}
+
+// Author and title, for the subfolder and the file name.
+function tdMeta() {
+    const t = (document.title || '').replace(/\s*[-|]\s*(抖音|TikTok).*$/, '').trim();
+    const a = document.querySelector('[class*="account-name"],[data-e2e="user-title"],h1');
+    return { autor: (a && a.textContent.trim()) || location.hostname.replace(/^www\./, ''),
+             titulo: t.slice(0, 80) };
+}
+
+async function tdCapturarPost(modo) {
+    const hud = tdHud();
+    const id = tdPostId();
+    if (!id) { hud.done(0, false, T.postSinId); return; }
+
+    hud.lbl(T.archivos);
+    hud.msg(T.postBuscando);
+
+    const meta = tdMeta();
+    const canon = h => (location.hostname.indexOf('tiktok') >= 0
+        ? 'https://www.tiktok.com/@' + encodeURIComponent(meta.autor) + '/' + h + '/' + id
+        : 'https://www.douyin.com/' + h + '/' + id);
+
+    // Video post: the player exposes only a `blob:`, unusable outside this tab.
+    // The post URL goes to the application and yt-dlp resolves it. The blurred
+    // backdrop is the poster and serves as the thumbnail.
+    if (tdEsVideo()) {
+        const portada = (tdSlides().urls || [])[0] || '';
+        const item = [{ id: id, author: meta.autor, title: meta.titulo,
+                        url: canon('video'), pageUrl: canon('video'), thumb: portada }];
+        window.__tdItems = item;
+        hud.n(1);
+        hud.msg(T.postAytdlp);
+        if (!(await tdSend(item, hud, modo))) tdFallbackCopy(item, hud);
+        return;
+    }
+
+    const r = tdSlides();
+    if (!r.urls.length) { hud.done(0, false, T.postNada); return; }
+
+    const pagina = canon('note');
+    const items = r.urls.map((u, i) => ({
+        id: id + '_' + String(i + 1).padStart(2, '0'),
+        author: meta.autor,
+        title: meta.titulo,
+        url: u,
+        pageUrl: pagina,
+        thumb: u
+    }));
+
+    window.__tdItems = items;
+    hud.n(items.length);
+    hud.msg(items.length + ' ' + T.imagenes);
+    if (!(await tdSend(items, hud, modo))) tdFallbackCopy(items, hud);
+}
+
+"#
+}
+
+/// Userscript para Tampermonkey o Violentmonkey.
+///
+/// POR QUÉ ES LA VÍA BUENA EN CHROME Y VIVALDI: `GM_xmlhttpRequest` corre en
+/// el contexto de la extensión, que no está sujeta a Private Network Access.
+/// Una página normal —y por tanto un bookmarklet— no puede hablar con
+/// `127.0.0.1` en los navegadores basados en Chromium.
+pub fn userscript(port: u16) -> String {
+    let nucleo = post_core();
+    let envio = sender(port);
+    let boton = m("Capturar este post", "Capture this post");
+    let rotulo = m("captura de un post", "single post capture");
+    let descripcion = m(
+        "Añade un botón para enviar las fotos o el vídeo del post abierto a Todo Downloader",
+        "Adds a button to send the photos or the video of the open post to Todo Downloader",
+    );
+    format!(
+        r#"// ==UserScript==
+// @name         Todo Downloader — {rotulo}
+// @namespace    https://github.com/AcidClawX41/todo-downloader
+// @version      1.1
+// @description  {descripcion}
+// @match        https://www.douyin.com/*
+// @match        https://www.tiktok.com/*
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @run-at       document-idle
+// ==/UserScript==
+(() => {{
+'use strict';
+{envio}
+{nucleo}
+
+// Botón flotante. Se pinta siempre y se activa solo cuando hay un post
+// abierto: en Douyin y TikTok la navegación no recarga la página, así que
+// mirar la URL una vez al cargar no serviría de nada.
+const b = document.createElement('button');
+b.textContent = '⬇ {boton}';
+b.style.cssText = [
+    'position:fixed','right:18px','bottom:18px','z-index:2147483646',
+    'padding:10px 14px','border:0','border-radius:10px',
+    'background:#FE2C55','color:#fff','font:13px/1 sans-serif',
+    'cursor:pointer','box-shadow:0 6px 24px rgba(0,0,0,.45)','display:none'
+].join(';');
+b.onclick = () => tdCapturarPost('post');
+document.body.appendChild(b);
+
+setInterval(() => {{ b.style.display = tdPostId() ? 'block' : 'none'; }}, 800);
+}})();
+"#
+    )
+}
+
+/// Bookmarklet: una sola línea `javascript:` para arrastrar a la barra.
+///
+/// LO QUE NO PUEDE HACER: corre dentro de la página, así que en Chrome y
+/// Vivaldi choca con Private Network Access y no alcanza a `127.0.0.1`. Ahí
+/// cae al respaldo de siempre —portapapeles y botón de guardar JSON—, que
+/// funciona en todas partes. En Firefox llega directo a la aplicación.
+pub fn bookmarklet(port: u16) -> String {
+    let cuerpo = format!("{}\n{}\ntdCapturarPost('post');", sender(port), post_core());
+
+    // Un bookmarklet es una URL: los comentarios de línea se comerían todo lo
+    // que viniera detrás, y hay que codificar lo que no es seguro en una URL.
+    let sin_comentarios: String = cuerpo
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("//") || t.starts_with("*") || t.starts_with("/*") { "" } else { l }
+        })
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let escapado: String = sin_comentarios
+        .chars()
+        .map(|c| match c {
+            '%' => "%25".into(),
+            '"' => "%22".into(),
+            '#' => "%23".into(),
+            '&' => "%26".into(),
+            '+' => "%2B".into(),
+            '?' => "%3F".into(),
+            ' ' => "%20".into(),
+            '\n' => "%0A".into(),
+            _ => c.to_string(),
+        })
+        .collect();
+
+    format!("javascript:(()=>{{{escapado}}})();")
 }

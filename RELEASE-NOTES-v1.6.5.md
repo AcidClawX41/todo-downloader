@@ -2,8 +2,9 @@
 
 **Hotfix: audio and video were not being merged outside Windows**
 
-A patch on top of v1.6.2. See `RELEASE-NOTES-v1.6.2.md` for that release, and
-`RELEASE-NOTES-v1.6.0.md` for the MEGA.nz engine and the preview grids.
+A patch on top of v1.6.2. Notes for that release and for v1.6.0 — the MEGA.nz
+engine and the preview grids — are published on the
+[Releases page](https://github.com/AcidClawX41/todo-downloader/releases).
 
 ---
 

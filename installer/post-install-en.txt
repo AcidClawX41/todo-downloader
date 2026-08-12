@@ -1,0 +1,51 @@
+﻿Todo Downloader
+===============
+
+BEFORE YOU START
+
+Direct links, MEGA, file hosts and BitTorrent work straight away: those
+engines are compiled into the application itself.
+
+For video and gallery sites you need two helpers, and the application
+downloads them for you from Settings:
+
+  - yt-dlp      video pages (YouTube, TikTok, Bilibili, 1000+ sites)
+  - gallery-dl  galleries and profiles
+  - ffmpeg      merges video and audio, needed for anything above 720p
+                on YouTube and for Bilibili at all
+
+They are not bundled on purpose: yt-dlp in particular is updated constantly
+because the sites it supports keep changing, and a copy frozen inside this
+installer would stop working on YouTube within weeks.
+
+SESSIONS
+
+Instagram, Weibo, Douyin, private profiles and age-restricted content need
+your browser session. Settings -> Browser cookies, or point the application
+at a cookies.txt exported with a browser extension. Without a session, only
+direct links and public YouTube are reliable.
+
+MAGNET LINKS
+
+If you want magnet: links to open in Todo Downloader, enable it from
+Settings. It is not done during installation because it changes a protocol
+association on your system, and that should be your decision, not the
+installer's.
+
+WHAT THIS UNINSTALLER WILL NOT DELETE
+
+Your downloads and your settings. Settings live in your user profile and are
+left alone, so reinstalling keeps your configuration.
+
+ANIMATED GIFS
+
+The "tips" folder next to the executable can hold .gif files shown in the
+support tab. It ships empty with only a README: those GIFs would be
+third-party material and are not distributed with the application.
+
+---
+
+Source code, issues and releases:
+https://github.com/AcidClawX41/todo-downloader
+
+GPL-3.0-or-later. (c) 2026 Eric V. Gramunt

@@ -28,10 +28,32 @@ pub struct Incoming {
     pub thumb: String,
 }
 
+/// A dónde quiere el script que vayan los enlaces que manda.
+///
+/// POR QUÉ LO DECIDE EL SCRIPT Y NO SOLO LA APP: capturar un perfil entero y
+/// capturar un post suelto son gestos distintos. Del perfil quieres todo; del
+/// post sueles querer elegir. El script sabe cuál de los dos hizo el usuario,
+/// la aplicación no. `Auto` deja la última palabra al ajuste, que es lo que
+/// reciben el texto plano y los scripts antiguos que no mandan nada.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Destino {
+    /// Texto plano o scripts antiguos que no dicen nada: a la cola.
+    #[default]
+    Auto,
+    /// Captura de un POST suelto. El script no dice a dónde va, solo QUÉ es;
+    /// el destino lo decide el ajuste de la aplicación. Así cambiar de idea no
+    /// obliga a reinstalar el userscript en el navegador.
+    Post,
+    /// Forzar cola
+    Cola,
+    /// Forzar rejilla de selección
+    Seleccion,
+}
+
 /// Lo que el receptor puede entregarle a la aplicación.
 pub enum Recibido {
     /// Enlaces capturados por el script del navegador
-    Enlaces(Vec<Incoming>),
+    Enlaces(Vec<Incoming>, Destino),
     /// User-Agent del navegador que visitó `/ua`.
     ///
     /// POR QUÉ AQUÍ: la aplicación no puede preguntarle su User-Agent al
@@ -59,7 +81,7 @@ where
                 continue;
             }
             match handle(stream) {
-                Some(Recibido::Enlaces(items)) if items.is_empty() => {}
+                Some(Recibido::Enlaces(items, _)) if items.is_empty() => {}
                 Some(r) => on_items(r),
                 None => {}
             }
@@ -128,9 +150,9 @@ fn handle(mut stream: TcpStream) -> Option<Recibido> {
     }
     let body = String::from_utf8_lossy(&buf[head_len..]).to_string();
 
-    let items = parse_body(&body);
+    let (items, destino) = parse_body(&body);
     let _ = respond(stream, 200, &format!("{} accepted", items.len()));
-    Some(Recibido::Enlaces(items))
+    Some(Recibido::Enlaces(items, destino))
 }
 
 /// Valor de una cabecera, sin distinguir mayúsculas.
@@ -197,11 +219,18 @@ fn content_length(head: &str) -> Option<usize> {
         .and_then(|v| v.trim().parse().ok())
 }
 
-/// Acepta JSON `{items:[{url,author,title,pageUrl,id}]}` o texto plano con una URL por línea
-fn parse_body(body: &str) -> Vec<Incoming> {
+/// Acepta JSON `{items:[{url,author,title,pageUrl,id}], mode:"select"|"queue"}`
+/// o texto plano con una URL por línea.
+fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
     let mut out = Vec::new();
 
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let destino = match v.get("mode").and_then(|x| x.as_str()) {
+            Some("post") => Destino::Post,
+            Some("select") => Destino::Seleccion,
+            Some("queue") => Destino::Cola,
+            _ => Destino::Auto,
+        };
         if let Some(arr) = v.get("items").and_then(|x| x.as_array()) {
             for it in arr {
                 let g = |k: &str| it.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -223,7 +252,7 @@ fn parse_body(body: &str) -> Vec<Incoming> {
                     thumb,
                 });
             }
-            return out;
+            return (out, destino);
         }
     }
 
@@ -241,7 +270,7 @@ fn parse_body(body: &str) -> Vec<Incoming> {
             });
         }
     }
-    out
+    (out, Destino::Auto)
 }
 
 /// Enlaces aceptados: http(s) para descargas normales y `magnet:` para
