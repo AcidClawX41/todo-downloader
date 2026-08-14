@@ -26,6 +26,10 @@ todo-downloader-banner-*.png
 
 # Release descriptions: they go in the GitHub Releases page, not in the repo.
 GITHUB-RELEASE-TEXT-*.md
+COMMIT-*.txt
+
+# Architecture decision records: reasoning kept locally, not published.
+ADR-*.md
 
 # Internal working notes: implementation reasoning, not user documentation.
 # Kept locally, never published.

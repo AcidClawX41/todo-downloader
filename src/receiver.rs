@@ -26,6 +26,19 @@ pub struct Incoming {
     pub id: String,
     /// URL de la portada (opcional): se usa solo para la miniatura de la cola
     pub thumb: String,
+    /// Dimensiones reales del archivo, cuando el sitio las publica en su API.
+    ///
+    /// POR QUÉ VIENEN DEL SCRIPT: la aplicación sabe medir una imagen cuando la
+    /// descarga, pero la miniatura que se descarga para la rejilla es la copia
+    /// PEQUEÑA a propósito. Medirla daría «320×400» junto a un archivo de
+    /// 1440×1800. El único sitio donde consta el tamaño del original es la
+    /// respuesta de la API, y ahí solo llega el script. Cero significa
+    /// «desconocido», y entonces sí se mide la miniatura.
+    pub w: u32,
+    pub h: u32,
+    /// El script ya sabe si el archivo es un vídeo. Deducirlo de la extensión
+    /// falla en los CDN que no la llevan en la ruta.
+    pub is_video: bool,
 }
 
 /// A dónde quiere el script que vayan los enlaces que manda.
@@ -65,15 +78,21 @@ pub enum Recibido {
 }
 
 /// Arranca el receptor. `on_items` se invoca con cada cosa recibida.
-pub fn spawn<F>(port: u16, enabled: Arc<AtomicBool>, on_items: F)
+///
+/// EL BIND SE HACE AQUÍ Y NO DENTRO DEL HILO, y el error se devuelve. Antes se
+/// hacía dentro y un puerto ocupado terminaba en `return`, en silencio: la
+/// pestaña Capturar seguía diciendo «Receptor escuchando en 127.0.0.1:9777»
+/// porque ese rótulo solo miraba la casilla de ajustes, no si había alguien
+/// escuchando de verdad. El síntoma era desconcertante —el script capturaba
+/// bien y luego «no se encuentra la app»— y no había nada en ninguna parte que
+/// dijera por qué. Basta con tener dos copias del programa abiertas: la segunda
+/// pierde el puerto y no se entera nadie.
+pub fn spawn<F>(port: u16, enabled: Arc<AtomicBool>, on_items: F) -> std::io::Result<()>
 where
     F: Fn(Recibido) + Send + 'static,
 {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
     std::thread::spawn(move || {
-        let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-            Ok(l) => l,
-            Err(_) => return, // puerto ocupado: el resto de la app sigue funcionando
-        };
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             if !enabled.load(Ordering::Relaxed) {
@@ -87,6 +106,7 @@ where
             }
         }
     });
+    Ok(())
 }
 
 /// Lee la petición, responde y devuelve los enlaces si era un POST válido
@@ -243,6 +263,14 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                     let t = g("thumb");
                     if is_http(&t) { t } else { String::new() }
                 };
+                // Ausentes en los scripts antiguos y en el texto plano: cero y
+                // falso son exactamente lo que la aplicación ya sabía manejar.
+                let n = |k: &str| {
+                    it.get(k)
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0)
+                        .min(u32::MAX as u64) as u32
+                };
                 out.push(Incoming {
                     url,
                     author: g("author"),
@@ -250,6 +278,9 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                     page_url: g("pageUrl"),
                     id: g("id"),
                     thumb,
+                    w: n("w"),
+                    h: n("h"),
+                    is_video: it.get("video").and_then(|x| x.as_bool()).unwrap_or(false),
                 });
             }
             return (out, destino);
@@ -267,6 +298,9 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                 page_url: String::new(),
                 id: String::new(),
                 thumb: String::new(),
+                w: 0,
+                h: 0,
+                is_video: false,
             });
         }
     }
@@ -308,4 +342,48 @@ fn respond(mut stream: TcpStream, code: u16, body: &str) -> std::io::Result<()> 
     );
     stream.write_all(resp.as_bytes())?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lee_dimensiones_y_tipo_del_script() {
+        let body = r#"{"mode":"select","items":[
+            {"url":"https://scontent.cdninstagram.com/v/a.jpg","w":1440,"h":1800,"video":false,
+             "author":"alguien","id":"1","thumb":"https://scontent.cdninstagram.com/v/s.jpg"},
+            {"url":"https://scontent.cdninstagram.com/v/b.mp4","w":1080,"h":1920,"video":true,"id":"2"}
+        ]}"#;
+        let (v, d) = parse_body(body);
+        assert_eq!(d, Destino::Seleccion);
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].w, v[0].h), (1440, 1800));
+        assert!(!v[0].is_video);
+        // Un .mp4 de Meta no lleva extensión reconocible en muchos casos: el
+        // dato bueno es el que manda el script, no el que deduce la aplicación.
+        assert!(v[1].is_video);
+        assert_eq!((v[1].w, v[1].h), (1080, 1920));
+    }
+
+    #[test]
+    fn los_scripts_antiguos_siguen_funcionando() {
+        // Sin `w`, `h` ni `video`: cero y falso, que es lo que la rejilla ya
+        // interpretaba como «mide tú la miniatura».
+        let (v, d) = parse_body(r#"{"items":[{"url":"https://e.com/a.jpg","author":"x"}]}"#);
+        assert_eq!(d, Destino::Auto);
+        assert_eq!((v[0].w, v[0].h, v[0].is_video), (0, 0, false));
+
+        let (v, _) = parse_body("https://e.com/b.jpg\nno-es-una-url\n");
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].w, v[0].h, v[0].is_video), (0, 0, false));
+    }
+
+    #[test]
+    fn un_tamano_absurdo_no_desborda() {
+        // `as u32` sobre un u64 gigante truncaría a un número cualquiera. El
+        // cuerpo llega de un script del navegador: es entrada externa.
+        let (v, _) = parse_body(r#"{"items":[{"url":"https://e.com/a.jpg","w":99999999999,"h":1}]}"#);
+        assert_eq!(v[0].w, u32::MAX);
+    }
 }

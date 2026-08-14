@@ -260,7 +260,7 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
                 d.chars().take(160).collect()
             },
             date: text(meta, &["date", "created_at", "post_date"]),
-            post_url: text(meta, &["post_url", "url", "permalink"]),
+            post_url: post_url_de(meta),
             thumb_url: {
                 // Se prefiere una portada explícita: bajar el original a tamaño
                 // completo solo para previsualizar 30 elementos es tirar ancho
@@ -285,6 +285,33 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
     Ok(Listing { items: out, queued })
 }
 
+/// URL de la PUBLICACIÓN, que es la red de seguridad cuando el enlace directo
+/// del CDN caduca: `download_task` reintenta desde aquí con gallery-dl.
+///
+/// EL CASO DE FACEBOOK: su extractor no publica `post_url` ni `permalink`, y
+/// su clave `url` es el propio enlace de `fbcdn.net`. Con la búsqueda genérica,
+/// `post_url` acababa siendo el enlace del CDN, así que el respaldo reintentaba
+/// exactamente la URL que acababa de caducar: existía en el código y no servía
+/// de nada. Sí publica el `id` de la foto, y la página es
+/// `facebook.com/photo/?fbid=<id>`, así que se reconstruye.
+///
+/// Sin esto, explorar Facebook sería una trampa: la rejilla se llenaría y la
+/// mitad de las descargas fallaría media hora después sin salida.
+fn post_url_de(meta: &Value) -> String {
+    let directa = text(meta, &["post_url", "permalink"]);
+    if !directa.is_empty() {
+        return directa;
+    }
+    if text(meta, &["category"]) == "facebook" {
+        let id = text(meta, &["id"]);
+        if !id.is_empty() {
+            return format!("https://www.facebook.com/photo/?fbid={id}");
+        }
+    }
+    // El resto de extractores sí usan `url` como enlace de la publicación.
+    text(meta, &["url"])
+}
+
 /// ¿Este sitio se puede explorar antes de descargar?
 ///
 /// Se limita a los extractores donde el listado por metadatos está probado y
@@ -292,7 +319,25 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
 /// correcto. No es una lista de «sitios soportados por gallery-dl»: es una
 /// lista de sitios donde este flujo concreto funciona.
 pub fn is_browsable(host: &str) -> bool {
-    const SITES: &[&str] = &["instagram.com", "weibo.com", "weibo.cn"];
+    const SITES: &[&str] = &[
+        "instagram.com",
+        "weibo.com",
+        "weibo.cn",
+        // X: el listado trae `width`, `height` y la URL de `pbs.twimg.com`
+        // con `name=orig`, que es el original. Su CDN de medios es PÚBLICO:
+        // el enlace se baja después sin sesión, que es justo lo que este
+        // flujo necesita. La sesión hace falta para LISTAR, no para bajar.
+        "x.com",
+        "twitter.com",
+        // Bluesky: `cdn.bsky.app` también es público y sin firmar.
+        "bsky.app",
+        // Facebook es el caso delicado: sus enlaces de `fbcdn.net` van
+        // firmados y caducan. Se explora igualmente porque el respaldo por
+        // URL de publicación SÍ funciona —ver `post_url_de`—, así que una
+        // foto cuyo enlace haya muerto se vuelve a resolver desde su página
+        // en vez de quedarse en un error sin salida.
+        "facebook.com",
+    ];
     SITES
         .iter()
         .any(|s| host == *s || host.ends_with(&format!(".{s}")))
@@ -301,6 +346,37 @@ pub fn is_browsable(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn se_exploran_los_sitios_con_cdn_publico() {
+        assert!(is_browsable("www.instagram.com"));
+        assert!(is_browsable("x.com"));
+        assert!(is_browsable("twitter.com"));
+        assert!(is_browsable("bsky.app"));
+        assert!(is_browsable("www.facebook.com"));
+        // Y el impostor de siempre
+        assert!(!is_browsable("x.com.atacante.net"));
+    }
+
+    /// Sin esto, el respaldo de Facebook reintentaría el enlace de CDN que
+    /// acaba de caducar, porque su extractor no publica la URL del post.
+    #[test]
+    fn facebook_reconstruye_la_url_de_la_publicacion() {
+        let meta: Value = serde_json::from_str(
+            r#"{"category":"facebook","id":"123456","url":"https://scontent.fbcdn.net/v/foto.jpg?oh=x&oe=y"}"#,
+        )
+        .unwrap();
+        assert_eq!(post_url_de(&meta), "https://www.facebook.com/photo/?fbid=123456");
+    }
+
+    #[test]
+    fn el_resto_de_sitios_conserva_su_url_de_publicacion() {
+        let meta: Value = serde_json::from_str(
+            r#"{"category":"instagram","post_url":"https://www.instagram.com/p/ABC/"}"#,
+        )
+        .unwrap();
+        assert_eq!(post_url_de(&meta), "https://www.instagram.com/p/ABC/");
+    }
 
     #[test]
     fn list_args_no_descarga_y_pagina() {

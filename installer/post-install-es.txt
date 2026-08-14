@@ -27,6 +27,14 @@ restricción de edad necesitan la sesión de tu navegador. Ajustes -> Cookies
 del navegador, o indícale un cookies.txt exportado con una extensión. Sin
 sesión, solo son fiables los enlaces directos y YouTube público.
 
+PERFILES DE DOUYIN Y THREADS
+
+No los lista ningún extractor, así que se leen desde tu propio navegador. La
+pestaña Capturar te da un script; instalarlo como userscript (Tampermonkey o
+Violentmonkey) es la mejor vía, y en Threads es la recomendada. Lo capturado
+vuelve a la pestaña Perfil, con vista previa, para que elijas qué bajar. No
+se envía nada a ningún sitio salvo a la aplicación, en 127.0.0.1.
+
 ENLACES MAGNET
 
 Si quieres que los enlaces magnet: se abran con Todo Downloader, actívalo
@@ -38,6 +46,11 @@ QUÉ NO BORRA EL DESINSTALADOR
 
 Tus descargas y tu configuración. Los ajustes viven en tu perfil de usuario y
 se dejan intactos, así que si reinstalas conservas tu configuración.
+
+Los programas auxiliares tampoco se borran. Están en
+%LOCALAPPDATA%\TodoDownloader\bin y los comparte cualquier copia portable de
+Todo Downloader, así que quitarlos aquí rompería esa copia. Borra esa carpeta
+a mano si quieres recuperar el espacio.
 
 GIFS ANIMADOS
 

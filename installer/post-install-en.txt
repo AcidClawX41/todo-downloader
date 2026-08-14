@@ -25,6 +25,15 @@ your browser session. Settings -> Browser cookies, or point the application
 at a cookies.txt exported with a browser extension. Without a session, only
 direct links and public YouTube are reliable.
 
+DOUYIN AND THREADS PROFILES
+
+No extractor lists them, so they are read from inside your own browser. The
+Capture tab gives you a script; installing it as a userscript (Tampermonkey
+or Violentmonkey) is the better route, and on Threads it is the recommended
+one. What it captures comes back into the Profile tab, with previews, so you
+pick what to download. Nothing is sent anywhere except to the application on
+127.0.0.1.
+
 MAGNET LINKS
 
 If you want magnet: links to open in Todo Downloader, enable it from
@@ -37,6 +46,11 @@ WHAT THIS UNINSTALLER WILL NOT DELETE
 Your downloads and your settings. Settings live in your user profile and are
 left alone, so reinstalling keeps your configuration.
 
+The helper engines are not deleted either. They live in
+%LOCALAPPDATA%\TodoDownloader\bin and are shared with any portable copy of
+Todo Downloader, so removing them here would break that copy. Delete that
+folder by hand if you want the disk space back.
+
 ANIMATED GIFS
 
 The "tips" folder next to the executable can hold .gif files shown in the
@@ -48,4 +62,4 @@ third-party material and are not distributed with the application.
 Source code, issues and releases:
 https://github.com/AcidClawX41/todo-downloader
 
-GPL-3.0-or-later. (c) 2026 Eric V. Gramunt
+GPL-3.0-or-later. (c) 2026 Eric Valls Gramunt

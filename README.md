@@ -3,7 +3,8 @@
 # ⬇️ Todo Downloader
 
 **A lightweight, bloat-free desktop download manager.**
-Written in Rust. Single portable executable — no installer, no runtime, no Java.
+Written in Rust. A single portable executable — no runtime, no Java, nothing to install.
+A Windows installer is published alongside it for anyone who prefers one.
 
 [![Build](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/AcidClawX41/todo-downloader/actions/workflows/build.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -21,14 +22,19 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.6.7:**
+**New in v1.7.0:**
 
-- **Capture a single Douyin or TikTok post** — a button on the post itself sends its photos, or the video, straight to the app. Install it once as a userscript or a bookmarklet from the Capture tab.
-- **Original quality, no watermark** — the unprocessed `~noop` variant is taken directly, and a post's whole carousel is read from the page rather than clicked through.
-- **Douyin videos download again** — the extractor needs a visitor session, and cookies were neither sent upfront nor retried.
-- **CJK titles no longer show as boxes on Arch-based systems** — the font was looked for at Debian's paths only.
-- **Engine detection cannot hang** — a broken helper on the PATH used to stall the check forever.
-- **A Windows installer** — published alongside the portable executable, for anyone who prefers a Setup with a Start-menu entry and an uninstaller. It installs without administrator rights and shows the terms of use for acceptance.
+- **X (Twitter), Facebook and Bluesky profiles** — browsed with previews, like Instagram: analyze, see each file's resolution and type, and queue only what you want.
+- **Threads, at full resolution** — no extractor covers it anywhere, and Meta signs its CDN links so a thumbnail cannot be rewritten into the original. The userscript reads the responses the page itself receives, takes the largest of `image_versions2.candidates` and `video_versions`, and sends them to the Profile grid.
+- **Routing now compares hosts, not substrings** — `x.com` is inside `linux.com`, `netflix.com` and `vox.com`, so adding X meant fixing the routing first.
+- **A Supported sites panel** in the Profile tab, in your language: which sites give a grid, which need a session, which are not supported.
+- **A Stop button for the listing** — and *Clear list* now stops it too, killing the process instead of leaving it working for a list you just emptied.
+
+**Also in v1.6.7:**
+
+- **Capture a single Douyin or TikTok post** — a button on the post itself, installed once as a userscript or a bookmarklet.
+- **A Windows installer**, published alongside the portable executable, with terms of use shown for acceptance.
+- Douyin video downloads fixed, CJK titles on Arch-based systems, engine detection that can no longer hang.
 
 **Also in v1.6.2 and v1.6.0:**
 
@@ -93,6 +99,7 @@ from inside your own browser instead. See below.
   - **Douyin** profiles, which no extractor can enumerate.
   - **TikTok** profiles, as an alternative to the API path.
   - **V2PH**, for when the site rate-limits the application. The browser walks the album and hands the URLs over; downloading is unaffected because the image CDN is not the part that pushes back.
+  - **Threads**, which no extractor covers at all — and which cannot be solved by rewriting a thumbnail URL, because Meta signs its CDN links. The script reads the responses the page already received, takes the largest entry of `image_versions2.candidates` and `video_versions`, and sends them to the **Profile** grid with their real resolution. Best installed as a **userscript**: it then hooks in before the page requests anything, and reaches the application on Chrome and Vivaldi.
   
   Chrome blocks pages from reaching `127.0.0.1`, so there the script falls back to saving a JSON file you import from *Downloads → Import TXT/JSON*. Firefox delivers directly.
 - TXT/JSON import and drag-and-drop onto the window.
@@ -251,7 +258,7 @@ src/
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
 ├── receiver.rs   Local HTTP receiver (Click'n'Load), 127.0.0.1 only
-└── scripts.rs    Browser console scripts for TikTok and Douyin, with an on-page HUD
+└── scripts.rs    Browser console scripts (TikTok, Douyin, V2PH, Threads) with an on-page HUD
 ```
 
 **Stack**: [egui/eframe](https://github.com/emilk/egui) for the UI (GPU-accelerated, pure Rust), [tokio](https://tokio.rs) + [reqwest](https://github.com/seanmonstar/reqwest) for the async engine. TLS goes through the platform stack (Schannel / Secure Transport / OpenSSL) rather than rustls — see [SECURITY.md](SECURITY.md) for why, and why saying otherwise would be inaccurate.

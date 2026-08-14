@@ -394,6 +394,64 @@ fn forward_to_running_instance(link: &str) -> bool {
 /// mostrar nada. Mejor traer poco y enseñarlo enseguida.
 const GALLERY_PER_PAGE: u32 = 30;
 
+/// Cuántos elementos pedir por tanda, según lo caro que le salga al extractor.
+///
+/// FACEBOOK ES UN CASO APARTE, y no por capricho suyo: su extractor no puede
+/// enumerar en bloque. `extract_set` recorre las fotos de una en una, pidiendo
+/// la PÁGINA HTML COMPLETA de cada una para sacar su URL y el id de la
+/// siguiente.
+///
+/// Y NO TIENE ACCESO ALEATORIO, que es lo que decide el número. Cada tanda es
+/// una invocación nueva de gallery-dl con `--range`, y para llegar a la foto 9
+/// hay que recorrer otra vez de la 1 a la 8. Paginar de ocho en ocho cuesta
+/// 8 + 16 + 24 + 32… : para cuarenta fotos son ciento veinte peticiones en vez
+/// de cuarenta. Cuanto más pequeña la tanda, PEOR el total.
+///
+/// Así que la tanda es GRANDE: una de 24 cuesta 24 peticiones, mientras que
+/// tres de 8 cuestan 8+16+24 = 48 para el mismo resultado. Cuanto más pequeña
+/// la tanda, peor el total. La cadena sigue activa pero con presupuesto corto
+/// —ver `paginas_encadenadas`— porque ese recorrido se paga igual lo pida la
+/// aplicación o lo pida el usuario a mano.
+///
+/// X, en cambio, va instantáneo: su extractor usa la API de GraphQL y devuelve
+/// una tanda entera con todos sus medios en UNA respuesta. La diferencia no
+/// está en la aplicación, está en lo que cada sitio deja hacer.
+/// Cuántas páginas puede traer la carga encadenada en segundo plano.
+///
+/// V2PH: NINGUNA. Allí cada «página» es un álbum entero y encadenar dispara
+/// su límite de peticiones.
+///
+/// FACEBOOK: unas pocas. Aquí el razonamiento cambió sobre la marcha y merece
+/// quedar escrito, porque el primer intento fue peor que el problema.
+///
+/// Su extractor no sabe saltar: para dar la tanda 2 recorre otra vez la 1. Al
+/// verlo, la reacción fue quitarle la cadena para no multiplicar el trabajo.
+/// Error: ese recorrido se paga IGUAL cuando el usuario pulsa «Cargar más»,
+/// así que lo único que se consiguió fue obligarle a pulsar. El coste no
+/// dependía de quién lo pidiera.
+///
+/// Si cuesta lo mismo, que lo haga la aplicación. Pero con presupuesto corto:
+/// tres tandas —24, 48 y 72— dan setenta y dos elementos sin intervención y
+/// paran ahí, en vez de las cuarenta páginas del resto de sitios, que aquí
+/// serían miles de peticiones. «Cargar más» rearma la cadena para quien
+/// quiera seguir sabiendo lo que cuesta.
+fn paginas_encadenadas(url: &str) -> u32 {
+    if v2ph::is_v2ph(url) {
+        return 0;
+    }
+    match host_of(&url.to_ascii_lowercase()) {
+        Some(h) if host_matches(&h, "facebook.com") => 3,
+        _ => GALLERY_AUTO_PAGES,
+    }
+}
+
+fn per_page_de(url: &str) -> u32 {
+    match host_of(&url.to_ascii_lowercase()) {
+        Some(h) if host_matches(&h, "facebook.com") => 24,
+        _ => GALLERY_PER_PAGE,
+    }
+}
+
 /// Páginas que se traen SOLAS detrás de la primera.
 ///
 /// POR QUÉ NO SE SUBE `GALLERY_PER_PAGE` EN SU LUGAR: a Instagram se le frena
@@ -627,21 +685,56 @@ fn is_direct_media(url: &str) -> bool {
 
 /// Sitios cuyo contenido es mayoritariamente galerías de imágenes y cuyo
 /// listado de perfil yt-dlp no puede enumerar: los gestiona gallery-dl entero.
-const GALLERY_SITES: &[&str] = &[
-    "instagram.com", "pinterest.com", "pinterest.es", "deviantart.com",
-    "flickr.com", "tumblr.com", "artstation.com",
-    // Boorus: gallery-dl trae extractores para todos estos y se actualiza
-    // cuando cambian, así que basta con enrutarlos hacia él.
-    "danbooru", "gelbooru", "safebooru", "aibooru", "e621.net", "e926.net",
-    "yande.re", "konachan", "rule34.xxx", "tbib.org", "hypnohub.net",
+/// Sitios que se enrutan a gallery-dl comparando el HOST, no la cadena.
+///
+/// POR QUÉ POR HOST: la comprobación por subcadena que había aquí no podía
+/// admitir a X. `"x.com"` está dentro de `linux.com`, `netflix.com`, `vox.com`
+/// y `box.com`, así que cualquiera de esos habría acabado en gallery-dl. Es
+/// el mismo error que ya se corrigió en el enrutado de Weibo, donde
+/// `passport.weibo.com` se colaba por contener `weibo.com`.
+const GALLERY_HOSTS: &[&str] = &[
+    "instagram.com",
+    "pinterest.com",
+    "pinterest.es",
+    "deviantart.com",
+    "flickr.com",
+    "tumblr.com",
+    "artstation.com",
+    // Boorus con dominio propio
+    "e621.net",
+    "e926.net",
+    "yande.re",
+    "rule34.xxx",
+    "tbib.org",
+    "hypnohub.net",
     // Weibo: gallery-dl trae extractores de perfil, álbum, post y vídeo,
     // y descarga fotos y vídeos del mismo post en una sola pasada.
-    "weibo.com", "weibo.cn",
+    "weibo.com",
+    "weibo.cn",
+    // X: gallery-dl mantiene el extractor bajo el nombre `twitter`, pero su
+    // `root` ya es `https://x.com`. Cubre perfil, media, likes, listas,
+    // búsquedas y tweets sueltos. Los dos dominios siguen activos.
+    "x.com",
+    "twitter.com",
+    // Facebook: fotos, álbumes, sets, vídeos y fotos de perfil.
+    "facebook.com",
+    "fb.watch",
+    // Bluesky
+    "bsky.app",
 ];
 
+/// Boorus cuyo nombre no es el dominio entero: `danbooru.donmai.us`,
+/// `gelbooru.com`, `safebooru.org`, `konachan.net` y `konachan.com`. Aquí sí
+/// tiene sentido buscar dentro del host, pero SOLO del host: nunca de la URL
+/// completa, donde una ruta o un parámetro podrían contener la palabra.
+const GALLERY_KEYWORDS: &[&str] = &["danbooru", "gelbooru", "safebooru", "aibooru", "konachan"];
+
 fn is_gallery_site(url: &str) -> bool {
-    let u = url.to_ascii_lowercase();
-    GALLERY_SITES.iter().any(|s| u.contains(s))
+    let Some(host) = host_of(&url.to_ascii_lowercase()) else {
+        return false;
+    };
+    GALLERY_HOSTS.iter().any(|s| host_matches(&host, s))
+        || GALLERY_KEYWORDS.iter().any(|k| host.contains(k))
 }
 
 /// Normaliza URLs de perfil que los extractores no reconocen con parámetros.
@@ -787,6 +880,20 @@ fn is_douyin_profile(url: &str) -> bool {
     u.contains("douyin.com") && (u.contains("/user/") || !u.contains("/video/"))
 }
 
+/// URL de Threads. No existe extractor —ni en gallery-dl ni en yt-dlp— y no
+/// puede haberlo fácilmente: Meta firma los enlaces de su CDN, así que la URL
+/// del original solo existe dentro de la respuesta JSON que pide la propia
+/// página. Se captura desde el navegador (pestaña Capturar).
+///
+/// Por HOST y no por `contains`: `threads.com` está dentro de `nsthreads.com`
+/// o de `threads.com.atacante.example`, y esa confusión ya costó un fallo con
+/// `passport.weibo.com`.
+fn is_threads(url: &str) -> bool {
+    host_of(&url.to_ascii_lowercase())
+        .map(|h| host_matches(&h, "threads.com") || host_matches(&h, "threads.net"))
+        .unwrap_or(false)
+}
+
 /// Hosters "difíciles" (ofuscación cambiante, guerra de scrapers) que solo
 /// cubre el motor opcional cyberdrop-dl. No se resuelven de forma nativa porque
 /// cambian cada semana a propósito para romper a los descargadores.
@@ -879,6 +986,15 @@ fn referer_for(url: &str) -> &'static str {
         "https://www.bilibili.com/"
     } else if u.contains("tiktok") || u.contains("bytecdn") || u.contains("ibyteimg") {
         "https://www.tiktok.com/"
+    // X: `pbs.twimg.com` y `video.twimg.com`. Hoy sirven sin Referer, pero
+    // mandarlo cuesta nada y es lo que haría el navegador.
+    } else if u.contains("twimg.com") {
+        "https://x.com/"
+    } else if u.contains("bsky.app") || u.contains("bsky.network") {
+        "https://bsky.app/"
+    // Facebook comprueba el origen en sus CDN de medios.
+    } else if u.contains("fbcdn.net") || u.contains("facebook.com") {
+        "https://www.facebook.com/"
     } else if u.contains("v2ph.com") {
         "https://www.v2ph.com/"
     } else {
@@ -1352,7 +1468,11 @@ struct App {
     clip_enabled: Arc<AtomicBool>,
     grab_any_flag: Arc<AtomicBool>,
     recv_enabled: Arc<AtomicBool>,
-    capture_site: usize, // 0 = TikTok, 1 = Douyin
+    /// Por qué el receptor NO está escuchando, si es que no lo está. `None` es
+    /// «el puerto está abierto». Se guarda para poder decirlo en la interfaz en
+    /// vez de afirmar que escucha porque la casilla esté marcada.
+    recv_error: Option<String>,
+    capture_site: usize, // índice en `App::CAPTURA`
     ytdlp_ok: Option<bool>,
     ytdlp_cmd: Option<String>,
     ytdlp_installing: bool,
@@ -1437,6 +1557,14 @@ struct App {
     gallery_prefetch_left: u32,
     /// Hay una página viajando en segundo plano (no bloquea la rejilla)
     gallery_prefetching: bool,
+    /// Bandera de parada de la exploración. Se levanta al pulsar «Detener» o
+    /// «Limpiar lista» y llega hasta el proceso de gallery-dl, que se mata.
+    ///
+    /// POR QUÉ NO BASTA EL EPOCH: el epoch descarta los RESULTADOS, pero el
+    /// proceso sigue vivo pidiendo páginas. En Facebook eso son minutos de
+    /// peticiones que ya no le importan a nadie, y con la aplicación cerrada
+    /// se quedarían huérfanas.
+    gallery_cancel: Arc<AtomicBool>,
     /// URL del perfil que se está explorando
     gallery_url: String,
     /// Último motivo de fallo, íntegro y legible en la propia vista
@@ -1509,15 +1637,17 @@ impl App {
 
         // Receptor local (Click'n'Load): recibe los enlaces del script del navegador
         let recv_enabled = Arc::new(AtomicBool::new(settings.receiver_enabled));
-        {
+        let recv_error = {
             let tx_r = tx.clone();
             receiver::spawn(settings.receiver_port, recv_enabled.clone(), move |r| {
                 let _ = tx_r.send(match r {
                     receiver::Recibido::Enlaces(items, destino) => Ev::Received(items, destino),
                     receiver::Recibido::UserAgent(ua) => Ev::DetectedUa(ua),
                 });
-            });
-        }
+            })
+            .err()
+            .map(|e| e.to_string())
+        };
         // Limpieza defensiva: si la app se cerró de golpe durante una búsqueda,
         // el archivo temporal de credenciales pudo quedar huérfano.
         let _ = std::fs::remove_file(ytdlp_dir().join("booru-auth.json"));
@@ -1540,6 +1670,7 @@ impl App {
             clip_enabled,
             grab_any_flag,
             recv_enabled,
+            recv_error,
             capture_site: 0,
             ytdlp_ok: None,
             ytdlp_cmd: None,
@@ -1599,6 +1730,7 @@ impl App {
             v2ph_busy: false,
             gallery_prefetch_left: 0,
             gallery_prefetching: false,
+            gallery_cancel: Arc::new(AtomicBool::new(false)),
             gallery_url: String::new(),
             gallery_error: String::new(),
             gallery_thumbs: std::collections::HashMap::new(),
@@ -1753,17 +1885,25 @@ impl App {
             // `…/video/<id>`, sin extensión, y lo resuelve yt-dlp al
             // descargarlo. Sin esto se contaba como imagen y la rejilla lo
             // mezclaba con las fotos.
+            //
+            // `it.is_video` va primero porque es el único dato que NO es una
+            // deducción: el script lo leyó de la API. Los CDN de Meta sirven
+            // los vídeos desde rutas sin extensión reconocible, así que sin
+            // esto un .mp4 de Threads aparecía en la rejilla como imagen.
             let u = it.url.to_ascii_lowercase();
             let es_pagina_video = u.contains("/video/")
                 && (u.contains("douyin.com") || u.contains("tiktok.com"));
-            let es_video =
-                es_pagina_video || matches!(ext.as_str(), "mp4" | "mov" | "webm" | "mkv" | "m4v");
+            let es_video = it.is_video
+                || es_pagina_video
+                || matches!(ext.as_str(), "mp4" | "mov" | "webm" | "mkv" | "m4v");
             self.gallery_items.push(gallery::GalleryItem {
                 url: it.url,
                 filename: it.title.clone(),
                 ext,
-                width: 0,
-                height: 0,
+                // Si el script las trae, son las del ORIGINAL. Si no, quedan a
+                // cero y `Ev::GalleryDims` las rellena midiendo la miniatura.
+                width: it.w,
+                height: it.h,
                 filesize: 0,
                 is_video: es_video,
                 post_id: it.id.clone(),
@@ -1787,6 +1927,20 @@ impl App {
             let msg = i18n::received(self.settings.lang, nuevos);
             self.toast(msg);
         }
+    }
+
+    /// Corta la exploración en curso: mata el proceso, corta la cadena de
+    /// páginas y descarta las respuestas que ya vengan de camino.
+    ///
+    /// Las tres cosas hacen falta. Matar el proceso sin tocar el epoch dejaría
+    /// entrar la última respuesta a medio parsear; subir el epoch sin matar el
+    /// proceso dejaría a gallery-dl pidiendo páginas para nadie.
+    fn detener_exploracion(&mut self) {
+        self.gallery_cancel.store(true, Ordering::Relaxed);
+        self.gallery_prefetch_left = 0;
+        self.gallery_prefetching = false;
+        self.gallery_loading = false;
+        self.gallery_epoch += 1;
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -2338,10 +2492,11 @@ impl App {
                                 prog,
                                 self.gallery_url.clone(),
                                 page + 1,
-                                GALLERY_PER_PAGE,
+                                per_page_de(&self.gallery_url),
                                 cookie_args(&self.settings),
                                 self.tx.clone(),
                                 self.gallery_epoch,
+                                self.gallery_cancel.clone(),
                             ));
                         }
                     }
@@ -2798,6 +2953,7 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 async fn run_capture_timeout(
     mut cmd: tokio::process::Command,
     limite: Duration,
+    cancelar: Option<Arc<AtomicBool>>,
 ) -> std::io::Result<(std::process::ExitStatus, String, String)> {
     use tokio::io::AsyncReadExt;
 
@@ -2828,6 +2984,18 @@ async fn run_capture_timeout(
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break st;
+        }
+        // Parada pedida por el usuario. Se mata el ÁRBOL, no solo el proceso:
+        // gallery-dl es Python y puede tener hijos propios, y matar solo al
+        // padre dejaría al nieto pidiendo páginas a Facebook sin que nadie
+        // escuche la respuesta.
+        if cancelar.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                msg_lang("búsqueda detenida", "search stopped"),
+            ));
         }
         if Instant::now() >= fin {
             kill_tree(&mut child).await;
@@ -2890,7 +3058,7 @@ async fn booru_search(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let result = run_capture_timeout(cmd, BOORU_TIMEOUT).await;
+    let result = run_capture_timeout(cmd, BOORU_TIMEOUT, None).await;
 
     // Borrado inmediato: el archivo solo existe mientras dura la búsqueda
     if let Some(p) = &cfg_path {
@@ -3732,6 +3900,11 @@ async fn fetch_preview_thumb(
 ///
 /// El ritmo entre peticiones lo marca `galdl_pacing`: Instagram corta sesiones
 /// con facilidad, así que explorar debe ser tan pausado como descargar.
+// Mismo criterio que `browse_gallery_hop`, justo debajo: son los parámetros de
+// una invocación de gallery-dl, todos obligatorios y ninguno agrupable en algo
+// con sentido propio. Envolverlos en una estructura solo para contentar al lint
+// añadiría un tipo que no significa nada.
+#[allow(clippy::too_many_arguments)]
 async fn browse_gallery(
     program: String,
     url: String,
@@ -3740,10 +3913,11 @@ async fn browse_gallery(
     cookies: Vec<String>,
     tx: UnboundedSender<Ev>,
     epoch: u64,
+    cancelar: Arc<AtomicBool>,
 ) {
     // Weibo se explora por el muro de fotos, no por el feed: ver weibo_album_url
     let url = weibo_album_url(&url).unwrap_or(url);
-    browse_gallery_hop(program, url, page, per_page, cookies, tx, 0, epoch).await
+    browse_gallery_hop(program, url, page, per_page, cookies, tx, 0, epoch, cancelar).await
 }
 
 /// Tope de redirecciones de extractor. Instagram necesita una
@@ -3760,6 +3934,7 @@ async fn browse_gallery_hop(
     tx: UnboundedSender<Ev>,
     hops: u32,
     epoch: u64,
+    cancelar: Arc<AtomicBool>,
 ) {
     let first = (page - 1) * per_page + 1;
     let last = page * per_page;
@@ -3784,10 +3959,16 @@ async fn browse_gallery_hop(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let (estado, stdout, stderr) = match run_capture_timeout(cmd, GALLERY_TIMEOUT).await {
+    let (estado, stdout, stderr) = match run_capture_timeout(cmd, GALLERY_TIMEOUT, Some(cancelar.clone())).await {
         Ok(o) => o,
         Err(e) => {
-            let _ = tx.send(Ev::GalleryError(format!("gallery-dl: {e}"), epoch));
+            // Una parada pedida por el usuario no es un fallo y no viaja como
+            // tal. El epoch ya la descartaría, pero mandarla igualmente sería
+            // dejar preparado un error rojo por si algún día alguien cambia
+            // ese filtro.
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                let _ = tx.send(Ev::GalleryError(format!("gallery-dl: {e}"), epoch));
+            }
             return;
         }
     };
@@ -3902,6 +4083,7 @@ async fn browse_gallery_hop(
             if hops < MAX_GALLERY_HOPS {
                 Box::pin(browse_gallery_hop(
                     program, siguiente, page, per_page, cookies_next, tx, hops + 1, epoch,
+                    cancelar,
                 ))
                 .await;
             } else {
@@ -6578,6 +6760,34 @@ impl App {
         ui.label(RichText::new(t(lang, "profile.subtitle")).color(MUTED()));
         ui.add_space(14.0);
 
+        // Qué se puede pegar aquí. Va plegado porque son cinco líneas que se
+        // leen una vez: quien ya lo sabe no debería tener que rodearlas cada
+        // vez que abre la vista, y quien no lo sabe no tiene forma de
+        // averiguarlo sin probar sitio por sitio.
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(720.0));
+            egui::CollapsingHeader::new(
+                RichText::new(t(lang, "profile.sites")).size(11.0).color(MUTED()).strong(),
+            )
+            .id_source("sitios_soportados")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add_space(2.0);
+                for k in [
+                    "profile.sites_grid",
+                    "profile.sites_whole",
+                    "profile.sites_cookies",
+                    "profile.sites_capture",
+                    "profile.sites_no",
+                ] {
+                    ui.label(RichText::new(t(lang, k)).size(11.5).color(MUTED()));
+                    ui.add_space(4.0);
+                }
+                ui.label(RichText::new(t(lang, "profile.sites_note")).size(11.5).color(CYAN()));
+            });
+        });
+        ui.add_space(10.0);
+
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(720.0));
             ui.label(RichText::new(t(lang, "profile.url_label")).size(11.0).color(MUTED()).strong());
@@ -6606,7 +6816,9 @@ impl App {
                 &mut self.settings.use_browser_cookies,
                 t(lang, "profile.cookies_inline"),
             );
-            if is_douyin_profile(&self.profile_url) {
+            if is_threads(&self.profile_url) {
+                ui.label(RichText::new(t(lang, "profile.threads_note")).size(11.5).color(AMBER()));
+            } else if is_douyin_profile(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED()));
             } else if is_gallery_site(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.gallery_note")).size(11.5).color(AMBER()));
@@ -6621,6 +6833,13 @@ impl App {
                 let url = self.profile_url.trim().to_string();
                 if url.is_empty() || !url.starts_with("http") {
                     self.toast(t(lang, "profile.need_url"));
+                } else if is_threads(&url) {
+                    // Mandarlo a gallery-dl solo produciría «Unsupported URL»,
+                    // que es cierto pero no le dice a nadie qué hacer. La ruta
+                    // que sí funciona está a un clic, así que se dice.
+                    self.view = View::Capture;
+                    self.capture_site = 3;
+                    self.toast(t(lang, "profile.threads_unsupported"));
                 } else if is_douyin_profile(&url) {
                     self.toast(t(lang, "profile.douyin_unsupported"));
                 } else if v2ph::is_v2ph(&url) {
@@ -6676,13 +6895,16 @@ impl App {
                         self.gallery_error.clear();
                         self.gallery_loading = true;
                         self.gallery_page = 1;
-                        self.gallery_prefetch_left = GALLERY_AUTO_PAGES;
+                        self.gallery_prefetch_left = paginas_encadenadas(&url);
                         self.gallery_prefetching = false;
                         let tx = self.tx.clone();
                         let cookies = cookie_args(&self.settings);
                         self.gallery_epoch += 1;
                         let ep = self.gallery_epoch;
-                        self.rt.spawn(browse_gallery(prog, url, 1, GALLERY_PER_PAGE, cookies, tx, ep));
+                        let pp = per_page_de(&url);
+                        self.gallery_cancel.store(false, Ordering::Relaxed);
+                        let cancel = self.gallery_cancel.clone();
+                        self.rt.spawn(browse_gallery(prog, url, 1, pp, cookies, tx, ep, cancel));
                     } else {
                         self.toast(t(lang, "profile.need_galdl"));
                     }
@@ -6746,6 +6968,13 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(RichText::new(t(lang, "gal.listing")).color(CYAN()));
+                // Salida de emergencia. Un listado de Facebook puede tardar
+                // minutos, y hasta ahora la única forma de pararlo era cerrar
+                // la aplicación.
+                if soft_button(ui, t(lang, "gal.stop")).clicked() {
+                    self.detener_exploracion();
+                    self.toast(t(lang, "gal.stopped"));
+                }
             });
         }
 
@@ -7019,8 +7248,7 @@ impl App {
                         let url = self.gallery_url.clone();
                         // Pedirlo a mano rearma la carga automática, salvo en
                         // V2PH: ver el comentario del análisis.
-                        self.gallery_prefetch_left =
-                            if v2ph::is_v2ph(&url) { 0 } else { GALLERY_AUTO_PAGES };
+                        self.gallery_prefetch_left = paginas_encadenadas(&url);
                         if v2ph::is_v2ph(&url) {
                             self.gallery_loading = true;
                             self.gallery_epoch += 1;
@@ -7043,8 +7271,10 @@ impl App {
                             let cookies = cookie_args(&self.settings);
                             self.gallery_epoch += 1;
                             let ep = self.gallery_epoch;
+                            self.gallery_cancel.store(false, Ordering::Relaxed);
                             self.rt.spawn(browse_gallery(
-                                prog, url, next, GALLERY_PER_PAGE, cookies, tx, ep,
+                                prog, url.clone(), next, per_page_de(&url), cookies, tx, ep,
+                                self.gallery_cancel.clone(),
                             ));
                         }
                     }
@@ -7072,11 +7302,11 @@ impl App {
                 self.gallery_error.clear();
                 self.gallery_url.clear();
                 self.gallery_page = 1;
-                self.gallery_prefetch_left = 0;
-                self.gallery_prefetching = false;
-                // Subir el epoch descarta las respuestas de peticiones ya
-                // lanzadas y aún en vuelo, que si no repoblarían la lista.
-                self.gallery_epoch += 1;
+                // Detiene además el proceso que esté listando: vaciar la lista
+                // y dejar a gallery-dl trabajando para llenarla otra vez no es
+                // lo que nadie espera de un botón llamado «Limpiar lista».
+                // Sube el epoch, así que las respuestas en vuelo se descartan.
+                self.detener_exploracion();
                 self.toast(i18n::list_cleared(lang, n));
             }
         }
@@ -7299,6 +7529,27 @@ impl App {
 
     // ---------------- Vista Capturar (Click'n'Load) ----------------
 
+    /// Sitios del selector de la pestaña Capturar, con su script y el nombre
+    /// con el que se guarda. Una sola lista para el selector, el botón de
+    /// copiar, el de guardar y la vista previa: antes eran tres cadenas de
+    /// `if` separadas y añadir un sitio obligaba a acordarse de las tres.
+    const CAPTURA: &'static [(&'static str, &'static str)] = &[
+        ("TikTok", "capturador_tiktok.js"),
+        ("Douyin", "capturador_douyin.js"),
+        ("V2PH", "capturador_v2ph.js"),
+        ("Threads", "capturador_threads.js"),
+    ];
+
+    fn script_captura(&self) -> String {
+        let p = self.settings.receiver_port;
+        match self.capture_site {
+            1 => scripts::douyin(p),
+            2 => scripts::v2ph(p),
+            3 => scripts::threads(p),
+            _ => scripts::tiktok(p),
+        }
+    }
+
     fn capture_ui(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.lang;
         ui.label(RichText::new(t(lang, "cap.title")).size(24.0).strong().color(Color32::WHITE));
@@ -7310,7 +7561,16 @@ impl App {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
             ui.horizontal(|ui| {
-                if self.settings.receiver_enabled {
+                // El orden importa: si el puerto no se pudo abrir, da igual lo
+                // que diga la casilla. Decir «escuchando» sin escuchar convierte
+                // un fallo de dos segundos en una tarde de desconcierto.
+                if self.recv_error.is_some() {
+                    ui.label(RichText::new(t(lang, "cap.bind_failed")).color(RED()));
+                    ui.label(
+                        RichText::new(format!("127.0.0.1:{}", self.settings.receiver_port))
+                            .color(MUTED()),
+                    );
+                } else if self.settings.receiver_enabled {
                     ui.label(RichText::new(t(lang, "cap.listening")).color(GREEN()));
                     ui.label(
                         RichText::new(format!("127.0.0.1:{}", self.settings.receiver_port))
@@ -7327,6 +7587,11 @@ impl App {
                     }
                 });
             });
+            if let Some(e) = self.recv_error.clone() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(t(lang, "cap.bind_help")).size(11.5).color(AMBER()));
+                ui.label(RichText::new(e).size(11.0).color(MUTED()).monospace());
+            }
             ui.label(RichText::new(t(lang, "cap.note_restart")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
@@ -7337,7 +7602,7 @@ impl App {
             ui.label(RichText::new(t(lang, "cap.site")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for (i, name) in ["TikTok", "Douyin", "V2PH"].iter().enumerate() {
+                for (i, (name, _)) in Self::CAPTURA.iter().enumerate() {
                     let sel = self.capture_site == i;
                     let btn = egui::Button::new(
                         RichText::new(*name).color(if sel { Color32::WHITE } else { MUTED() }),
@@ -7357,13 +7622,7 @@ impl App {
             ui.label(t(lang, "cap.step3"));
             ui.add_space(10.0);
 
-            let script = if self.capture_site == 0 {
-                scripts::tiktok(self.settings.receiver_port)
-            } else if self.capture_site == 2 {
-                scripts::v2ph(self.settings.receiver_port)
-            } else {
-                scripts::douyin(self.settings.receiver_port)
-            };
+            let script = self.script_captura();
 
             ui.horizontal(|ui| {
                 if primary_button(ui, t(lang, "cap.copy")).clicked() {
@@ -7371,11 +7630,10 @@ impl App {
                     self.toast(t(lang, "cap.copied"));
                 }
                 if soft_button(ui, t(lang, "cap.save")).clicked() {
-                    let name = if self.capture_site == 0 {
-                        "capturador_tiktok.js"
-                    } else {
-                        "capturador_douyin.js"
-                    };
+                    let name = Self::CAPTURA
+                        .get(self.capture_site)
+                        .map(|(_, f)| *f)
+                        .unwrap_or("capturador.js");
                     if let Some(p) = rfd::FileDialog::new().set_file_name(name).save_file() {
                         match std::fs::write(&p, &script) {
                             Ok(_) => self.toast(i18n::saved_to(lang, &p.display().to_string())),
@@ -7437,13 +7695,7 @@ impl App {
             ui.set_width(ui.available_width().min(760.0));
             ui.label(RichText::new(t(lang, "cap.preview")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
-            let script = if self.capture_site == 0 {
-                scripts::tiktok(self.settings.receiver_port)
-            } else if self.capture_site == 2 {
-                scripts::v2ph(self.settings.receiver_port)
-            } else {
-                scripts::douyin(self.settings.receiver_port)
-            };
+            let script = self.script_captura();
             egui::ScrollArea::vertical()
                 .max_height(220.0)
                 .id_source("script_preview")
@@ -8798,6 +9050,50 @@ mod tests {
         // Sin esquema no es una URL absoluta
         assert_eq!(host_of("weibo.com/tv/show/1"), None);
         assert_eq!(host_of(""), None);
+    }
+
+    /// X no se podía añadir mientras el enrutado comparaba subcadenas: hay
+    /// dominios muy comunes que contienen «x.com» y no tienen nada que ver.
+    #[test]
+    fn el_enrutado_de_galerias_mira_el_host_no_la_cadena() {
+        assert!(is_gallery_site("https://x.com/uchiha22631"));
+        assert!(is_gallery_site("https://twitter.com/algo"));
+        assert!(is_gallery_site("https://mobile.x.com/algo/media"));
+        assert!(is_gallery_site("https://www.facebook.com/alguien/photos"));
+        assert!(is_gallery_site("https://www.instagram.com/alguien/"));
+
+        // Lo que la comprobación por subcadena habría mandado a gallery-dl
+        assert!(!is_gallery_site("https://www.linux.com/articulo"));
+        assert!(!is_gallery_site("https://www.netflix.com/title/123"));
+        assert!(!is_gallery_site("https://vox.com/algo"));
+        assert!(!is_gallery_site("https://box.com/s/abc"));
+        // Y el impostor de siempre
+        assert!(!is_gallery_site("https://x.com.atacante.net/robar"));
+    }
+
+    /// Los boorus se buscan dentro del HOST, no de la URL entera: una ruta
+    /// que contenga «danbooru» no debe cambiar el motor.
+    #[test]
+    fn los_boorus_se_reconocen_por_el_host() {
+        assert!(is_gallery_site("https://danbooru.donmai.us/posts?tags=x"));
+        assert!(is_gallery_site("https://gelbooru.com/index.php"));
+        assert!(is_gallery_site("https://konachan.net/post"));
+        assert!(!is_gallery_site("https://ejemplo.com/wiki/danbooru"));
+    }
+
+    /// Threads no tiene extractor, así que se desvía a la pestaña Capturar
+    /// antes de gastar una llamada a gallery-dl que solo diría «Unsupported
+    /// URL». Confundirlo con otro sitio desviaría a un sitio que sí funciona.
+    #[test]
+    fn threads_se_reconoce_por_el_host() {
+        assert!(is_threads("https://www.threads.com/@alguien"));
+        assert!(is_threads("https://threads.net/@alguien/post/ABC"));
+        assert!(is_threads("HTTPS://WWW.THREADS.COM/@Alguien"));
+        // Impostores y falsos positivos por subcadena
+        assert!(!is_threads("https://nsthreads.com/@alguien"));
+        assert!(!is_threads("https://threads.com.atacante.example/@x"));
+        assert!(!is_threads("https://ejemplo.com/threads.com/@x"));
+        assert!(!is_threads("https://www.instagram.com/alguien"));
     }
 
     #[test]

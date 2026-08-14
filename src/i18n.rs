@@ -116,12 +116,17 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         // ---------- Vista Capturar ----------
         "cap.title" => entry!("Capturar desde el navegador", "Capture from the browser"),
         "cap.subtitle" => entry!(
-            "Para lo que yt-dlp no puede (perfiles de Douyin, contenido con sesión): el script corre en la pestaña del perfil y envía los enlaces directamente a la cola.",
-            "For what yt-dlp cannot do (Douyin profiles, session-gated content): the script runs in the profile tab and sends the links straight to the queue."
+            "Para lo que ningún extractor puede (perfiles de Douyin, Threads, contenido con sesión): el script corre en la pestaña del perfil, lee lo que la propia página recibe y te lo trae a la aplicación.",
+            "For what no extractor can reach (Douyin profiles, Threads, session-gated content): the script runs in the profile tab, reads what the page itself receives, and brings it into the application."
         ),
         "cap.listening" => entry!("● Receptor escuchando en", "● Receiver listening on"),
         "cap.off" => entry!("● Receptor desactivado", "● Receiver disabled"),
         "cap.enable" => entry!("Activar receptor", "Enable receiver"),
+        "cap.bind_failed" => entry!("● El receptor NO ha podido abrir el puerto", "● The receiver could NOT open its port"),
+        "cap.bind_help" => entry!(
+            "Lo captura todo pero no llega nada: el script dirá «App no encontrada» y caerá al botón 💾 Guardar JSON. Casi siempre es otra copia de Todo Downloader abierta, que se quedó con el puerto. Cierra la otra y reinicia esta, o cambia el puerto aquí abajo y reinicia.",
+            "Everything gets captured and nothing arrives: the script will say «App not found» and fall back to the 💾 Save JSON button. It is almost always another copy of Todo Downloader that took the port. Close the other one and restart this, or change the port below and restart."
+        ),
         "cap.note_restart" => entry!(
             "Solo escucha en 127.0.0.1 (nunca desde la red). Cambiar el puerto requiere reiniciar la app.",
             "Listens on 127.0.0.1 only (never from the network). Changing the port requires restarting the app."
@@ -136,8 +141,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "2. Copy the script with the button below, paste it into the console and press Enter."
         ),
         "cap.step3" => entry!(
-            "3. Espera a que termine: los enlaces aparecerán solos en «Descargas».",
-            "3. Wait for it to finish: the links will appear by themselves under «Downloads»."
+            "3. Espera a que termine. TikTok, Douyin y V2PH van a «Descargas»; Threads va a «Perfil», con vista previa para elegir qué bajas.",
+            "3. Wait for it to finish. TikTok, Douyin and V2PH go to «Downloads»; Threads goes to «Profile», with previews so you can pick what to fetch."
         ),
         "cap.copy" => entry!("📋  Copiar script", "📋  Copy script"),
         "cap.save" => entry!("💾 Guardar como .js", "💾 Save as .js"),
@@ -222,8 +227,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         // ---------- Vista Perfil ----------
         "profile.title" => entry!("Descargar un perfil completo", "Download a full profile"),
         "profile.subtitle" => entry!(
-            "Perfiles de TikTok: analiza y elige qué descargar. Instagram/Pinterest: descarga completa con gallery-dl. Douyin: no soportado (usa el script de consola).",
-            "TikTok profiles: analyze and pick what to download. Instagram/Pinterest: full download via gallery-dl. Douyin: unsupported (use the console script)."
+            "Perfiles de TikTok, Weibo, Bilibili y V2PH: analiza y elige qué descargar. Instagram, X, Facebook, Pinterest y Bluesky: descarga completa con gallery-dl, y casi todos necesitan cookies. Douyin y Threads: desde la pestaña Capturar; lo de Threads vuelve aquí, a la rejilla.",
+            "TikTok, Weibo, Bilibili and V2PH profiles: analyze and pick what to download. Instagram, X, Facebook, Pinterest and Bluesky: full download via gallery-dl, and most of them need cookies. Douyin and Threads: from the Capture tab — and Threads comes back here, to the grid."
         ),
         "profile.url_label" => entry!("URL DEL PERFIL", "PROFILE URL"),
         "profile.want" => entry!("Quiero descargar:", "I want to download:"),
@@ -250,13 +255,21 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "❌ Douyin: los PERFILES no se pueden analizar (no existe extractor). Vídeos sueltos sí funcionan, pero exigen cookies.txt. Para el perfil entero usa el script de consola y luego «Importar TXT/JSON».",
             "❌ Douyin: PROFILES cannot be analyzed (no extractor exists). Single videos do work, but require cookies.txt. For a whole profile use the console script, then «Import TXT/JSON»."
         ),
+        "profile.threads_unsupported" => entry!(
+            "Threads no lo lista ningún extractor. Te he abierto la pestaña Capturar con su script: instálalo como userscript, abre el perfil y pulsa el botón. Lo capturado vuelve aquí, a la rejilla.",
+            "No extractor lists Threads. I have opened the Capture tab on its script: install it as a userscript, open the profile and press the button. What it captures comes back here, to the grid."
+        ),
+        "profile.threads_note" => entry!(
+            "▸ Threads se captura desde el navegador: no existe extractor, y Meta firma los enlaces de su CDN, así que la URL del original solo está dentro de la respuesta que recibe la propia página. Pulsa Analizar y te llevo al script.",
+            "▸ Threads is captured from the browser: no extractor exists, and Meta signs its CDN links, so the original's URL only lives inside the response the page itself receives. Press Analyze and I will take you to the script."
+        ),
         "profile.need_galdl" => entry!(
             "Instala primero gallery-dl en Ajustes (un clic)",
             "Install gallery-dl first in Settings (one click)"
         ),
         "profile.gallery_note" => entry!(
-            "ℹ Instagram y Weibo se exploran con vista previa: analiza y elige qué bajar. Pinterest y similares se descargan enteros. Instagram EXIGE sesión: cookies del navegador o un cookies.txt en Ajustes.",
-            "ℹ Instagram and Weibo are browsed with previews: analyze, then pick what to download. Pinterest and similar are downloaded whole. Instagram REQUIRES a session: browser cookies or a cookies.txt in Settings."
+            "ℹ Instagram, X, Facebook, Weibo y Bluesky se exploran con vista previa: analiza y elige qué bajar, con su resolución. Pinterest y similares se descargan enteros. Instagram, X y Facebook EXIGEN sesión para listar: cookies del navegador o un cookies.txt en Ajustes.\n⏳ Facebook lista MUY despacio, y no es cosa de la app: su extractor abre la página completa de CADA foto, una por una, y no sabe saltar. Llegan de 24 en 24 y se traen tres tandas solas, hasta 72; a partir de ahí, «Cargar más». Cada tanda tarda más que la anterior porque vuelve a recorrer lo ya visto, y eso cuesta igual lo pida la app o lo pidas tú. Para un perfil grande sale más a cuenta pegar la URL en Descargas y bajarlo entero.",
+            "ℹ Instagram, X, Facebook, Weibo and Bluesky are browsed with previews: analyze, then pick what to download, resolution included. Pinterest and similar are downloaded whole. Instagram, X and Facebook REQUIRE a session to list: browser cookies or a cookies.txt in Settings.\n⏳ Facebook lists VERY slowly, and that is not the application: its extractor opens the full page of EVERY photo, one at a time, and cannot skip ahead. They arrive 24 at a time and three batches are fetched on their own, up to 72; after that, «Load more». Each batch takes longer than the last because it walks everything already seen, and that costs the same whether the app asks or you do. For a large profile it is quicker to paste the URL into Downloads and get the whole thing."
         ),
         "profile.need_ytdlp" => entry!(
             "Instala primero yt-dlp en Ajustes (un clic)",
@@ -398,10 +411,29 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
              cookies: without them the site answers 401 or 403, or serves a cut-down \
              version.\n\nTurn them on in Settings → Browser cookies, or point to a \
              cookies.txt exported with an extension."),
-        "cap.post_title" => entry!("CAPTURAR UN POST SUELTO", "CAPTURE A SINGLE POST"),
+        "profile.sites" => entry!("SITIOS SOPORTADOS", "SUPPORTED SITES"),
+        "profile.sites_grid" => entry!(
+            "▸ Con vista previa y selección, viendo resolución y tipo de cada archivo:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH",
+            "▸ With preview and selection, showing each file's resolution and type:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH"),
+        "profile.sites_whole" => entry!(
+            "▸ Se descargan enteros, sin listado previo:  Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)",
+            "▸ Downloaded whole, with no listing first:  Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)"),
+        "profile.sites_cookies" => entry!(
+            "▸ Necesitan tu sesión:  Instagram, X, Facebook, Weibo, Douyin, Threads y cualquier perfil privado o con restricción de edad. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt. En Threads la sesión es la del propio navegador, no hace falta exportar nada.",
+            "▸ Need your session:  Instagram, X, Facebook, Weibo, Douyin, Threads and any private or age-restricted profile. Turn it on in Settings → Browser cookies, or load a cookies.txt. On Threads the session is the browser's own — nothing to export."),
+        "profile.sites_capture" => entry!(
+            "▸ Solo desde la pestaña Capturar:  Threads y los perfiles de Douyin. No los lista ningún extractor, así que se leen desde el navegador con la sesión que ya tienes abierta. Lo de Threads acaba igualmente aquí, en la rejilla, con su resolución. Para un post suelto de Douyin o TikTok, el capturador de posts es más rápido que analizar el perfil entero.",
+            "▸ From the Capture tab only:  Threads, and Douyin profiles. No extractor lists them, so they are read from the browser using the session you already have open. Threads still ends up here, in the grid, with its resolution. For a single Douyin or TikTok post, the post capturer is quicker than analyzing the whole profile."),
+        "profile.sites_no" => entry!(
+            "▸ No soportado:  los servicios de streaming con DRM (Netflix, Disney+, Prime Video y similares). No es una limitación que se pueda enrutar desde aquí: el contenido va cifrado y saltárselo sería eludir una medida técnica de protección.",
+            "▸ Not supported:  DRM-protected streaming services (Netflix, Disney+, Prime Video and the like). This is not something that can be routed from here: the content is encrypted, and getting around that would be circumventing a technological protection measure."),
+        "profile.sites_note" => entry!(
+            "Los demás sitios con vídeo —YouTube, X, Reddit, Twitch, Vimeo y otros mil— funcionan pegando el enlace directamente en Descargas.",
+            "Any other video site — YouTube, X, Reddit, Twitch, Vimeo and a thousand more — works by pasting the link straight into Downloads."),
+        "cap.post_title" => entry!("BOTÓN EN LA PROPIA PÁGINA (RECOMENDADO PARA THREADS)", "A BUTTON ON THE PAGE ITSELF (RECOMMENDED FOR THREADS)"),
         "cap.post_help" => entry!(
-            "Para bajar las fotos de UN post sin capturar el perfil entero. Se instala una vez y a partir de ahí aparece un botón «⬇ Capturar este post» en cada publicación de Douyin y TikTok.",
-            "For grabbing the photos of ONE post without capturing the whole profile. You install it once, and from then on a «⬇ Capture this post» button appears on every Douyin and TikTok publication."),
+            "Se instala una vez y aparece un botón flotante: «⬇ Capturar este post» en cada publicación de Douyin y TikTok, y «⬇ Capturar este perfil» en Threads. En Threads es la mejor opción y no solo por comodidad: engancha antes de que la página pida nada, así que no se pierde lo que cargue mientras tanto, y usa GM_xmlhttpRequest, que sí alcanza a la aplicación en Chrome y Vivaldi.",
+            "You install it once and a floating button appears: «⬇ Capture this post» on every Douyin and TikTok publication, and «⬇ Capture this profile» on Threads. On Threads this is the better option, and not only for convenience: it hooks in before the page requests anything, so nothing loaded meanwhile is lost, and it uses GM_xmlhttpRequest, which does reach the application on Chrome and Vivaldi."),
         "cap.post_us" => entry!("Copiar userscript", "Copy userscript"),
         "cap.post_us_save" => entry!("Guardar .user.js", "Save .user.js"),
         "cap.post_bm" => entry!("Copiar bookmarklet", "Copy bookmarklet"),
@@ -435,6 +467,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "gal.queue_selected" => entry!("Añadir seleccionados a la cola", "Add selected to queue"),
         "gal.more" => entry!("Cargar más", "Load more"),
         "gal.prefetching" => entry!("trayendo más en segundo plano…", "fetching more in the background…"),
+        "gal.stop" => entry!("■ Detener", "■ Stop"),
+        "gal.stopped" => entry!("Exploración detenida", "Search stopped"),
         "gal.no_more" => entry!("No hay más publicaciones", "No more posts"),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),

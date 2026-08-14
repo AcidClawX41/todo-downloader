@@ -42,13 +42,14 @@ fn dic() -> String {
         ("enCola", "Ya están en la cola de descargas", "They are in the download queue now"),
         ("enviadosLog", "enlaces enviados a Todo Downloader", "links sent to Todo Downloader"),
         ("respondio", "El receptor respondió ", "The receiver replied "),
-        ("noApp", "App no encontrada — copiando al portapapeles",
-                  "App not found — copying to the clipboard"),
+        ("noApp", "No contesta la app. Ábrela y mira en Capturar que el receptor esté escuchando; si tienes DOS copias abiertas, solo una tiene el puerto. Copiando al portapapeles…",
+                  "The app is not answering. Open it and check in Capture that the receiver is listening; if you have TWO copies open, only one holds the port. Copying to the clipboard…"),
         ("noRecep", "Receptor no disponible:", "Receiver unavailable:"),
         ("copiados", "📋 Copiados al portapapeles", "📋 Copied to the clipboard"),
         ("copiadosLog", "📋 Enlaces copiados — el LinkGrabber los detectará",
                         "📋 Links copied — LinkGrabber will pick them up"),
-        ("usaGuardar", "Usa el botón 💾 Guardar JSON", "Use the 💾 Save JSON button"),
+        ("usaGuardar", "Tampoco ha entrado en el portapapeles (la pestaña tiene que tener el foco). Usa el botón 💾 Guardar JSON y luego Descargas → Importar TXT/JSON.",
+                       "It did not reach the clipboard either (the tab must have focus). Use the 💾 Save JSON button, then Downloads → Import TXT/JSON."),
         ("jsonGuardado", "JSON guardado con", "JSON saved with"),
         ("elementos", "elementos", "items"),
         ("sinApi", "Sin respuestas de la API", "No replies from the API"),
@@ -88,6 +89,13 @@ fn dic() -> String {
                        "The player exposes no downloadable URL (blob:). The post is sent to the queue for yt-dlp to resolve."),
         ("postNada", "No se ha encontrado ninguna imagen en este post. Pasa el carrusel una vez a mano y vuelve a intentarlo.",
                      "No image was found in this post. Step through the carousel once by hand and try again."),
+        ("desplazando", "Desplazando el perfil…", "Scrolling the profile…"),
+        ("thPerfil", "Todo Downloader: abre un perfil o un post de Threads (threads.com/@usuario)",
+                     "Todo Downloader: open a Threads profile or post (threads.com/@user)"),
+        ("thLeyendo", "Leyendo lo que carga la página…", "Reading what the page loads…"),
+        ("thAjenos", "de otras cuentas", "from other accounts"),
+        ("thSinMedios", "Threads respondió, pero sin archivos de este perfil",
+                        "Threads replied, but with no files from this profile"),
     ];
     let cuerpo: String = pares
         .iter()
@@ -379,7 +387,7 @@ try {{
 // Auto-scroll hasta agotar el perfil
 (async () => {{
     const hud = tdHud();
-    hud.sub('Desplazando el perfil…');
+    hud.sub(T.desplazando);
     console.log('[TD]', T.iniciada);
     let idle = 0, last = 0;
     window.__tdStop = false;
@@ -746,6 +754,263 @@ pub fn v2ph(port: u16) -> String {
 /// Los comentarios DENTRO del script van en inglés y son cortos a propósito:
 /// es un archivo que el usuario pega en su navegador, no código que nadie
 /// vaya a mantener desde ahí. El razonamiento vive aquí, que es donde se lee.
+/// Núcleo del capturador de Threads, sin el envoltorio del `sender`.
+///
+/// POR QUÉ ESTE SITIO NO SE PUEDE RESOLVER DESDE LA APLICACIÓN: no existe
+/// extractor de Threads, ni en gallery-dl ni en yt-dlp (su incidencia #7523
+/// lleva abierta desde 2023). Y lo que impide escribir uno es que **los enlaces
+/// del CDN de Meta van firmados**: no se puede coger la miniatura que se ve y
+/// reescribirla al original, como sí se hace con `~tplv-…` → `~noop` en los CDN
+/// de ByteDance. La URL a máxima calidad solo existe dentro de la respuesta
+/// JSON, y esa respuesta la pide la propia página.
+///
+/// POR QUÉ INTERCEPTAR EN VEZ DE PEDIR: reconstruir la petición exigiría el
+/// `doc_id`, el `lsd` y el `X-IG-App-ID` de Meta, y el `doc_id` cambia con cada
+/// despliegue suyo. Un extractor así se rompe sin avisar y el fallo parece «el
+/// perfil está vacío». Leyendo lo que la página ya recibió, el script no
+/// construye ninguna petición: cuando Meta cambia su API, cambia su cliente con
+/// ella y esto sigue funcionando. La sesión, la IP y la huella TLS son las del
+/// usuario, que es la única forma honesta de mirar contenido que su cuenta ya ve.
+///
+/// SEPARADO DEL ENVOLTORIO, igual que `post_core()`, para que el userscript
+/// pueda incluirlo junto al capturador de posts sin duplicar el HUD ni el envío.
+fn threads_core() -> &'static str {
+    r#"
+// Estado global: el interceptor puede llevar puesto desde que cargó la página
+// y la captura empezar mucho después.
+const TD_TH = { items: new Map(), diag: { hits: 0, nodes: 0, sinUrl: 0 }, hooked: false };
+
+// Threads pagina contra /graphql/query. `bulk-route-definitions` y
+// `/ajax/navigation` también pasan por ahí, pero no llevan medios: el filtro de
+// contenido de `tdThIngest` los descarta solos.
+const TD_TH_API = /\/graphql\/query|\/api\/v1\//;
+
+/** Cuenta que se está mirando AHORA.
+ *
+ *  Se lee en cada captura y no una sola vez: Threads es una SPA y navegar de un
+ *  perfil a otro no recarga la página, así que un valor cacheado al instalar el
+ *  script apuntaría a la cuenta equivocada. */
+function tdThHandle() {
+    return ((location.pathname.match(/@([^/?#]+)/) || [])[1] || '').toLowerCase();
+}
+
+/** Ordena un array de {width,height,url} y devuelve el mayor o el menor.
+ *  Por ÁREA y no por anchura: un vertical de 1080×1350 y uno de 1080×1080
+ *  empatan en anchura y no son el mismo archivo. */
+function tdThArea(arr, mayor) {
+    const c = (Array.isArray(arr) ? arr : []).filter(
+        x => x && typeof x.url === 'string' && x.url.startsWith('http'));
+    c.sort((a, b) => {
+        const A = (a.width || 0) * (a.height || 0), B = (b.width || 0) * (b.height || 0);
+        return mayor ? B - A : A - B;
+    });
+    return c[0] || null;
+}
+
+/** Un archivo suelto: o el nodo de una publicación simple, o un elemento de un
+ *  carrusel. */
+function tdThAdd(n, code, autor, texto, idx, total) {
+    if (!n || typeof n !== 'object') return;
+    TD_TH.diag.nodes++;
+    const base = String(n.pk || n.id || '');
+    if (!base) return;
+    const id = total > 1 ? base + '_' + idx : base;
+    if (TD_TH.items.has(id)) return;
+
+    const cands = n.image_versions2 && n.image_versions2.candidates;
+    const img = tdThArea(cands, true);
+    const mini = tdThArea(cands, false);
+    const vid = tdThArea(n.video_versions, true);
+
+    // `video_versions` vacío es lo normal en una imagen: en las respuestas de
+    // Threads TODO nodo de medios lleva las dos claves.
+    const mejor = vid || img;
+    if (!mejor) { TD_TH.diag.sinUrl++; return; }
+
+    TD_TH.items.set(id, {
+        id,
+        author: autor,
+        title: texto,
+        url: mejor.url,
+        // La miniatura es el candidato MÁS PEQUEÑO a propósito: la rejilla
+        // pinta 320 px y descargar el original de 1440 para eso serían decenas
+        // de megas por un perfil.
+        thumb: (mini || img || {}).url || '',
+        w: mejor.width || n.original_width || 0,
+        h: mejor.height || n.original_height || 0,
+        video: !!vid,
+        pageUrl: code ? 'https://www.threads.com/@' + autor + '/post/' + code : location.href
+    });
+}
+
+/** Una publicación: puede ser un archivo o un carrusel.
+ *
+ *  NO filtra por cuenta aquí. El filtro va en el envío porque el interceptor
+ *  sigue puesto mientras navegas: lo que se capturó en un perfil no debe
+ *  perderse por abrir otro, y lo que se manda debe ser solo el que miras. */
+function tdThPost(p) {
+    const autor = String((p.user && (p.user.username || p.user.pk)) || tdThHandle() || '');
+    const code = p.code || p.shortcode || '';
+    const texto = (p.caption && p.caption.text) || p.accessibility_caption || '';
+    const car = p.carousel_media;
+    if (Array.isArray(car) && car.length) {
+        car.forEach((c, i) => tdThAdd(c, code, autor, texto, i, car.length));
+    } else {
+        tdThAdd(p, code, autor, texto, 0, 1);
+    }
+}
+
+/** Recorre CUALQUIER JSON buscando publicaciones por su FORMA.
+ *
+ *  Deliberadamente no se asume la ruta (`data.mediaData.edges[].node…`): esa
+ *  ruta es de Meta y la cambia cuando quiere. Lo que no cambia es que una
+ *  publicación lleva medios Y algo que la identifica —code, caption o user—.
+ *  Los hijos de un carrusel no llevan ninguna de las tres, por eso no se
+ *  procesan dos veces. Y una foto de perfil no lleva `image_versions2`, por eso
+ *  los avatares no acaban en la rejilla. */
+function tdThHarvest(o, d) {
+    if (!o || typeof o !== 'object' || (d || 0) > 14) return;
+    if (Array.isArray(o)) { for (const x of o) tdThHarvest(x, (d || 0) + 1); return; }
+    if ((o.image_versions2 || o.video_versions || o.carousel_media)
+        && (o.code || o.caption || o.user || o.carousel_media)) {
+        tdThPost(o);
+        return;   // no se baja a los hijos: ya los ha visto `tdThPost`
+    }
+    for (const k in o) {
+        const v = o[k];
+        if (v && typeof v === 'object') tdThHarvest(v, (d || 0) + 1);
+    }
+}
+
+function tdThIngest(txt) {
+    if (!txt || txt.indexOf('image_versions2') < 0) return;
+    TD_TH.diag.hits++;
+    // Threads responde a veces con varios JSON separados por saltos de línea.
+    for (const linea of txt.split('\n')) {
+        const t = linea.trim();
+        if (!t || t[0] !== '{') continue;
+        try { tdThHarvest(JSON.parse(t), 0); } catch (e) {}
+    }
+}
+
+/** Instala el interceptor. Idempotente: en el userscript se llama al cargar y
+ *  otra vez al pulsar el botón. */
+function tdThHook() {
+    if (TD_TH.hooked) return;
+    TD_TH.hooked = true;
+    const of = window.fetch;
+    window.fetch = async function (...a) {
+        const r = await of.apply(this, a);
+        try {
+            const u = typeof a[0] === 'string' ? a[0] : (a[0] && a[0].url) || '';
+            if (TD_TH_API.test(u)) r.clone().text().then(tdThIngest).catch(() => {});
+        } catch (e) {}
+        return r;
+    };
+    const oo = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (m, u, ...r) { this.__u = u; return oo.call(this, m, u, ...r); };
+    const os = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (...a) {
+        this.addEventListener('load', () => {
+            try { if (TD_TH_API.test(this.__u || '')) tdThIngest(this.responseText || ''); } catch (e) {}
+        });
+        return os.apply(this, a);
+    };
+}
+
+/** Lo que ya venía en el HTML.
+ *
+ *  Threads deja el arranque de Relay en etiquetas <script type="application/json">
+ *  y ahí están ya las primeras publicaciones. Leerlas evita que la captura
+ *  empiece en cero y, en la página de UN post, evita tener que recargar. */
+function tdThBootstrap() {
+    try {
+        for (const s of document.querySelectorAll('script[type="application/json"]')) {
+            const t = s.textContent || '';
+            if (t.length > 2000 && t.indexOf('image_versions2') >= 0) {
+                try { tdThHarvest(JSON.parse(t), 0); } catch (e) {}
+            }
+        }
+    } catch (e) {}
+}
+
+/** Captura el perfil abierto: auto-scroll —el scroll ES la paginación— y envío
+ *  a la rejilla de selección. */
+async function tdCapturarThreads() {
+    tdThHook();
+    tdThBootstrap();
+
+    const handle = tdThHandle();
+    if (!handle) console.warn('[TD]', T.thPerfil);
+
+    // El filtro por cuenta no es cosmético: en una sola respuesta de un perfil
+    // con cuatro publicaciones llegaron OCHENTA Y UN bloques de medios, porque
+    // Threads mezcla recomendaciones de otras cuentas. Sin esto la rejilla se
+    // llenaba de archivos que nadie había pedido.
+    const mios = () => [...TD_TH.items.values()].filter(
+        i => !handle || String(i.author).toLowerCase() === handle);
+
+    const hud = tdHud();
+    hud.sub(T.thLeyendo);
+    console.log('[TD]', T.iniciada);
+    hud.n(mios().length);
+
+    let idle = 0, last = mios().length;
+    window.__tdStop = false;
+    while (!window.__tdStop && idle < 8) {
+        window.scrollTo(0, document.body.scrollHeight);
+        await new Promise(r => setTimeout(r, 1500));
+        const n = mios().length;
+        if (n === last) {
+            idle++;
+            // Distingue «no llegan respuestas» de «llegan pero no son de esta
+            // cuenta». Sin esto era imposible saber cuál de las dos pasa.
+            hud.msg(TD_TH.diag.hits === 0
+                ? T.sinApi + ' (' + idle + '/8) — ' + T.scrollBloqueado
+                : 'API: ' + TD_TH.diag.hits + ' · ' + T.analizados + ': ' + TD_TH.diag.nodes
+                  + ' · ' + T.thAjenos + ': ' + (TD_TH.items.size - n) + ' (' + idle + '/8)');
+        } else {
+            idle = 0;
+            last = n;
+            hud.msg('API: ' + TD_TH.diag.hits + ' · ' + T.capturados + ': ' + n);
+        }
+        hud.n(n);
+    }
+
+    const arr = mios();
+    window.__tdItems = arr;   // lo usa el botón «💾 Guardar JSON»
+    console.log('[TD]', T.diagnostico, TD_TH.diag, T.thAjenos, TD_TH.items.size - arr.length);
+    if (!arr.length) {
+        hud.done(0, false, TD_TH.diag.hits === 0 ? T.apiNoResp : T.thSinMedios);
+        return;
+    }
+    hud.sub(T.enviando);
+    // A la REJILLA, no a la cola: de un perfil de Threads se quieren unos
+    // cuantos archivos, no los doscientos que salgan.
+    if (!(await tdSend(arr, hud, 'select'))) tdFallbackCopy(arr, hud);
+}
+"#
+}
+
+/// Script de consola para perfiles y posts de Threads.
+pub fn threads(port: u16) -> String {
+    let rotulo = m("Capturador de Threads", "Threads capturer");
+    let donde = m("Ejecutar en", "Run this on");
+    let consola = m("Consola", "Console");
+    format!(
+        r#"/* Todo Downloader — {rotulo} — By Eric V. Gramunt
+   {donde} https://www.threads.com/@usuario (F12 → {consola}) */
+(() => {{
+{sender}
+{nucleo}
+tdCapturarThreads();
+}})();
+"#,
+        sender = sender(port),
+        nucleo = threads_core()
+    )
+}
+
 fn post_core() -> &'static str {
     r#"
 const TD_IMG = /(douyinpic|byteimg|ibyteimg|tiktokcdn|bytecdn)\.com\//i;
@@ -878,45 +1143,81 @@ async function tdCapturarPost(modo) {
 /// `127.0.0.1` en los navegadores basados en Chromium.
 pub fn userscript(port: u16) -> String {
     let nucleo = post_core();
+    let threads = threads_core();
     let envio = sender(port);
     let boton = m("Capturar este post", "Capture this post");
-    let rotulo = m("captura de un post", "single post capture");
+    let boton_th = m("Capturar este perfil", "Capture this profile");
+    let rotulo = m("captura desde la página", "in-page capture");
     let descripcion = m(
-        "Añade un botón para enviar las fotos o el vídeo del post abierto a Todo Downloader",
-        "Adds a button to send the photos or the video of the open post to Todo Downloader",
+        "Un botón para enviar el post abierto (Douyin, TikTok) o el perfil de Threads a Todo Downloader",
+        "A button to send the open post (Douyin, TikTok) or the Threads profile to Todo Downloader",
     );
     format!(
         r#"// ==UserScript==
 // @name         Todo Downloader — {rotulo}
 // @namespace    https://github.com/AcidClawX41/todo-downloader
-// @version      1.1
+// @version      1.2
 // @description  {descripcion}
 // @match        https://www.douyin.com/*
 // @match        https://www.tiktok.com/*
+// @match        https://www.threads.com/*
+// @match        https://www.threads.net/*
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 (() => {{
 'use strict';
 {envio}
 {nucleo}
+{threads}
 
-// Botón flotante. Se pinta siempre y se activa solo cuando hay un post
-// abierto: en Douyin y TikTok la navegación no recarga la página, así que
-// mirar la URL una vez al cargar no serviría de nada.
-const b = document.createElement('button');
-b.textContent = '⬇ {boton}';
-b.style.cssText = [
-    'position:fixed','right:18px','bottom:18px','z-index:2147483646',
-    'padding:10px 14px','border:0','border-radius:10px',
-    'background:#FE2C55','color:#fff','font:13px/1 sans-serif',
-    'cursor:pointer','box-shadow:0 6px 24px rgba(0,0,0,.45)','display:none'
-].join(';');
-b.onclick = () => tdCapturarPost('post');
-document.body.appendChild(b);
+const TD_ES_THREADS = /(^|\.)threads\.(com|net)$/i.test(location.hostname);
 
-setInterval(() => {{ b.style.display = tdPostId() ? 'block' : 'none'; }}, 800);
+// En Threads el interceptor se instala YA, antes de que la página pida nada.
+// A diferencia de Douyin, aquí no hay nada que leer del DOM: si la respuesta
+// pasa sin que estemos escuchando, esos archivos se han perdido hasta recargar.
+// Por eso este userscript corre en `document-start` y no en `document-idle`.
+if (TD_ES_THREADS) tdThHook();
+
+function tdBoton(texto, color, abajo, accion) {{
+    const b = document.createElement('button');
+    b.textContent = texto;
+    b.style.cssText = [
+        'position:fixed', 'right:18px', 'bottom:' + abajo + 'px', 'z-index:2147483646',
+        'padding:10px 14px', 'border:0', 'border-radius:10px',
+        'background:' + color, 'color:#fff', 'font:13px/1 sans-serif',
+        'cursor:pointer', 'box-shadow:0 6px 24px rgba(0,0,0,.45)', 'display:none'
+    ].join(';');
+    b.onclick = accion;
+    return b;
+}}
+
+// El <body> puede no existir todavía en `document-start`.
+function tdPintar() {{
+    if (!document.body) return setTimeout(tdPintar, 50);
+
+    if (TD_ES_THREADS) {{
+        // A 96 px del borde y no a 18: Threads tiene su propio botón redondo
+        // de «Nuevo hilo» fijo en esa misma esquina, y a 18 px los dos se
+        // pisan. Subirlo es más fiable que confiar en el z-index, porque el
+        // botón de abajo sigue siendo clicable aunque el nuestro gane.
+        const t = tdBoton('⬇ {boton_th}', '#000', 96, () => tdCapturarThreads());
+        document.body.appendChild(t);
+        // Solo en un perfil o un post, no en el inicio ni en Buscar.
+        setInterval(() => {{
+            t.style.display = location.pathname.indexOf('/@') >= 0 ? 'block' : 'none';
+        }}, 800);
+        return;
+    }}
+
+    // Douyin y TikTok: se pinta siempre y se activa solo cuando hay un post
+    // abierto, porque ahí la navegación tampoco recarga la página.
+    const b = tdBoton('⬇ {boton}', '#FE2C55', 18, () => tdCapturarPost('post'));
+    document.body.appendChild(b);
+    setInterval(() => {{ b.style.display = tdPostId() ? 'block' : 'none'; }}, 800);
+}}
+tdPintar();
 }})();
 "#
     )
@@ -959,4 +1260,101 @@ pub fn bookmarklet(port: u16) -> String {
         .collect();
 
     format!("javascript:(()=>{{{escapado}}})();")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Los scripts se montan con `format!`, y ahí una llave mal escapada no da
+    /// error de compilación: sale un `${id}` literal en el JavaScript y falla
+    /// en el navegador del usuario. Ya pasó una vez.
+    #[test]
+    fn los_scripts_no_dejan_marcadores_sin_resolver() {
+        for (nombre, s) in [
+            ("tiktok", tiktok(4567)),
+            ("douyin", douyin(4567)),
+            ("v2ph", v2ph(4567)),
+            ("threads", threads(4567)),
+            ("userscript", userscript(4567)),
+        ] {
+            assert!(
+                s.contains("const TD_PORT = 4567;"),
+                "{nombre}: el puerto no se ha sustituido"
+            );
+            for marcador in ["{sender}", "{rotulo}", "{donde}", "{consola}", "{port}", "{dic}"] {
+                assert!(
+                    !s.contains(marcador),
+                    "{nombre}: ha quedado el marcador {marcador} sin resolver"
+                );
+            }
+        }
+    }
+
+    /// Lo que decide la calidad en Threads: los enlaces del CDN van firmados,
+    /// así que la URL del original solo puede salir de los arrays de la API.
+    /// Si alguna de estas piezas desaparece, el script deja de traer originales
+    /// sin dar ningún error visible.
+    #[test]
+    fn el_script_de_threads_lee_los_arrays_de_calidad() {
+        let s = threads(4567);
+        for clave in [
+            "image_versions2",
+            "candidates",
+            "video_versions",
+            "carousel_media",
+            "original_width",
+        ] {
+            assert!(s.contains(clave), "falta {clave}");
+        }
+        // Va a la rejilla de selección, no a la cola.
+        assert!(s.contains("tdSend(arr, hud, 'select')"));
+        // Y manda el tamaño real, que es lo que la rejilla no puede medir.
+        assert!(s.contains("w: mejor.width"));
+        assert!(s.contains("video: !!vid"));
+    }
+
+    /// El filtro por cuenta no es cosmético: en una sola respuesta de un perfil
+    /// llegan las publicaciones del perfil Y las recomendaciones de otros.
+    ///
+    /// Y se resuelve en cada captura, no al instalar: Threads es una SPA, y un
+    /// handle leído una sola vez apuntaría a la cuenta anterior en cuanto
+    /// navegues de un perfil a otro sin recargar.
+    #[test]
+    fn el_script_de_threads_filtra_por_la_cuenta_abierta() {
+        let s = threads(4567);
+        assert!(s.contains("function tdThHandle()"));
+        assert!(s.contains("String(i.author).toLowerCase() === handle"));
+    }
+
+    /// En Threads no hay nada que leer del DOM: si una respuesta pasa sin que
+    /// el interceptor esté puesto, esos archivos se pierden hasta recargar.
+    /// Por eso el userscript engancha antes de que la página pida nada.
+    #[test]
+    fn el_userscript_cubre_threads_desde_el_arranque() {
+        let s = userscript(4567);
+        assert!(s.contains("@match        https://www.threads.com/*"));
+        assert!(s.contains("@match        https://www.threads.net/*"));
+        assert!(s.contains("@run-at       document-start"));
+        assert!(s.contains("if (TD_ES_THREADS) tdThHook();"));
+        // Y sigue trayendo el capturador de posts de Douyin/TikTok.
+        assert!(s.contains("tdCapturarPost('post')"));
+        assert!(s.contains("tdCapturarThreads()"));
+    }
+
+    /// Los textos del script los pinta el navegador, así que se resuelven al
+    /// generarlo. Una cadena en español fija dentro del JavaScript no la
+    /// detecta ninguna revisión de la interfaz: ya había una así.
+    #[test]
+    fn los_textos_del_script_siguen_el_idioma() {
+        use crate::i18n::{set_lang, Lang};
+        set_lang(Lang::En);
+        let en = threads(4567);
+        set_lang(Lang::Es);
+        let es = threads(4567);
+        set_lang(Lang::default()); // el idioma es global: se deja como estaba
+        assert!(en.contains("Scrolling the profile"), "falta el texto en inglés");
+        assert!(es.contains("Desplazando el perfil"), "falta el texto en español");
+        assert_ne!(en, es);
+    }
 }

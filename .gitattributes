@@ -1,2 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Textos del instalador: SIEMPRE CRLF, en cualquier plataforma.
+#
+# La página de licencia de Inno Setup es un control RichEdit: con saltos LF
+# sueltos el texto se pinta como un párrafo gigante, sin cortes de línea, y las
+# condiciones quedan ilegibles. `* text=auto` los normaliza a LF en el
+# repositorio y confía en la configuración local para devolverlos — y quien
+# compila el instalador es el runner de CI, cuya configuración no controlamos.
+# `eol=crlf` lo deja fuera de esa duda.
+installer/*.txt text eol=crlf

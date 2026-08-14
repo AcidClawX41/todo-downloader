@@ -3,7 +3,7 @@
 ; ============================================================================
 ;  Built in CI by .github/workflows/build.yml. To build it by hand:
 ;
-;      iscc /DAppVersion=1.6.7 /DBinary=..\target\release\todo-downloader.exe ^
+;      iscc /DAppVersion=1.7.0 /DBinary=..\target\release\todo-downloader.exe ^
 ;           installer\todo-downloader.iss
 ;
 ;  WHY AN INSTALLER AT ALL. The portable .exe stays the primary download and
@@ -114,6 +114,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#Binary}"; DestDir: "{app}"; DestName: "{#ExeName}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+; Section 9 of the terms states that releases up to v1.4.0 remain available
+; under MIT. That claim should be verifiable without an internet connection.
+Source: "..\LICENSE-HISTORY.md"; DestDir: "{app}"; Flags: ignoreversion
 
 ; The accepted terms are installed too: someone who accepts them today must
 ; be able to read them again tomorrow without re-running the installer.
@@ -135,9 +138,17 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopic
 Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Helper binaries the application downloaded into its own folder, if any.
-; Settings and downloads live in the user profile and are NOT removed: an
-; uninstall should not throw away someone's files or their configuration.
-Type: filesandordirs; Name: "{app}\bin"
+; WHAT IS NOT REMOVED, AND WHY.
+;
+; Settings, downloads and the helper engines all live in the user profile, not
+; here, and none of them are deleted. Settings and downloads are the user's own
+; files. The helpers (yt-dlp, gallery-dl, ffmpeg) sit in
+; %LOCALAPPDATA%\TodoDownloader\bin, which is shared with any portable copy of
+; the application: removing them on uninstall would silently break a portable
+; install the user still wanted. They are ordinary files in a documented folder
+; and can be deleted by hand.
+;
+; Only what the installer itself put here is removed. `tips` is emptied only if
+; the user never added a GIF to it.
 Type: dirifempty; Name: "{app}\tips"
 Type: dirifempty; Name: "{app}"
