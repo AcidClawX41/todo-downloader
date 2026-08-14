@@ -1018,7 +1018,12 @@ fn url_extension(url: &str) -> Option<String> {
         None => (url.split('#').next().unwrap_or(url), ""),
     };
 
-    if let Some(ext) = path.rsplit('/').next().and_then(|n| n.rsplit('.').next()) {
+    // El punto es obligatorio. `rsplit('.')` sobre un segmento que no lo lleva
+    // devuelve el segmento ENTERO, así que `/v/abc` se tomaba por un archivo
+    // «.abc». Nunca dio problemas mientras esto solo bautizaba archivos, pero
+    // ahora `is_direct_media` decide el MOTOR con ello: un segmento corto y
+    // alfanumérico bastaba para que una página pasara por archivo directo.
+    if let Some((_, ext)) = path.rsplit('/').next().and_then(|n| n.rsplit_once('.')) {
         if plausible(ext) {
             return Some(ext.to_ascii_lowercase());
         }
@@ -9456,7 +9461,15 @@ mod tests {
         );
         // Y un `format=` que no es una extensión plausible no se acepta.
         assert_eq!(url_extension("https://cdn.example/v/abc?format=algolargo"), None);
+        // Un segmento SIN punto no es una extensión: `/v/abc` no es «.abc».
+        // `rsplit('.')` devolvía el segmento entero y colaba, y desde que
+        // `is_direct_media` decide el motor con esto, colar significaba tratar
+        // una página como si fuera un archivo.
         assert_eq!(url_extension("https://cdn.example/v/abc"), None);
+        assert_eq!(url_extension("https://cdn.example/v/mp4"), None);
+        assert!(!is_direct_media("https://cdn.example/v/mp4"));
+        // Con punto sí, y el punto puede estar en cualquier parte del nombre.
+        assert_eq!(url_extension("https://cdn.example/v/a.b.png").as_deref(), Some("png"));
     }
     #[test]
     fn threads_se_reconoce_por_el_host() {
