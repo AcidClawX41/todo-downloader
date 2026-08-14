@@ -149,7 +149,28 @@ pub fn search_url(site: &Site, tags: &str) -> String {
 /// ni aparece en los argumentos ni queda en disco de forma permanente.
 ///
 /// Devuelve `None` si no hay credenciales que escribir.
+/// Configuración de credenciales para gallery-dl, si el sitio las exige.
+///
+/// SOLO PARA LOS SITIOS QUE LAS EXIGEN, y esto no es una precaución teórica.
+/// Los ajustes guardan UN par usuario/clave, no uno por sitio. Antes se le
+/// enchufaba a cualquier booru que se buscara, de modo que el `user-id`
+/// numérico y la `api-key` de **Gelbooru** —el único que obliga— acababan
+/// mandados a Danbooru como `username` y `api-key`.
+///
+/// El efecto era desconcertante: Danbooru, AIBooru, e621 y Konachan leen esos
+/// campos y se encontraban con credenciales que no son suyas, mientras que
+/// Safebooru y yande.re ni los miran y por eso nunca fallaron. Cuadra con el
+/// síntoma exacto —cuatro sitios agotando el plazo y dos funcionando— y explica
+/// por qué descargar la galería completa del MISMO sitio sí funcionaba: ese
+/// camino nunca ha pasado un `-c`.
+///
+/// Lo correcto de verdad sería un par de credenciales POR SITIO. Mientras no
+/// exista, no mandarlas donde no constan necesarias es la misma política que
+/// ya rige para las cookies desde que enviarlas de más rompió YouTube.
 pub fn auth_config(site: &Site, user: &str, key: &str) -> Option<String> {
+    if !site.needs_auth {
+        return None;
+    }
     let (user, key) = (user.trim(), key.trim());
     if user.is_empty() || key.is_empty() {
         return None;
@@ -308,4 +329,28 @@ pub fn parse(json: &str) -> Result<Vec<Post>, String> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un par de credenciales para TODOS los boorus era el fallo: el user-id
+    /// numérico de Gelbooru llegaba a Danbooru como nombre de usuario y dejaba
+    /// la búsqueda colgada hasta agotar el plazo. Cuatro sitios caídos y dos
+    /// funcionando, según leyeran esos campos o no.
+    #[test]
+    fn las_credenciales_solo_van_al_sitio_que_las_exige() {
+        let gel = SITES.iter().find(|s| s.key == "gelbooru").unwrap();
+        let dan = SITES.iter().find(|s| s.key == "danbooru").unwrap();
+        let e6 = SITES.iter().find(|s| s.key == "e621").unwrap();
+
+        assert!(auth_config(gel, "12345", "clave").is_some(), "Gelbooru sí las exige");
+        assert!(auth_config(dan, "12345", "clave").is_none(), "Danbooru no debe recibirlas");
+        assert!(auth_config(e6, "12345", "clave").is_none(), "e621 no debe recibirlas");
+
+        // Sin credenciales no se escribe nada, ni siquiera para Gelbooru.
+        assert!(auth_config(gel, "", "").is_none());
+        assert!(auth_config(gel, "12345", "  ").is_none());
+    }
 }

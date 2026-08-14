@@ -89,6 +89,9 @@ fn dic() -> String {
                        "The player exposes no downloadable URL (blob:). The post is sent to the queue for yt-dlp to resolve."),
         ("postNada", "No se ha encontrado ninguna imagen en este post. Pasa el carrusel una vez a mano y vuelve a intentarlo.",
                      "No image was found in this post. Step through the carousel once by hand and try again."),
+        ("postVariosVideos",
+         "ATENCIÓN: este post tiene varias diapositivas. Se manda la URL del post y yt-dlp resuelve SOLO la primera; las demás no se descargan. Diapositivas detectadas:",
+         "WARNING: this post has several slides. The post URL is sent and yt-dlp resolves ONLY the first one; the rest are not downloaded. Slides detected:"),
         ("desplazando", "Desplazando el perfil…", "Scrolling the profile…"),
         ("thPerfil", "Todo Downloader: abre un perfil o un post de Threads (threads.com/@usuario)",
                      "Todo Downloader: open a Threads profile or post (threads.com/@user)"),
@@ -1103,12 +1106,19 @@ async function tdCapturarPost(modo) {
     // The post URL goes to the application and yt-dlp resolves it. The blurred
     // backdrop is the poster and serves as the thumbnail.
     if (tdEsVideo()) {
-        const portada = (tdSlides().urls || [])[0] || '';
+        const portadas = tdSlides().urls || [];
         const item = [{ id: id, author: meta.autor, title: meta.titulo,
-                        url: canon('video'), pageUrl: canon('video'), thumb: portada }];
+                        url: canon('video'), pageUrl: canon('video'), thumb: portadas[0] || '' }];
         window.__tdItems = item;
         hud.n(1);
-        hud.msg(T.postAytdlp);
+        // Una publicación de vídeo se manda como UNA sola cosa: la URL del post,
+        // que resuelve yt-dlp. Si el post tiene varias diapositivas, yt-dlp
+        // devuelve solo la primera y el resto se pierde EN SILENCIO. No se sabe
+        // arreglar todavía, pero callarlo es peor: el panel decía «1 archivo» y
+        // parecía que había ido bien.
+        hud.msg(portadas.length > 1
+            ? T.postVariosVideos + ' (' + portadas.length + ')'
+            : T.postAytdlp);
         if (!(await tdSend(item, hud, modo))) tdFallbackCopy(item, hud);
         return;
     }

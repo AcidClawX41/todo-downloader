@@ -199,6 +199,20 @@ Two details that matter more than they look:
 
 ## Known limitations
 
+- **Danbooru and AIBooru may answer the built-in Booru search with a Cloudflare
+  challenge (403).** That is not a missing session. gallery-dl cannot solve a
+  JavaScript challenge, and the `cf_clearance` cookie proving you passed one in
+  a browser is tied to your IP *and* your User-Agent and lasts around half an
+  hour. A freshly exported `cookies.txt` sometimes works and sometimes does not.
+  **Pasting the tag-search URL straight into Downloads does work**, because that
+  path downloads instead of querying the JSON API. The Booru tab now says this
+  when it happens, instead of reporting a timeout.
+- **Booru credentials are one pair, and they are Gelbooru's.** Gelbooru is the
+  only site that requires them. They used to be sent to whichever booru you
+  searched, which left Danbooru, AIBooru, e621 and Konachan hanging until they
+  timed out — a Gelbooru `user_id` offered to Danbooru as a username is not a
+  credential it can use. Per-site accounts are not implemented yet.
+
 - **Facebook listing is slow and will stay slow.** One full page load per photo,
   sequentially, plus the pacing between requests. For a large profile it is
   quicker to paste the URL into Downloads and fetch the whole thing: the cost is

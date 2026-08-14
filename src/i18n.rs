@@ -121,6 +121,32 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         ),
         "cap.listening" => entry!("● Receptor escuchando en", "● Receiver listening on"),
         "cap.off" => entry!("● Receptor desactivado", "● Receiver disabled"),
+        "booru.copy_diag" => entry!("📋 Copiar diagnóstico", "📋 Copy diagnostics"),
+        "booru.cf_file_wins" => entry!(
+            "⚠ Tienes marcado el navegador, pero el cookies.txt tiene prioridad y es el que se manda. Si querías la sesión del navegador, vacía el archivo en Ajustes.",
+            "⚠ You have the browser ticked, but the cookies.txt takes priority and is what gets sent. If you meant the browser session, clear the file in Settings."
+        ),
+        "booru.cf_403" => entry!(
+            "Un «Cloudflare challenge (403)» aquí NO significa que falten cookies: significa que la cookie cf_clearance no vale para ESTE sitio. Se obtiene visitando danbooru.donmai.us en el navegador, dura poco —del orden de media hora— y va atada al User-Agent que la consiguió. Exporta el cookies.txt justo después de abrir el sitio, y con el mismo navegador cuyo User-Agent tengas puesto.",
+            "A «Cloudflare challenge (403)» here does NOT mean cookies are missing: it means the cf_clearance cookie is not valid for THIS site. You get one by visiting danbooru.donmai.us in the browser, it is short-lived — around half an hour — and it is tied to the User-Agent that earned it. Export the cookies.txt right after opening the site, from the same browser whose User-Agent you have set."
+        ),
+        "booru.cf_none" => entry!(
+            "▸ Este sitio está detrás de Cloudflare y no se le está mandando ninguna sesión. Sin ella cada petición vuelve a empezar por la comprobación y la búsqueda suele agotar el plazo. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt.",
+            "▸ This site sits behind Cloudflare and no session is being sent. Without one, every request starts over at the challenge and the search usually runs out of time. Turn it on in Settings → Browser cookies, or load a cookies.txt."
+        ),
+        "booru.cf_no_ua" => entry!(
+            "▸ Se mandan cookies, pero NO hay User-Agent. Cloudflare ata la cookie cf_clearance al User-Agent que la obtuvo, así que sin él la sesión no vale de nada. Ajustes → «Detectar desde mi navegador».",
+            "▸ Cookies are being sent, but there is NO User-Agent. Cloudflare ties the cf_clearance cookie to the User-Agent that earned it, so without it the session is worthless. Settings → «Detect from my browser»."
+        ),
+        "booru.cf_ok" => entry!(
+            "▸ Se manda tu sesión y tu User-Agent: es lo que este sitio necesita para no plantarte la comprobación de Cloudflare en cada búsqueda.",
+            "▸ Your session and your User-Agent are being sent: that is what this site needs so it does not put Cloudflare's challenge in front of every search."
+        ),
+        "booru.failed" => entry!("LA BÚSQUEDA NO DEVOLVIÓ NADA — ESTO DIJO GALLERY-DL:", "THE SEARCH RETURNED NOTHING — THIS IS WHAT GALLERY-DL SAID:"),
+        "booru.failed_help" => entry!(
+            "429 o «rate limit»: el sitio te está frenando, espera un minuto. «Not Found» o etiqueta sin resultados: prueba la etiqueta en la web del booru. «more than N tags»: Danbooru y AIBooru limitan las etiquetas por búsqueda a quien no ha iniciado sesión. Timeout o error de conexión: el sitio está caído o bloqueado desde tu red.",
+            "429 or «rate limit»: the site is throttling you, wait a minute. «Not Found» or a tag with no posts: try the tag on the booru's own website. «more than N tags»: Danbooru and AIBooru cap the number of tags per search for users who are not signed in. Timeout or connection error: the site is down or blocked from your network."
+        ),
         "cap.enable" => entry!("Activar receptor", "Enable receiver"),
         "cap.bind_failed" => entry!("● El receptor NO ha podido abrir el puerto", "● The receiver could NOT open its port"),
         "cap.bind_help" => entry!(
@@ -547,8 +573,20 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "v2ph.ok" => entry!("Sesión de V2PH iniciada y comprobada", "Signed in to V2PH and verified"),
         "v2ph.out" => entry!("Sesión de V2PH cerrada", "Signed out of V2PH"),
         "set.booru" => entry!("CUENTAS DE BOORU", "BOORU ACCOUNTS"),
-        "set.booru_user" => entry!("Usuario / user-id:", "Username / user-id:"),
-        "set.booru_key" => entry!("Clave de API:", "API key:"),
+        "set.booru_user" => entry!("Gelbooru — user_id (numérico):", "Gelbooru — user_id (numeric):"),
+        "set.booru_key" => entry!("Gelbooru — api_key:", "Gelbooru — api_key:"),
+        "set.booru_where" => entry!(
+            "Los dos están en gelbooru.com → Account → Options → «API Access Credentials», en una línea con esta forma:\n&api_key=<clave>&user_id=<número>\nEl user_id es el NÚMERO, no tu nombre de usuario: con el nombre, la API responde «'api-key' & 'user-id' needed to access the API» aunque los hayas rellenado.",
+            "Both are at gelbooru.com → Account → Options → «API Access Credentials», on a line shaped like this:\n&api_key=<key>&user_id=<number>\nThe user_id is the NUMBER, not your username: with the name, the API answers «'api-key' & 'user-id' needed to access the API» even though you filled both in."
+        ),
+        "set.booru_user_nan" => entry!(
+            "⚠ Esto no es un número. Gelbooru espera el user_id numérico; con el nombre de usuario rechaza la petición.",
+            "⚠ That is not a number. Gelbooru expects the numeric user_id; with a username it rejects the request."
+        ),
+        "set.booru_auth_note" => entry!(
+            "Solo se mandan a Gelbooru, que es el único que las exige. Antes iban a cualquier booru que buscaras, y un user-id de Gelbooru presentado a Danbooru como nombre de usuario dejaba la búsqueda colgada hasta agotar el plazo.",
+            "These are only sent to Gelbooru, the one site that requires them. They used to go to whichever booru you searched, and a Gelbooru user-id offered to Danbooru as a username left the search hanging until it timed out."
+        ),
         "set.booru_note" => entry!(
             "Solo hacen falta para Gelbooru (obligatorias) y para funciones de cuenta en Danbooru. Se guardan en tu configuración local y se pasan al motor sin aparecer en registros.",
             "Only needed for Gelbooru (mandatory) and for account features on Danbooru. Stored in your local settings and passed to the engine without appearing in logs."

@@ -636,7 +636,7 @@ enum Ev {
 }
 
 /// Motor de descarga por tarea
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Engine {
     Http,      // enlace directo a archivo (CDN)
     YtDlp,     // página de vídeo (TikTok, YouTube, Instagram, X…)
@@ -672,12 +672,17 @@ const KNOWN_SITES: &[&str] = &[
 
 /// ¿Es un enlace directo a archivo (descargable por HTTP puro)?
 fn is_direct_media(url: &str) -> bool {
-    let path = url.split(['?', '#']).next().unwrap_or("").to_lowercase();
     const EXTS: &[&str] = &[
-        ".mp4", ".webm", ".mov", ".mkv", ".avi", ".mp3", ".m4a", ".wav",
-        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".zip", ".rar", ".7z", ".pdf",
+        "mp4", "webm", "mov", "mkv", "avi", "mp3", "m4a", "wav",
+        "jpg", "jpeg", "png", "webp", "gif", "zip", "rar", "7z", "pdf",
     ];
-    EXTS.iter().any(|e| path.ends_with(e))
+    // Por `url_extension` y no comparando el final de la ruta: X sirve sus
+    // imágenes como `…/media/<id>?format=jpg&name=orig`, sin extensión en la
+    // ruta. Mirando solo la ruta no eran «medios directos», así que caían al
+    // último caso de `engine_for_url` —yt-dlp— y este descargaba una imagen
+    // como si fuera un vídeo. De ahí los `.unknown_video` en disco: ese nombre
+    // es de yt-dlp, su marcador para un formato cuya extensión no conoce.
+    url_extension(url).is_some_and(|e| EXTS.contains(&e.as_str()))
         || url.contains("tiktokcdn")
         || url.contains("douyinvod")
         || url.contains("mime_type=video")
@@ -1004,15 +1009,32 @@ fn referer_for(url: &str) -> &'static str {
 
 /// Extensión real del archivo a partir de la URL (sin query ni fragmento)
 fn url_extension(url: &str) -> Option<String> {
-    let path = url.split(['?', '#']).next()?;
-    let name = path.rsplit('/').next()?;
-    let ext = name.rsplit('.').next()?;
-    // Solo extensiones plausibles: evita tomar trozos del hash del CDN
-    if (2..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-        Some(ext.to_ascii_lowercase())
-    } else {
-        None
+    let plausible = |e: &str| {
+        (2..=5).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric())
+    };
+
+    let (path, query) = match url.split_once('?') {
+        Some((p, q)) => (p, q.split('#').next().unwrap_or("")),
+        None => (url.split('#').next().unwrap_or(url), ""),
+    };
+
+    if let Some(ext) = path.rsplit('/').next().and_then(|n| n.rsplit('.').next()) {
+        if plausible(ext) {
+            return Some(ext.to_ascii_lowercase());
+        }
     }
+
+    // X sirve las imágenes como `…/media/HPLIPCOWcAAfDwJ?format=jpg&name=orig`:
+    // el tipo va en la QUERY, no en la ruta. Mirando solo la ruta no hay
+    // extensión que encontrar, y el respaldo de más abajo las bautizaba a todas
+    // como vídeo. Es la convención del propio sitio, no una heurística.
+    query
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+        .find(|(k, _)| *k == "format" || *k == "ext")
+        .map(|(_, v)| v)
+        .filter(|v| plausible(v))
+        .map(|v| v.to_ascii_lowercase())
 }
 
 /// Decodifica %XX y '+' (espacios) de un valor de query, para el `dn=` del magnet
@@ -1467,6 +1489,13 @@ struct App {
     client: reqwest::Client,
     clip_enabled: Arc<AtomicBool>,
     grab_any_flag: Arc<AtomicBool>,
+    /// Último error del buscador de boorus, tal cual lo dijo gallery-dl.
+    /// Persistente a propósito: ver el comentario de `Ev::BooruError`.
+    booru_error: String,
+    /// Corta la búsqueda en curso. Como en la exploración de perfiles, subir el
+    /// epoch solo descarta el resultado: el proceso seguiría pidiendo páginas a
+    /// un sitio que ya no interesa, y con un ritmo de 1,5 s eso son minutos.
+    booru_cancel: Arc<AtomicBool>,
     recv_enabled: Arc<AtomicBool>,
     /// Por qué el receptor NO está escuchando, si es que no lo está. `None` es
     /// «el puerto está abierto». Se guarda para poder decirlo en la interfaz en
@@ -1669,6 +1698,8 @@ impl App {
             client,
             clip_enabled,
             grab_any_flag,
+            booru_error: String::new(),
+            booru_cancel: Arc::new(AtomicBool::new(false)),
             recv_enabled,
             recv_error,
             capture_site: 0,
@@ -1956,6 +1987,30 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     fn add_url(&mut self, url: &str, author: &str, title: &str, page_url: &str, vid_id: &str, thumb: &str) {
+        self.add_url_ext(url, author, title, page_url, vid_id, thumb, "");
+    }
+
+    /// Igual que `add_url`, pero con la extensión REAL cuando quien llama ya la
+    /// sabe.
+    ///
+    /// POR QUÉ HACE FALTA: la rejilla de perfiles la conoce —gallery-dl la
+    /// publica en el campo `extension` de cada archivo, y es la que se pinta
+    /// debajo de cada miniatura— y hasta ahora la tiraba, dejando que el nombre
+    /// se dedujera otra vez de la URL. En X eso falla siempre: sus imágenes son
+    /// `…/media/<id>?format=jpg&name=orig`, sin extensión en la ruta, así que la
+    /// deducción no encontraba nada y caía al respaldo. Y el respaldo era `mp4`.
+    /// Resultado: un perfil entero de fotos guardado como vídeos.
+    #[allow(clippy::too_many_arguments)]
+    fn add_url_ext(
+        &mut self,
+        url: &str,
+        author: &str,
+        title: &str,
+        page_url: &str,
+        vid_id: &str,
+        thumb: &str,
+        ext_hint: &str,
+    ) {
         let trimmed = url.trim();
         // Canal seguro: forzar HTTPS en cualquier enlace http:// (TLS obligatorio)
         let upgraded;
@@ -1980,7 +2035,15 @@ impl App {
         if url.is_empty() || self.rows.iter().any(|r| r.url == url) {
             return;
         }
-        let engine = engine_for_url(url);
+        // Un elemento del listado ES un archivo directo: gallery-dl ya lo
+        // resolvió y hasta publicó su extensión. Cuando quien llama la aporta,
+        // manda sobre cualquier deducción por la forma de la URL — y solo se
+        // corrige el caso de yt-dlp, que es el cajón de sastre del final de
+        // `engine_for_url`, para no pisar a MEGA ni a los hosters.
+        let engine = match engine_for_url(url) {
+            Engine::YtDlp if !ext_hint.is_empty() => Engine::Http,
+            otro => otro,
+        };
 
         // Autor para agrupar en subcarpeta. Si quien llama no lo aporta
         // (LinkGrabber, pegar enlaces, importar TXT/JSON, reintento) se deduce
@@ -2019,7 +2082,15 @@ impl App {
             // Enlace directo: conservamos la extensión real (.jpeg, .webp, .mp4…)
             // pero con un nombre legible, no el identificador del CDN.
             Engine::Http => {
-                let ext = url_extension(url).unwrap_or_else(|| "mp4".into());
+                // Orden deliberado: lo que el extractor AFIRMA, luego lo que la
+                // URL demuestra, y solo al final una suposición. `mp4` sigue
+                // siendo el último recurso porque un enlace suelto pegado a
+                // mano suele ser vídeo, pero ya no decide nada que se supiera.
+                let ext = if !ext_hint.is_empty() {
+                    ext_hint.to_ascii_lowercase()
+                } else {
+                    url_extension(url).unwrap_or_else(|| "mp4".into())
+                };
                 format!("{stem}.{ext}")
             }
             // gallery-dl baja el post/galería completo: puede incluir vídeo,
@@ -2601,6 +2672,7 @@ impl App {
                 Ev::BooruError(_, epoch) if epoch != self.booru_epoch => {}
                 Ev::BooruResults(posts, _) => {
                     self.booru_searching = false;
+                    self.booru_error.clear();
                     let n = posts.len();
                     self.booru_posts = posts;
                     // Las miniaturas de la búsqueda anterior ya no sirven
@@ -2610,6 +2682,12 @@ impl App {
                 }
                 Ev::BooruError(e, _) => {
                     self.booru_searching = false;
+                    // Además del aviso pasajero, se GUARDA. El toast dura
+                    // cuatro segundos y luego la pestaña quedaba en blanco sin
+                    // nada que explicara por qué: parecía que la búsqueda no
+                    // había llegado a hacerse. Todas las demás vistas de la
+                    // aplicación conservan su error a la vista; esta no.
+                    self.booru_error = e.clone();
                     self.toast(i18n::booru_error(self.settings.lang, &e));
                 }
                 Ev::BooruThumb(id, img) => {
@@ -3000,9 +3078,36 @@ async fn run_capture_timeout(
         if Instant::now() >= fin {
             kill_tree(&mut child).await;
             let _ = child.wait().await;
+            // LO QUE YA HABÍA DICHO NO SE TIRA.
+            //
+            // Antes se devolvía «el motor no respondió a tiempo» y punto: todo
+            // lo que el motor hubiera escrito antes de que lo matáramos se
+            // perdía. Y ahí es donde está siempre la causa —un 403, un desafío,
+            // un reintento en bucle—, así que el diagnóstico quedaba reducido a
+            // «tardó mucho», que no dice nada. Al matar el árbol las tuberías
+            // se cierran y los lectores terminan, así que basta con esperarlos.
+            let err = t_err.await.unwrap_or_default();
+            let cola: Vec<&str> = err
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .rev()
+                .take(3)
+                .collect();
+            let detalle = if cola.is_empty() {
+                msg_lang(
+                    "(el motor no llegó a decir nada antes de agotar el plazo)",
+                    "(the engine said nothing before it ran out of time)",
+                )
+                .to_string()
+            } else {
+                cola.into_iter().rev().collect::<Vec<_>>().join(" | ")
+            };
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                msg_lang("el motor no respondió a tiempo", "the engine did not respond in time"),
+                format!(
+                    "{} — {detalle}",
+                    msg_lang("el motor no respondió a tiempo", "the engine did not respond in time")
+                ),
             ));
         }
         tokio::time::sleep(Duration::from_millis(120)).await;
@@ -3021,11 +3126,58 @@ async fn run_capture_timeout(
 /// está pensando, está bloqueando o reintentando por dentro. Esperar 90 s
 /// «por si acaso» solo consigue que el usuario crea que la aplicación se ha
 /// colgado, que es exactamente el problema que este tope venía a resolver.
-const BOORU_TIMEOUT: Duration = Duration::from_secs(25);
+/// Plazo base de una búsqueda en un booru.
+///
+/// Eran 25 s y se quedaban cortos. Danbooru, AIBooru, Konachan y e621 están
+/// detrás de Cloudflare: la primera petición puede llevarse varios segundos
+/// resolviendo su comprobación antes de que empiece nada. Safebooru y yande.re
+/// no lo están, y son justo los dos que nunca han fallado.
+///
+/// 45 s no arregla un sitio caído, pero deja de cortar a uno que solo es lento.
+const BOORU_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// ¿Este booru se beneficia de que le mandemos la sesión del navegador?
+///
+/// Danbooru, AIBooru, Konachan y e621 están **detrás de Cloudflare**, y son
+/// exactamente los cuatro que fallan. Safebooru y yande.re no lo están, y son
+/// los dos que nunca han dado problemas. Eso no es casualidad: la comprobación
+/// de Cloudflare se pasa una vez en el navegador y deja una cookie
+/// `cf_clearance`; sin ella, cada petición vuelve a empezar por el desafío, y
+/// ahí es donde se va el tiempo hasta agotar el plazo.
+///
+/// Y hay una segunda razón, propia de cada sitio: en Danbooru y AIBooru, quien
+/// ha iniciado sesión puede buscar con más etiquetas y ve el catálogo completo.
+/// La sesión no solo desatasca, también amplía lo que se puede pedir.
+///
+/// POR QUÉ NO A TODOS: mandar cookies donde no hacen falta ya rompió YouTube en
+/// la v1.6.0. La política de este proyecto es enviarlas solo donde constan
+/// necesarias, y esta lista es esa constancia.
+fn booru_needs_cookies(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    ["donmai.us", "aibooru.online", "konachan.com", "konachan.net", "e621.net", "e926.net"]
+        .iter()
+        .any(|h| u.contains(h))
+}
+
+/// Segundos entre peticiones al buscar en un booru.
+///
+/// No todos aprietan igual. Danbooru y AIBooru comparten motor y el límite
+/// para quien no ha iniciado sesión es estrecho; Konachan es un servidor
+/// pequeño y lento. Safebooru, e621 y yande.re aguantan bastante más, y
+/// castigarlos con la misma pausa solo haría la búsqueda lenta sin motivo.
+fn booru_pacing(url: &str) -> &'static str {
+    let u = url.to_ascii_lowercase();
+    if u.contains("donmai.us") || u.contains("aibooru") || u.contains("konachan") {
+        "1.5"
+    } else {
+        "0.5"
+    }
+}
 /// Tope para listar una galería. Mucho mayor porque Instagram se espacia
 /// 6-12 s entre peticiones y una página de 30 puede tardar varios minutos.
 const GALLERY_TIMEOUT: Duration = Duration::from_secs(300);
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 async fn booru_search(
     program: String,
@@ -3035,6 +3187,9 @@ async fn booru_search(
     auth_cfg: Option<String>,
     tx: UnboundedSender<Ev>,
     epoch: u64,
+    cancelar: Arc<AtomicBool>,
+    cookies: Vec<String>,
+    ua: String,
 ) {
     let first = (page.saturating_sub(1)) * per_page + 1;
     let last = first + per_page - 1;
@@ -3049,6 +3204,68 @@ async fn booru_search(
     let mut cmd = tokio::process::Command::new(&program);
     utf8_env(&mut cmd);
     cmd.args(["-j", "--range", &format!("{first}-{last}"), "--no-download"]);
+    // RITMO ENTRE PETICIONES. Todas las demás invocaciones de gallery-dl de
+    // esta aplicación lo llevan; esta era la única que no, y se notaba justo
+    // en los sitios con el límite más estrecho.
+    //
+    // Y pesa más de lo que parece por cómo funciona `--range`: es un filtro
+    // sobre lo que el extractor va emitiendo, no un salto. Para darte la
+    // página 5 el extractor recorre igualmente los 200 primeros posts, o sea
+    // varias llamadas a la API. Sin pausa entre ellas, Danbooru y AIBooru
+    // —mismo motor, límite anónimo estrecho— y Konachan responden 429 o
+    // simplemente dejan de contestar.
+    cmd.args(["--sleep-request", booru_pacing(&url)]);
+
+    // SESIÓN DEL NAVEGADOR, solo para los sitios que la necesitan.
+    if !cookies.is_empty() {
+        cmd.args(&cookies);
+    }
+    // El User-Agent va JUNTO a las cookies y no por su cuenta.
+    //
+    // Cloudflare ata la cookie `cf_clearance` a tu dirección **y al
+    // User-Agent que la obtuvo**. Mandar la cookie con un User-Agent distinto
+    // —el de gallery-dl— la invalida: el desafío vuelve a saltar y parece que
+    // la sesión no sirva. Es el mismo motivo por el que Ajustes tiene el botón
+    // «Detectar desde mi navegador».
+    if !ua.trim().is_empty() {
+        cmd.args(["--user-agent", ua.trim()]);
+    }
+
+    // Copia legible del comando, SIN datos sensibles: del cookies.txt solo el
+    // nombre del archivo —nunca la ruta del perfil de usuario— y del
+    // User-Agent solo si lo hay, no cuál. Lo que interesa comparar son las
+    // OPCIONES, no las credenciales.
+    let cmd_visible = {
+        let mut v: Vec<String> = vec![
+            "gallery-dl".into(),
+            "-j".into(),
+            "--range".into(),
+            format!("{first}-{last}"),
+            "--no-download".into(),
+            "--sleep-request".into(),
+            booru_pacing(&url).into(),
+        ];
+        if cfg_path.is_some() {
+            v.push("-c <credenciales>".into());
+        }
+        let mut it = cookies.iter();
+        while let (Some(k), Some(val)) = (it.next(), it.next()) {
+            let mostrado = if k == "--cookies" {
+                std::path::Path::new(val)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "cookies.txt".into())
+            } else {
+                val.clone()
+            };
+            v.push(format!("{k} {mostrado}"));
+        }
+        if !ua.trim().is_empty() {
+            v.push("--user-agent <el tuyo>".into());
+        }
+        v.push(format!("\"{url}\""));
+        v.join(" ")
+    };
     if let Some(p) = &cfg_path {
         cmd.arg("-c").arg(p);
     }
@@ -3058,7 +3275,13 @@ async fn booru_search(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let result = run_capture_timeout(cmd, BOORU_TIMEOUT, None).await;
+    // El plazo crece con la profundidad de la página, porque el coste crece
+    // con ella: la página 5 obliga al extractor a recorrer 200 posts. Un tope
+    // fijo de 25 s funcionaba en la primera página y cortaba las siguientes,
+    // que es exactamente la forma que tenía el fallo: «al principio va y luego
+    // deja de responder».
+    let plazo = BOORU_TIMEOUT + Duration::from_secs(20 * u64::from(page.saturating_sub(1)).min(9));
+    let result = run_capture_timeout(cmd, plazo, Some(cancelar)).await;
 
     // Borrado inmediato: el archivo solo existe mientras dura la búsqueda
     if let Some(p) = &cfg_path {
@@ -3071,7 +3294,8 @@ async fn booru_search(
             if stdout.trim().is_empty() {
                 let err = stderr.as_str();
                 let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("sin resultados");
-                let _ = tx.send(Ev::BooruError(last.chars().take(160).collect(), epoch));
+                let msg: String = last.chars().take(300).collect();
+                let _ = tx.send(Ev::BooruError(format!("{msg}\n\n$ {cmd_visible}"), epoch));
                 return;
             }
             match booru::parse(stdout) {
@@ -3084,7 +3308,11 @@ async fn booru_search(
             }
         }
         Err(e) => {
-            let _ = tx.send(Ev::BooruError(e.to_string(), epoch));
+            // Con el comando delante. Es la única forma de comparar lo que hace
+            // el buscador con lo que hace una descarga de galería completa, que
+            // usa el MISMO gallery-dl contra el MISMO sitio y sí funciona: si
+            // los dos caminos difieren, la diferencia está aquí escrita.
+            let _ = tx.send(Ev::BooruError(format!("{e}\n\n$ {}", cmd_visible), epoch));
         }
     }
 }
@@ -7236,7 +7464,15 @@ impl App {
                         for it in elegidos {
                             // El enlace de la publicación va como page_url: si la
                             // URL de CDN caduca, el motor puede reintentar por ahí.
-                            self.add_url(&it.url, &autor, &it.filename, &it.post_url, &it.post_id, "");
+                            self.add_url_ext(
+                                &it.url,
+                                &autor,
+                                &it.filename,
+                                &it.post_url,
+                                &it.post_id,
+                                "",
+                                &it.ext,
+                            );
                         }
                         self.toast(i18n::added_links(lang, n));
                         if n > 0 {
@@ -7895,6 +8131,15 @@ impl App {
                 }
                 if self.booru_searching {
                     ui.spinner();
+                    // Un sitio lento puede tenerte esperando el plazo entero.
+                    // Sin esto la única salida era cerrar la aplicación, y
+                    // cambiar de booru mientras tanto no hacía nada.
+                    if soft_button(ui, t(lang, "gal.stop")).clicked() {
+                        self.booru_cancel.store(true, Ordering::Relaxed);
+                        self.booru_searching = false;
+                        self.booru_epoch += 1;
+                        self.booru_error = t(lang, "gal.stopped").to_string();
+                    }
                 } else if primary_button(ui, t(lang, "booru.search")).clicked() {
                     do_search = true;
                 }
@@ -7933,25 +8178,112 @@ impl App {
                 }
             });
 
-            if site.needs_auth && self.settings.booru_key.trim().is_empty() {
-                ui.label(RichText::new(t(lang, "booru.needs_auth")).size(11.5).color(AMBER()));
+            if site.needs_auth {
+                let u = self.settings.booru_user.trim();
+                if self.settings.booru_key.trim().is_empty() || u.is_empty() {
+                    ui.label(RichText::new(t(lang, "booru.needs_auth")).size(11.5).color(AMBER()));
+                } else if !u.chars().all(|c| c.is_ascii_digit()) {
+                    // Rellenado pero mal. Sin esto, Gelbooru contesta que
+                    // faltan las credenciales que sí están puestas, y no hay
+                    // forma de saber que el problema es el formato.
+                    ui.label(RichText::new(t(lang, "set.booru_user_nan")).size(11.5).color(RED()));
+                }
             }
             if self.galdl_cmd.is_none() {
                 ui.label(RichText::new(t(lang, "profile.need_galdl")).size(11.5).color(RED()));
             }
+
+            // Estado de la sesión ANTES de buscar, no después de fallar.
+            // Estos cuatro sitios están tras Cloudflare y sin sesión la
+            // búsqueda se va en el desafío hasta agotar el plazo.
+            let url_prev = booru::search_url(site, &self.booru_tags);
+            if booru_needs_cookies(&url_prev) {
+                let ck = cookie_args(&self.settings);
+                let con_ua = !self.settings.user_agent.trim().is_empty();
+                if ck.is_empty() {
+                    ui.label(RichText::new(t(lang, "booru.cf_none")).size(11.5).color(AMBER()));
+                } else if !con_ua {
+                    ui.label(RichText::new(t(lang, "booru.cf_no_ua")).size(11.5).color(AMBER()));
+                } else {
+                    // QUÉ sesión, no solo que hay una. Un cookies.txt tiene
+                    // prioridad sobre el navegador elegido, así que se puede
+                    // tener Chrome seleccionado y estar mandando un archivo
+                    // viejo exportado de Firefox sin enterarse. Decir «se manda
+                    // tu sesión» sin decir cuál es la misma clase de mentira
+                    // que decía el receptor cuando afirmaba estar escuchando.
+                    let fuente = if ck.first().map(|a| a == "--cookies").unwrap_or(false) {
+                        std::path::Path::new(ck.get(1).map(|s| s.as_str()).unwrap_or(""))
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "cookies.txt".into())
+                    } else {
+                        ck.get(1).cloned().unwrap_or_default()
+                    };
+                    ui.label(
+                        RichText::new(format!("{}  ({fuente})", t(lang, "booru.cf_ok")))
+                            .size(11.5)
+                            .color(GREEN()),
+                    );
+                    if ck.first().map(|a| a == "--cookies").unwrap_or(false)
+                        && self.settings.use_browser_cookies
+                    {
+                        ui.label(RichText::new(t(lang, "booru.cf_file_wins")).size(11.0).color(AMBER()));
+                    }
+                }
+            }
         });
+
+        // Lo que respondió gallery-dl, a la vista hasta la siguiente búsqueda.
+        // Distinguir un 429 de un «no hay resultados» o de un sitio caído es la
+        // diferencia entre esperar un minuto y perder una tarde.
+        if !self.booru_error.is_empty() {
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width().min(760.0));
+                ui.label(RichText::new(t(lang, "booru.failed")).size(11.0).color(RED()).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new(&self.booru_error).size(11.5).color(AMBER()).monospace());
+                ui.add_space(6.0);
+                if soft_button(ui, t(lang, "booru.copy_diag")).clicked() {
+                    let d = self.booru_error.clone();
+                    ui.output_mut(|o| o.copied_text = d);
+                    self.toast(t(lang, "cap.post_copied"));
+                }
+                ui.add_space(4.0);
+                // Ayuda específica cuando el motor ya ha dicho QUÉ pasa. La
+                // guía genérica de abajo es para cuando no lo dice.
+                if self.booru_error.to_ascii_lowercase().contains("cloudflare")
+                    || self.booru_error.contains("403")
+                {
+                    ui.label(RichText::new(t(lang, "booru.cf_403")).size(11.5).color(AMBER()));
+                    ui.add_space(4.0);
+                }
+                ui.label(RichText::new(t(lang, "booru.failed_help")).size(11.0).color(MUTED()));
+            });
+        }
 
         if do_search && !self.booru_searching {
             if let Some(prog) = self.galdl_cmd.clone() {
                 self.booru_searching = true;
                 self.booru_posts.clear();
+                self.booru_error.clear();
                 let url = booru::search_url(site, &self.booru_tags);
                 let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
                 let tx = self.tx.clone();
                 let page = self.booru_page;
                 self.booru_epoch += 1;
                 let ep = self.booru_epoch;
-                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx, ep));
+                // Se baja la bandera al empezar. Sin esto, la primera
+                // cancelación dejaría el buscador inservible para siempre.
+                self.booru_cancel.store(false, Ordering::Relaxed);
+                let cancel = self.booru_cancel.clone();
+                let ck = if booru_needs_cookies(&url) {
+                    cookie_args(&self.settings)
+                } else {
+                    Vec::new()
+                };
+                let ua = self.settings.user_agent.clone();
+                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx, ep, cancel, ck, ua));
             } else {
                 self.toast(t(lang, "profile.need_galdl"));
             }
@@ -8129,8 +8461,18 @@ impl App {
                 let url = booru::search_url(site, &self.booru_tags);
                 let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
                 self.booru_epoch += 1;
-                    let ep = self.booru_epoch;
-                    self.rt.spawn(booru_search(prog, url, self.booru_page, 40, auth, self.tx.clone(), ep));
+                let ep = self.booru_epoch;
+                self.booru_cancel.store(false, Ordering::Relaxed);
+                let cancel = self.booru_cancel.clone();
+                let ck = if booru_needs_cookies(&url) {
+                    cookie_args(&self.settings)
+                } else {
+                    Vec::new()
+                };
+                let ua = self.settings.user_agent.clone();
+                self.rt.spawn(booru_search(
+                    prog, url, self.booru_page, 40, auth, self.tx.clone(), ep, cancel, ck, ua,
+                ));
             }
         }
 
@@ -8950,7 +9292,18 @@ impl App {
                     egui::TextEdit::singleline(&mut self.settings.booru_key).password(true),
                 );
             });
+            // Aviso in situ, no en la documentación. El campo aceptaba
+            // cualquier cosa y Gelbooru respondía «needed to access the API»
+            // aunque estuviera relleno, lo cual no señala a ninguna parte.
+            let u = self.settings.booru_user.trim();
+            if !u.is_empty() && !u.chars().all(|c| c.is_ascii_digit()) {
+                ui.label(RichText::new(t(lang, "set.booru_user_nan")).size(11.5).color(RED()));
+            }
             ui.label(RichText::new(t(lang, "set.booru_note")).size(11.5).color(MUTED()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "set.booru_where")).size(11.5).color(MUTED()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "set.booru_auth_note")).size(11.5).color(AMBER()));
         });
         ui.add_space(12.0);
 
@@ -9084,6 +9437,27 @@ mod tests {
     /// Threads no tiene extractor, así que se desvía a la pestaña Capturar
     /// antes de gastar una llamada a gallery-dl que solo diría «Unsupported
     /// URL». Confundirlo con otro sitio desviaría a un sitio que sí funciona.
+    /// X sirve las imágenes con el tipo en la QUERY, no en la ruta. Sin esto
+    /// no se reconocían como archivo directo, caían al cajón de sastre de
+    /// `engine_for_url` —yt-dlp— y un perfil entero de fotos se guardaba como
+    /// vídeos `.mp4` (y en disco, como `.unknown_video`, que es el marcador de
+    /// yt-dlp para un formato cuya extensión no conoce).
+    #[test]
+    fn las_imagenes_de_x_no_son_video() {
+        let u = "https://pbs.twimg.com/media/HPd2NSoWcAAKujc?format=jpg&name=orig";
+        assert_eq!(url_extension(u).as_deref(), Some("jpg"));
+        assert!(is_direct_media(u));
+        assert_eq!(engine_for_url(u), Engine::Http);
+
+        // La ruta con extensión sigue teniendo prioridad sobre la query.
+        assert_eq!(
+            url_extension("https://cdn.example/v/a.mp4?format=jpg").as_deref(),
+            Some("mp4")
+        );
+        // Y un `format=` que no es una extensión plausible no se acepta.
+        assert_eq!(url_extension("https://cdn.example/v/abc?format=algolargo"), None);
+        assert_eq!(url_extension("https://cdn.example/v/abc"), None);
+    }
     #[test]
     fn threads_se_reconoce_por_el_host() {
         assert!(is_threads("https://www.threads.com/@alguien"));
