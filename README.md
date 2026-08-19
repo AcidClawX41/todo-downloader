@@ -22,7 +22,16 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.7.0:**
+**New in v1.8.0:**
+
+- **Discover artists** — type a character and the app answers with the *profiles that draw them*, ranked by how often, with sample thumbnails and one click to the queue. It builds no index: it reads the `source` field of booru posts, which points back at the artist's original post on X, Pixiv, Patreon or Fanbox. Measured on 300 posts, 299 carry one.
+- **One artist, all their houses** — `siino13` on Fanbox and `Siino_13` on X are merged into a single entry with both addresses. When a Fanbox needs a plan you do not have, their X is right underneath.
+- **Patreon, Fanbox and Pixiv** — creators, single posts, collections, and `patreon.com/home` for every subscription at once. Fanbox is browsed with previews; Pixiv is downloaded whole, because its extractor needs an OAuth token rather than cookies.
+- **X videos have thumbnails again** in the profile grid, paired with their poster instead of shown as a separate file.
+- **A background slideshow** — folders and subfolders, random or sequential, one to sixty minutes, with a crossfade. Off by default.
+- Patreon's long post titles no longer break Windows downloads, and the queue now shows the command that failed.
+
+**Also in v1.7.0:**
 
 - **X (Twitter), Facebook and Bluesky profiles** — browsed with previews, like Instagram: analyze, see each file's resolution and type, and queue only what you want.
 - **Threads, at full resolution** — no extractor covers it anywhere, and Meta signs its CDN links so a thumbnail cannot be rewritten into the original. The userscript reads the responses the page itself receives, takes the largest of `image_versions2.candidates` and `video_versions`, and sends them to the Profile grid.

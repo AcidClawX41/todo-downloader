@@ -220,6 +220,23 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
             continue;
         }
 
+        // PORTADA DE UN VÍDEO DE X, no un archivo suelto.
+        //
+        // Con `extractor.twitter.previews=true`, X emite el póster de cada
+        // vídeo como una ENTRADA APARTE, justo detrás del vídeo. Añadirla como
+        // un archivo más llenaría la rejilla de JPEG duplicados y «Marcar
+        // todo» se los bajaría. Lo que se quiere es lo contrario: que sea la
+        // miniatura del vídeo que la precede, que sin ella salía con un
+        // triángulo y sin imagen.
+        if text(meta, &["type"]) == "preview" {
+            if let Some(anterior) = out.last_mut() {
+                if anterior.is_video && anterior.thumb_url.is_empty() {
+                    anterior.thumb_url = url.to_string();
+                }
+            }
+            continue;
+        }
+
         let ext = text(meta, &["extension"]).to_ascii_lowercase();
         let ext = if ext.is_empty() {
             url.split(['?', '#'])
@@ -337,6 +354,36 @@ pub fn is_browsable(host: &str) -> bool {
         // foto cuyo enlace haya muerto se vuelve a resolver desde su página
         // en vez de quedarse en un error sin salida.
         "facebook.com",
+        // Fanbox. Su extractor publica `width` y `height`, y lo único que
+        // pide es la cookie `FANBOXSESSID` del navegador —que la aplicación ya
+        // sabe entregar—, así que entra en la rejilla como Patreon.
+        //
+        // PIXIV NO ESTÁ AQUÍ, Y NO ES UN OLVIDO. Su extractor no se apaña con
+        // cookies: exige un `refresh-token` de OAuth que se obtiene por un
+        // procedimiento aparte y que esta aplicación no gestiona. Sin él
+        // responde «'refresh-token' required» y punto. Ofrecer una rejilla que
+        // siempre sale vacía sería peor que mandarlo a Descargas, que es lo que
+        // se hace hoy.
+        "fanbox.cc",
+        // Patreon. Se midió antes de decidir, y las tres condiciones se
+        // cumplen:
+        //
+        //  - El listado trae `width` y `height` reales (3584×4800 en la
+        //    muestra), así que la rejilla no tiene que medir la miniatura.
+        //  - Trae la URL de la publicación en `url`
+        //    (`…/Kei_Artworks/posts/sorry-i-was-gone-166592250`), que es lo
+        //    que `post_url_de` necesita para resolver de nuevo un enlace
+        //    caducado. Es justo lo que a Facebook le faltaba.
+        //  - Sus enlaces van firmados, pero `token-time` daba **catorce
+        //    días** de margen en la muestra. Explorar con calma y elegir
+        //    después cabe de sobra; una firma de una hora lo habría
+        //    descartado.
+        //
+        // El archivo que se lista es `download_url`, el original, no la
+        // variante `{"w":620}` del visor. Eso importa: las dimensiones que
+        // se enseñan corresponden a lo que se va a bajar y no a una copia
+        // reducida.
+        "patreon.com",
     ];
     SITES
         .iter()
@@ -490,6 +537,48 @@ mod tests {
         assert_eq!(parse_listing(r#"[[3],[3,""],[9,"x",{}]]"#).unwrap().items.len(), 0);
     }
 
+    /// Patreon entró en la rejilla DESPUÉS de medir, no antes: sus enlaces
+    /// van firmados y explorar solo tiene sentido si sobreviven a la espera.
+    /// La muestra dio catorce días de margen y una URL de publicación con la
+    /// que rescatar un enlace caducado — que es lo que a Facebook le faltaba.
+    #[test]
+    fn patreon_es_explorable_y_conserva_la_url_del_post() {
+        assert!(is_browsable("patreon.com"));
+        assert!(is_browsable("www.patreon.com"));
+        assert!(!is_browsable("patreon.com.atacante.example"));
+
+        // El campo `url` del post es el permalink, y es el que rescata un
+        // enlace de CDN muerto.
+        let meta: Value = serde_json::from_str(
+            r#"{"id":166592250,"url":"https://www.patreon.com/Kei_Artworks/posts/sorry-i-was-gone-166592250"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            post_url_de(&meta),
+            "https://www.patreon.com/Kei_Artworks/posts/sorry-i-was-gone-166592250"
+        );
+    }
+    /// X emite el póster de un vídeo como una entrada APARTE, detrás del
+    /// vídeo. Debe convertirse en su miniatura, no en un archivo más: si no,
+    /// la rejilla se llena de JPEG duplicados y «Marcar todo» los baja.
+    #[test]
+    fn la_portada_de_un_video_de_x_no_es_un_archivo_mas() {
+        let j = r#"[
+          [3,"https://video.twimg.com/a.mp4",
+            {"extension":"mp4","type":"video","width":1280,"height":720,"num":1}],
+          [3,"https://pbs.twimg.com/media/ABC?format=jpg&name=orig",
+            {"extension":"jpg","type":"preview","width":1280,"height":720,"num":2}]
+        ]"#;
+        let l = parse_listing(j).unwrap();
+        assert_eq!(l.items.len(), 1, "el póster no es un elemento propio");
+        assert!(l.items[0].is_video);
+        assert_eq!(l.items[0].url, "https://video.twimg.com/a.mp4");
+        assert!(
+            l.items[0].thumb_url.contains("pbs.twimg.com"),
+            "el póster pasa a ser su miniatura: {}",
+            l.items[0].thumb_url
+        );
+    }
     #[test]
     fn solo_los_sitios_probados_son_explorables() {
         assert!(is_browsable("instagram.com"));

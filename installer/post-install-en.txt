@@ -34,6 +34,16 @@ one. What it captures comes back into the Profile tab, with previews, so you
 pick what to download. Nothing is sent anywhere except to the application on
 127.0.0.1.
 
+DISCOVER ARTISTS
+
+The Artists tab turns a character name into the profiles that draw them. It
+builds no index of its own: it reads the "source" field of booru posts, which
+points back at the artist's original post on X, Pixiv, Patreon or Fanbox. Pick
+one and it goes to the queue or opens with previews.
+
+It only finds what somebody attributed. An artist nobody uploads to a booru is
+invisible there, and no setting changes that.
+
 MAGNET LINKS
 
 If you want magnet: links to open in Todo Downloader, enable it from

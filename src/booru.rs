@@ -84,20 +84,71 @@ pub const SITES: &[Site] = &[
 ///
 /// Todas verificadas contra Danbooru: devuelven resultados.
 pub const SAMPLE_TAGS: &[(&str, &str)] = &[
+    // Todas COMPROBADAS contra la API de Gelbooru antes de entrar aquí, con su
+    // número de posts. Un ejemplo que no devuelve nada es peor que no ponerlo:
+    // la primera búsqueda falla y parece que la función no sirve.
     ("Toki — Blue Archive", "toki_(blue_archive)"),
-    ("Keroro", "keroro"),
-    ("Arale Norimaki", "norimaki_arale"),
-    ("Reze — Chainsaw Man", "reze_(chainsaw_man)"),
-    ("Monkey D. Luffy", "monkey_d._luffy"),
     ("Artoria Pendragon — Fate", "artoria_pendragon_(fate)"),
     ("Rin Tohsaka", "tohsaka_rin"),
-    ("Akiha Tohno", "tohno_akiha"),
-    ("Gundam", "gundam"),
-    ("Naruto", "naruto_(series)"),
-    ("City Hunter", "city_hunter"),
-    ("Oregairu", "yahari_ore_no_seishun_lovecome_wa_machigatteiru."),
-    ("Solo Leveling", "solo_leveling"),
-    ("Jujutsu Kaisen", "jujutsu_kaisen"),
+    ("Yukino Yukinoshita", "yukinoshita_yukino"),
+    ("Hatsune Miku", "hatsune_miku"),
+    ("Marin Kitagawa", "kitagawa_marin"),
+    ("Yor Forger — Spy x Family", "yor_briar"),
+    ("Makima — Chainsaw Man", "makima_(chainsaw_man)"),
+    ("Power — Chainsaw Man", "power_(chainsaw_man)"),
+    ("Nezuko — Demon Slayer", "kamado_nezuko"),
+    ("Frieren", "frieren"),
+    ("Rem — Re:Zero", "rem_(re:zero)"),
+    ("Zero Two — Darling in the Franxx", "zero_two_(darling_in_the_franxx)"),
+    ("Mikasa Ackerman", "mikasa_ackerman"),
+    // Las dos Asukas: la del anime original y la del Rebuild. Son etiquetas
+    // DISTINTAS y con muy distinto volumen (28.097 contra 132), así que
+    // ponerlas por separado es lo honesto.
+    ("Asuka Langley Soryu — Evangelion", "souryuu_asuka_langley"),
+    ("Asuka Langley Shikinami — Rebuild", "shikinami_asuka_langley"),
+    ("Akiha Tohno — Tsukihime", "tohno_akiha"),
+    // Las dos Bismarcks. Mismo barco de origen, dos juegos y dos etiquetas sin
+    // relación: buscar una NO devuelve nada de la otra.
+    ("Bismarck — KanColle", "bismarck_(kancolle)"),
+    ("Bismarck — Azur Lane", "bismarck_(azur_lane)"),
+    ("Nami — One Piece", "nami_(one_piece)"),
+    ("Ganyu — Genshin", "ganyu_(genshin_impact)"),
+    ("Raiden Shogun — Genshin", "raiden_shogun"),
+    ("Tifa Lockhart — FF VII", "tifa_lockhart"),
+    ("Aerith Gainsborough — FF VII", "aerith_gainsborough"),
+    ("2B — NieR: Automata", "2b_(nier:automata)"),
+    ("Samus Aran — Metroid", "samus_aran"),
+    ("Princess Zelda", "princess_zelda"),
+    ("Chun-Li — Street Fighter", "chun-li"),
+    ("D.Va — Overwatch", "d.va_(overwatch)"),
+    ("Mercy — Overwatch", "mercy_(overwatch)"),
+    ("Harley Quinn", "harley_quinn"),
+    ("Lara Croft — Tomb Raider", "lara_croft"),
+    ("Ciri — The Witcher", "ciri"),
+    // Personajes masculinos
+    ("Monkey D. Luffy", "monkey_d._luffy"),
+    ("Roronoa Zoro", "roronoa_zoro"),
+    ("Denji — Chainsaw Man", "denji_(chainsaw_man)"),
+    ("Gojo Satoru — Jujutsu Kaisen", "gojo_satoru"),
+    ("Levi Ackerman", "levi_(shingeki_no_kyojin)"),
+    ("Eren Yeager", "eren_yeager"),
+    ("Killua Zoldyck — Hunter x Hunter", "killua_zoldyck"),
+    ("Edward Elric — FMA", "edward_elric"),
+    ("Jotaro Kujo — JoJo", "kujo_jotaro"),
+    ("Joseph Joestar — JoJo", "joseph_joestar"),
+    ("Dio Brando — JoJo", "dio_brando"),
+    ("Spike Spiegel — Cowboy Bebop", "spike_spiegel"),
+    ("Guts — Berserk", "guts_(berserk)"),
+    ("Keroro", "keroro"),
+    // Obras enteras: devuelven arte de todo el reparto
+    ("Pokémon", "pokemon"),
+    ("Star Wars", "star_wars"),
+    ("Marvel", "marvel"),
+    ("DC Comics", "dc_comics"),
+    ("Undertale", "undertale"),
+    ("Breaking Bad", "breaking_bad"),
+    ("The Simpsons", "the_simpsons"),
+    ("Family Guy", "family_guy"),
 ];
 
 /// Un post ya normalizado, venga del booru que venga

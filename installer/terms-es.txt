@@ -1,6 +1,6 @@
 ﻿TODO DOWNLOADER — CONDICIONES DE USO Y EXENCIÓN DE RESPONSABILIDAD
 
-Versión 1.7.0 — Copyright (c) 2026 Eric Valls Gramunt
+Versión 1.8.0 — Copyright (c) 2026 Eric Valls Gramunt
 
 Lee esto antes de instalar. Al pulsar «Acepto» confirmas que has leído y
 entendido estas condiciones. Si no las aceptas, cancela la instalación y

@@ -14,7 +14,9 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod artistas;
 mod booru;
+mod buscar_x;
 mod cookies;
 mod gallery;
 mod hosters;
@@ -631,6 +633,15 @@ enum Ev {
     /// Resultados de una búsqueda en un booru, con su número de generación
     BooruResults(Vec<booru::Post>, u64),
     BooruError(String, u64),
+    /// Artistas cosechados de una etiqueta de personaje.
+    ArtistasListos(Vec<artistas::Artista>, u64),
+    ArtistasError(String, u64),
+    /// Página que se está cosechando, de cuántas.
+    ArtistasProgreso(u32, u32, u64),
+    /// Miniatura de muestra de un artista, indexada por hash de su URL.
+    ArtThumb(u64, egui::ColorImage),
+    /// Imágenes encontradas por la exploración de carpetas del pase de fondos.
+    FondosEncontrados(Vec<PathBuf>, u64),
     /// Miniatura de un post de booru ya decodificada
     BooruThumb(u64, egui::ColorImage),
 }
@@ -723,6 +734,18 @@ const GALLERY_HOSTS: &[&str] = &[
     "twitter.com",
     // Facebook: fotos, álbumes, sets, vídeos y fotos de perfil.
     "facebook.com",
+    // Pixiv y Fanbox: entre los dos son la MITAD de las fuentes que publican
+    // los boorus, y sin ellos el descubridor de artistas encontraba el perfil
+    // y luego no sabía abrirlo. `PixivUserExtractor` y `FanboxCreatorExtractor`
+    // existen en gallery-dl desde hace años.
+    "pixiv.net",
+    "fanbox.cc",
+    // Patreon: gallery-dl cubre creador, post suelto, colección y —lo más
+    // útil— `patreon.com/home`, que es el feed de TODAS tus suscripciones
+    // activas de una vez. Necesita la cookie `session_id`, y salta por su
+    // cuenta los posts que tu cuenta no puede ver (`current_user_can_view`):
+    // usa tu suscripción para ver lo que ya pagas, no elude ningún muro.
+    "patreon.com",
     "fb.watch",
     // Bluesky
     "bsky.app",
@@ -885,6 +908,20 @@ fn is_douyin_profile(url: &str) -> bool {
     u.contains("douyin.com") && (u.contains("/user/") || !u.contains("/video/"))
 }
 
+/// El feed de TODAS tus suscripciones de Patreon.
+///
+/// Merece aviso propio: es la única URL soportada por la aplicación que puede
+/// encolar cientos de archivos de quince creadores distintos sin que se vea
+/// venir. Un creador suelto se intuye por su tamaño; `/home` no.
+fn is_patreon_home(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    let Some(host) = host_of(&u) else { return false };
+    host_matches(&host, "patreon.com")
+        && u.split(['?', '#'])
+            .next()
+            .is_some_and(|p| p.trim_end_matches('/').ends_with("/home"))
+}
+
 /// URL de Threads. No existe extractor —ni en gallery-dl ni en yt-dlp— y no
 /// puede haberlo fácilmente: Meta firma los enlaces de su CDN, así que la URL
 /// del original solo existe dentro de la respuesta JSON que pide la propia
@@ -1000,6 +1037,14 @@ fn referer_for(url: &str) -> &'static str {
     // Facebook comprueba el origen en sus CDN de medios.
     } else if u.contains("fbcdn.net") || u.contains("facebook.com") {
         "https://www.facebook.com/"
+    // Pixiv y Fanbox comparten infraestructura: las imágenes salen de
+    // `i.pximg.net` y `downloads.fanbox.cc`, y las dos rechazan cualquier
+    // petición sin Referer del sitio. Sin esto, la rejilla saldría entera con
+    // las miniaturas rotas — peor que no ofrecerla.
+    } else if u.contains("pximg.net") || u.contains("pixiv.net") {
+        "https://www.pixiv.net/"
+    } else if u.contains("fanbox.cc") {
+        "https://www.fanbox.cc/"
     } else if u.contains("v2ph.com") {
         "https://www.v2ph.com/"
     } else {
@@ -1080,6 +1125,7 @@ enum RowAction {
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Downloads,
+    Artistas,
     Profile,
     Capture,
     Booru,
@@ -1127,6 +1173,24 @@ struct Settings {
     bg_opacity: f32,
     /// Sigma del desenfoque gaussiano del fondo (0 = nítido)
     bg_blur: f32,
+    /// Una imagen fija o un pase de diapositivas.
+    /// Páginas de booru que cosecha el descubridor de artistas.
+    ///
+    /// Medido sobre `yukinoshita_yukino`: 3 páginas dan 17 artistas y 8 dan
+    /// 36. Profundizar más que dobla el resultado, y el coste es tiempo. Cinco
+    /// por defecto —33 artistas— porque es donde la curva deja de ser gratis.
+    art_paginas: u32,
+    bg_modo: ModoFondo,
+    /// Carpetas del pase. Varias a propósito: los fondos nunca están en una sola.
+    bg_carpetas: Vec<String>,
+    /// Mirar también dentro de las subcarpetas.
+    bg_recursivo: bool,
+    /// Orden del pase: aleatorio o alfabético.
+    bg_aleatorio: bool,
+    /// Minutos entre cambios.
+    bg_minutos: u32,
+    /// Segundos de fundido entre una imagen y la siguiente. 0 = corte seco.
+    bg_fundido: f32,
     /// Credenciales de boorus: usuario/clave por clave de extractor
     booru_user: String,
     booru_key: String,
@@ -1187,6 +1251,14 @@ impl Default for Settings {
             bg_image: String::new(),
             bg_opacity: 0.22,
             bg_blur: 0.0,
+            art_paginas: 5,
+            bg_modo: ModoFondo::default(),
+            bg_carpetas: Vec::new(),
+            bg_recursivo: true,
+            // Cinco minutos: suficiente para no cansar, poco para notarlo.
+            bg_minutos: 5,
+            bg_aleatorio: true,
+            bg_fundido: 1.0,
             booru_user: String::new(),
             booru_key: String::new(),
             post_to_grid: true,
@@ -1291,6 +1363,15 @@ fn needs_cookies_upfront(url: &str) -> bool {
         // para Douyin»— pero esta política no se había enterado, así que el
         // primer intento salía a pelo y fallaba siempre.
         "douyin.com",
+        // Fanbox exige la cookie `FANBOXSESSID`: sin ella su extractor avisa y
+        // devuelve poco o nada, y el síntoma sería «este artista no tiene nada».
+        "fanbox.cc",
+        // Patreon: sin la cookie `session_id` solo se ven los posts públicos.
+        // El extractor avisa, pero el resultado que llegaría a la interfaz
+        // sería una lista corta o vacía, y el usuario leería «este creador no
+        // tiene nada» en vez de «te falta la sesión». Un fallo mudo más, y de
+        // los que ya han costado caro en este proyecto.
+        "patreon.com",
     ];
     let Some(host) = host_of(url) else { return false };
     AUTH_FIRST.iter().any(|s| host_matches(&host, s))
@@ -1556,6 +1637,24 @@ struct App {
     bg_source: Option<image::DynamicImage>,
     /// Marca que hay que regenerar la textura (cambió la ruta o el desenfoque)
     bg_dirty: bool,
+    // ---- Pase de diapositivas ----
+    /// Rutas indexadas. Se guardan RUTAS, no imágenes: diez mil texturas serían
+    /// gigabytes; diez mil rutas son unos cientos de kilobytes.
+    bg_lista: Vec<PathBuf>,
+    /// Posición actual dentro de `bg_lista`.
+    bg_indice: usize,
+    /// Cuándo toca el siguiente cambio.
+    bg_cambio: Option<Instant>,
+    /// La imagen que SALE durante el fundido.
+    bg_saliente: Option<egui::TextureHandle>,
+    /// Avance del fundido, 0.0 → 1.0. Fuera del fundido vale 1.0.
+    bg_mezcla: f32,
+    /// Hay una exploración de carpetas en marcha.
+    bg_escaneando: bool,
+    /// Descarta los resultados de una exploración que ya no interesa.
+    bg_escaneo_epoch: u64,
+    /// Firma de los ajustes con los que se indexó, para no reexplorar en vano.
+    bg_firma: String,
     // ---- Animación de la pestaña de apoyo ----
     /// Fotogramas del GIF elegido: (textura, duración en segundos)
     tip_frames: Vec<(egui::TextureHandle, f32)>,
@@ -1612,6 +1711,22 @@ struct App {
     booru_min_w: u32,
     /// Filtro de clasificación: "" = todo, si no la letra del booru (g/s/q/e)
     booru_rating: String,
+    // ---- Descubridor de artistas ----
+    /// Etiqueta buscada, tal como la escribe el usuario.
+    art_tag: String,
+    art_lista: Vec<artistas::Artista>,
+    art_buscando: bool,
+    art_error: String,
+    art_epoch: u64,
+    /// Corta la cosecha en curso. Como en el resto de la aplicación, subir el
+    /// epoch solo descarta el resultado: la bandera para el trabajo de verdad.
+    art_cancel: Arc<AtomicBool>,
+    /// Página actual y total, para que una espera larga no parezca un cuelgue.
+    art_progreso: (u32, u32),
+    /// Miniaturas de muestra, por hash de la URL. Se indexan así y no por
+    /// posición porque la lista se reordena en cada búsqueda.
+    art_thumbs: std::collections::HashMap<u64, egui::TextureHandle>,
+    art_pidiendo: std::collections::HashSet<u64>,
     booru_thumbs: std::collections::HashMap<u64, egui::TextureHandle>,
     booru_pending: std::collections::HashSet<u64>,
 }
@@ -1748,6 +1863,14 @@ impl App {
             bg_loaded_from: String::new(),
             bg_source: None,
             bg_dirty: false,
+            bg_lista: Vec::new(),
+            bg_indice: 0,
+            bg_cambio: None,
+            bg_saliente: None,
+            bg_mezcla: 1.0,
+            bg_escaneando: false,
+            bg_escaneo_epoch: 0,
+            bg_firma: String::new(),
             tip_frames: Vec::new(),
             tip_started: None,
             tip_reload: true,
@@ -1775,6 +1898,15 @@ impl App {
             booru_searching: false,
             booru_min_w: 0,
             booru_rating: String::new(),
+            art_tag: String::new(),
+            art_lista: Vec::new(),
+            art_buscando: false,
+            art_error: String::new(),
+            art_epoch: 0,
+            art_cancel: Arc::new(AtomicBool::new(false)),
+            art_progreso: (0, 0),
+            art_thumbs: std::collections::HashMap::new(),
+            art_pidiendo: std::collections::HashSet::new(),
             booru_thumbs: std::collections::HashMap::new(),
             booru_pending: std::collections::HashSet::new(),
         };
@@ -1963,6 +2095,452 @@ impl App {
             let msg = i18n::received(self.settings.lang, nuevos);
             self.toast(msg);
         }
+    }
+
+    // ---------------- Vista Artistas ----------------
+
+    /// Descubridor de artistas: del nombre de un personaje a los perfiles.
+    fn artistas_ui(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.lang;
+        ui.label(RichText::new(t(lang, "art.title")).size(24.0).strong().color(Color32::WHITE));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t(lang, "art.subtitle")).size(12.5).color(MUTED()));
+        ui.add_space(12.0);
+
+        let mut buscar = false;
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(760.0));
+            ui.label(RichText::new(t(lang, "art.tag")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let te = ui.add_sized(
+                    [360.0, 32.0],
+                    egui::TextEdit::singleline(&mut self.art_tag)
+                        .hint_text("yukinoshita_yukino"),
+                );
+                if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    buscar = true;
+                }
+                if self.art_buscando {
+                    ui.spinner();
+                    if self.art_progreso.1 > 0 {
+                        ui.label(
+                            RichText::new(i18n::art_page(
+                                lang,
+                                self.art_progreso.0,
+                                self.art_progreso.1,
+                            ))
+                            .size(11.5)
+                            .color(CYAN()),
+                        );
+                    }
+                    if soft_button(ui, t(lang, "gal.stop")).clicked() {
+                        self.art_cancel.store(true, Ordering::Relaxed);
+                        self.art_buscando = false;
+                        self.art_epoch += 1;
+                        self.art_error = t(lang, "gal.stopped").to_string();
+                    }
+                } else if primary_button(ui, t(lang, "art.search")).clicked() {
+                    buscar = true;
+                }
+                // Los boorus nombran a los personajes con su convención, no con
+                // la del fandom. Sin ejemplos, la primera búsqueda casi siempre
+                // falla y parece que la función no sirve.
+                egui::ComboBox::from_id_source("art_ejemplos")
+                    .selected_text(t(lang, "booru.samples"))
+                    .show_ui(ui, |ui| {
+                        for (nombre, tag) in booru::SAMPLE_TAGS {
+                            if ui.selectable_label(false, *nombre).clicked() {
+                                self.art_tag = (*tag).to_string();
+                                buscar = true;
+                            }
+                        }
+                    });
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "art.depth")).size(12.0).color(MUTED()));
+                ui.add(egui::Slider::new(&mut self.settings.art_paginas, 1..=10).show_value(false));
+                ui.label(
+                    RichText::new(i18n::art_depth(lang, self.settings.art_paginas))
+                        .size(12.0)
+                        .color(MUTED()),
+                );
+            });
+            ui.label(RichText::new(t(lang, "art.depth_note")).size(11.0).color(MUTED()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "art.how")).size(11.5).color(MUTED()));
+        });
+
+        if !self.art_error.is_empty() {
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width().min(760.0));
+                ui.label(RichText::new(&self.art_error).size(11.5).color(AMBER()).monospace());
+            });
+        }
+
+        if buscar && !self.art_buscando {
+            let tag = self.art_tag.trim().to_string();
+            if tag.is_empty() {
+                self.art_error = t(lang, "art.need_tag").to_string();
+            } else {
+                self.art_buscando = true;
+                self.art_error.clear();
+                self.art_lista.clear();
+                self.art_epoch += 1;
+                // Se baja la bandera al empezar. Sin esto, la primera
+                // cancelación dejaría el buscador inservible para siempre.
+                self.art_cancel.store(false, Ordering::Relaxed);
+                self.art_progreso = (0, 0);
+                self.rt.spawn(cosechar_artistas(
+                    self.client.clone(),
+                    tag,
+                    self.settings.art_paginas,
+                    self.tx.clone(),
+                    self.art_epoch,
+                    self.art_cancel.clone(),
+                ));
+            }
+        }
+
+        if self.art_lista.is_empty() {
+            return;
+        }
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(i18n::art_found(lang, self.art_lista.len()))
+                .size(12.0)
+                .color(MUTED()),
+        );
+        ui.add_space(6.0);
+
+        // Recogidos antes del bucle: dentro se toma `&self.art_lista` prestado.
+        let rt = self.rt.handle().clone();
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let mut pedir: Vec<(u64, String)> = Vec::new();
+        let mut a_perfil: Option<String> = None;
+        let mut a_cola: Option<(String, String)> = None;
+
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for a in &self.art_lista {
+                card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width().min(760.0));
+                    ui.horizontal(|ui| {
+                        // Muestras: reconocer a un artista de un vistazo vale
+                        // más que su nombre, que muchas veces es un alias.
+                        for m in a.muestras.iter().take(4) {
+                            let h = hash_url(m);
+                            if let Some(tex) = self.art_thumbs.get(&h) {
+                                ui.add(
+                                    egui::Image::new(tex)
+                                        .fit_to_exact_size(egui::vec2(64.0, 64.0))
+                                        .rounding(Rounding::same(6.0)),
+                                );
+                            } else {
+                                if !self.art_pidiendo.contains(&h) && pedir.len() < 24 {
+                                    pedir.push((h, m.clone()));
+                                }
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(64.0, 64.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(r, Rounding::same(6.0), CARD_HOVER());
+                            }
+                        }
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            let p = a.principal();
+                            ui.label(RichText::new(&p.id).size(15.0).strong().color(Color32::WHITE));
+                            ui.label(
+                                RichText::new(i18n::art_posts(lang, a.posts))
+                                    .size(11.5)
+                                    .color(CYAN()),
+                            );
+                            // Una fila por casa del artista. Los abiertos van
+                            // primero: son los que puede usar ahora mismo, y
+                            // los de pago por creador quedan como información,
+                            // no como la única salida.
+                            for perfil in a.perfiles() {
+                                ui.horizontal(|ui| {
+                                    let (color, etiqueta) = if perfil.sitio.abierto() {
+                                        (GREEN(), perfil.sitio.nombre().to_string())
+                                    } else {
+                                        (AMBER(), format!("{} 🔒", perfil.sitio.nombre()))
+                                    };
+                                    ui.label(RichText::new(etiqueta).size(10.5).color(color));
+                                    ui.label(RichText::new(&perfil.url).size(10.5).color(MUTED()));
+                                    if ui
+                                        .small_button(t(lang, "art.to_profile"))
+                                        .on_hover_text(&perfil.url)
+                                        .clicked()
+                                    {
+                                        a_perfil = Some(perfil.url.clone());
+                                    }
+                                });
+                            }
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if primary_button(ui, t(lang, "art.to_queue")).clicked() {
+                                let p = a.principal();
+                                a_cola = Some((p.url.clone(), p.id.clone()));
+                            }
+                        });
+                    });
+                });
+                ui.add_space(6.0);
+            }
+        });
+
+        for (h, url) in pedir {
+            self.art_pidiendo.insert(h);
+            rt.spawn(fetch_booru_thumb(
+                client.clone(),
+                h,
+                url,
+                tx.clone(),
+                Ev::ArtThumb,
+            ));
+        }
+        if let Some(u) = a_perfil {
+            self.profile_url = u;
+            self.view = View::Profile;
+        }
+        if let Some((u, autor)) = a_cola {
+            self.add_url(&u, &autor, "", &u, "", "");
+            self.view = View::Downloads;
+        }
+    }
+
+    /// Controles del pase, y los que valen para los tres modos.
+    ///
+    /// La intensidad y el desenfoque van al PIE y separados por una línea, no
+    /// dentro del bloque de la imagen fija. Se aplican igual en el pase, y
+    /// tenerlos ahí arriba sugería que pertenecían solo a ella.
+    fn bg_pase_ui(&mut self, ui: &mut egui::Ui, lang: Lang) {
+        if self.settings.bg_modo == ModoFondo::Pase {
+            ui.add_space(4.0);
+            // --- Carpetas ---
+            let mut quitar: Option<usize> = None;
+            for (i, c) in self.settings.bg_carpetas.clone().iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(c).size(11.0).color(CYAN()));
+                    if soft_button(ui, t(lang, "set.bg_remove")).clicked() {
+                        quitar = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = quitar {
+                self.settings.bg_carpetas.remove(i);
+                self.bg_firma.clear(); // reindexar
+            }
+            ui.horizontal(|ui| {
+                if soft_button(ui, t(lang, "set.bg_add_folder")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        let s = p.to_string_lossy().into_owned();
+                        if !self.settings.bg_carpetas.contains(&s) {
+                            self.settings.bg_carpetas.push(s);
+                            self.bg_firma.clear();
+                        }
+                    }
+                }
+                if ui
+                    .checkbox(&mut self.settings.bg_recursivo, t(lang, "set.bg_recursive"))
+                    .changed()
+                {
+                    self.bg_firma.clear();
+                }
+                if soft_button(ui, t(lang, "set.bg_rescan")).clicked() {
+                    self.bg_firma.clear();
+                }
+            });
+
+            // --- Estado, siempre dicho. Una carpeta vacía no puede dejar el
+            // fondo en blanco sin explicar por qué.
+            if self.bg_escaneando {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(t(lang, "set.bg_scanning")).size(11.5).color(CYAN()));
+                });
+            } else if self.settings.bg_carpetas.is_empty() {
+                ui.label(RichText::new(t(lang, "set.bg_no_folders")).size(11.5).color(AMBER()));
+            } else if self.bg_lista.is_empty() {
+                ui.label(RichText::new(t(lang, "set.bg_empty")).size(11.5).color(AMBER()));
+            } else {
+                ui.label(
+                    RichText::new(i18n::bg_found(lang, self.bg_lista.len()))
+                        .size(11.5)
+                        .color(GREEN()),
+                );
+            }
+
+            // --- Orden, ritmo y fundido ---
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.bg_order")).size(12.0).color(MUTED()));
+                for (al, k) in [(false, "set.bg_seq"), (true, "set.bg_shuffle")] {
+                    if ui
+                        .selectable_label(self.settings.bg_aleatorio == al, t(lang, k))
+                        .clicked()
+                    {
+                        self.settings.bg_aleatorio = al;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.bg_every")).size(12.0).color(MUTED()));
+                // Mínimo un minuto a propósito: permitir «cada 5 segundos»
+                // sería ofrecer algo que nadie debería usar.
+                if ui
+                    .add(egui::Slider::new(&mut self.settings.bg_minutos, 1..=60).show_value(false))
+                    .changed()
+                {
+                    self.programar_fondo();
+                }
+                ui.label(
+                    RichText::new(i18n::bg_minutes(lang, self.settings.bg_minutos))
+                        .size(12.0)
+                        .color(MUTED()),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.bg_fade")).size(12.0).color(MUTED()));
+                ui.add(egui::Slider::new(&mut self.settings.bg_fundido, 0.0..=3.0).show_value(false));
+                ui.label(
+                    RichText::new(if self.settings.bg_fundido < 0.05 {
+                        t(lang, "set.bg_fade_off").to_string()
+                    } else {
+                        format!("{:.1} s", self.settings.bg_fundido)
+                    })
+                    .size(12.0)
+                    .color(MUTED()),
+                );
+            });
+            // Sin esto, ajustar el desenfoque con un pase de diez minutos
+            // significa esperar diez minutos para verlo en otra imagen.
+            if !self.bg_lista.is_empty() && soft_button(ui, t(lang, "set.bg_next")).clicked() {
+                let ctx = ui.ctx().clone();
+                self.avanzar_fondo(&ctx);
+            }
+        }
+
+        // --- Comunes a los tres modos ---
+        if self.settings.bg_modo != ModoFondo::Ninguno {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.bg_opacity")).size(12.0).color(MUTED()));
+                ui.add(egui::Slider::new(&mut self.settings.bg_opacity, 0.0..=0.85).show_value(false));
+                ui.label(
+                    RichText::new(format!("{:.0}%", self.settings.bg_opacity * 100.0))
+                        .size(12.0)
+                        .color(MUTED()),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.bg_blur")).size(12.0).color(MUTED()));
+                let resp =
+                    ui.add(egui::Slider::new(&mut self.settings.bg_blur, 0.0..=24.0).show_value(false));
+                // Difuminar cuesta CPU: se recalcula al SOLTAR, no mientras se
+                // arrastra, o la interfaz se atascaría.
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    self.bg_dirty = true;
+                }
+                ui.label(
+                    RichText::new(if self.settings.bg_blur < 0.1 {
+                        t(lang, "set.bg_blur_off").to_string()
+                    } else {
+                        format!("{:.0}", self.settings.bg_blur)
+                    })
+                    .size(12.0)
+                    .color(MUTED()),
+                );
+            });
+        }
+    }
+
+    /// Firma de los ajustes que afectan al índice del pase.
+    ///
+    /// Sirve para no reexplorar el disco en cada frame: mientras la firma no
+    /// cambie, la lista sigue valiendo.
+    fn bg_firma_actual(&self) -> String {
+        format!(
+            "{}|{}",
+            self.settings.bg_recursivo,
+            self.settings.bg_carpetas.join("\u{1}")
+        )
+    }
+
+    /// Lanza la exploración de carpetas en un hilo aparte.
+    fn explorar_fondos(&mut self) {
+        let firma = self.bg_firma_actual();
+        self.bg_firma = firma;
+        self.bg_escaneo_epoch += 1;
+        let ep = self.bg_escaneo_epoch;
+
+        if self.settings.bg_carpetas.is_empty() {
+            self.bg_lista.clear();
+            self.bg_escaneando = false;
+            return;
+        }
+        self.bg_escaneando = true;
+        let carpetas = self.settings.bg_carpetas.clone();
+        let rec = self.settings.bg_recursivo;
+        let tx = self.tx.clone();
+        // Un hilo normal y no una tarea de tokio: esto es E/S de disco
+        // bloqueante, y ocupar un hilo del runtime dejaría a las descargas
+        // esperando por culpa de un fondo.
+        std::thread::spawn(move || {
+            let v = escanear_fondos(&carpetas, rec);
+            let _ = tx.send(Ev::FondosEncontrados(v, ep));
+        });
+    }
+
+    /// Pasa a la siguiente imagen del pase.
+    ///
+    /// La textura actual se guarda como saliente para poder fundir. Decodificar
+    /// aquí es aceptable porque ocurre una vez cada varios minutos; hacerlo por
+    /// adelantado complicaría el estado sin ganancia perceptible.
+    fn avanzar_fondo(&mut self, ctx: &egui::Context) {
+        if self.bg_lista.is_empty() {
+            return;
+        }
+        let n = self.bg_lista.len();
+        self.bg_indice = if self.settings.bg_aleatorio && n > 1 {
+            // Al azar pero nunca la misma dos veces seguidas: repetir el fondo
+            // en un cambio parece que la función no funciona.
+            let salto = 1 + (azar_usize() % (n - 1));
+            (self.bg_indice + salto) % n
+        } else {
+            (self.bg_indice + 1) % n
+        };
+
+        let ruta = self.bg_lista[self.bg_indice].to_string_lossy().into_owned();
+        let Some(src) = load_bg_source(&ruta) else {
+            // Un archivo ilegible no puede parar el pase: se salta y se
+            // reprograma. Sin esto, una imagen corrupta congelaría el fondo.
+            self.programar_fondo();
+            return;
+        };
+        self.bg_saliente = self.bg_texture.take();
+        self.bg_source = Some(src);
+        self.bg_loaded_from = ruta;
+        self.bg_dirty = true;
+        self.bg_mezcla = if self.settings.bg_fundido > 0.01 && self.bg_saliente.is_some() {
+            0.0
+        } else {
+            1.0
+        };
+        self.programar_fondo();
+        ctx.request_repaint();
+    }
+
+    /// Fija cuándo toca el próximo cambio.
+    fn programar_fondo(&mut self) {
+        let m = self.settings.bg_minutos.max(1) as u64;
+        self.bg_cambio = Some(Instant::now() + Duration::from_secs(m * 60));
     }
 
     /// Corta la exploración en curso: mata el proceso, corta la cadena de
@@ -2674,6 +3252,42 @@ impl App {
                     // tocar el indicador de carga, que pertenece a la actual.
                     let _ = posts;
                 }
+                // Resultados de una búsqueda que ya no interesa.
+                Ev::ArtistasProgreso(_, _, ep) if ep != self.art_epoch => {}
+                Ev::ArtistasProgreso(p, total, _) => {
+                    self.art_progreso = (p, total);
+                }
+                Ev::ArtistasListos(_, ep) | Ev::ArtistasError(_, ep) if ep != self.art_epoch => {}
+                Ev::ArtistasListos(v, _) => {
+                    self.art_buscando = false;
+                    self.art_error.clear();
+                    self.art_lista = v;
+                    self.art_thumbs.clear();
+                    self.art_pidiendo.clear();
+                    if self.art_lista.is_empty() {
+                        self.art_error = t(self.settings.lang, "art.none").to_string();
+                    }
+                }
+                Ev::ArtistasError(e, _) => {
+                    self.art_buscando = false;
+                    self.art_lista.clear();
+                    self.art_error = e;
+                }
+                Ev::ArtThumb(h, img) => {
+                    self.art_pidiendo.remove(&h);
+                    let tex =
+                        ctx.load_texture(format!("art_{h}"), img, egui::TextureOptions::LINEAR);
+                    self.art_thumbs.insert(h, tex);
+                }
+                // Exploración vieja: llegó tarde y las carpetas ya cambiaron.
+                Ev::FondosEncontrados(_, ep) if ep != self.bg_escaneo_epoch => {}
+                Ev::FondosEncontrados(v, _) => {
+                    self.bg_escaneando = false;
+                    self.bg_lista = v;
+                    self.bg_indice = 0;
+                    // Que la primera imagen entre en el siguiente frame.
+                    self.bg_cambio = None;
+                }
                 Ev::BooruError(_, epoch) if epoch != self.booru_epoch => {}
                 Ev::BooruResults(posts, _) => {
                     self.booru_searching = false;
@@ -3183,7 +3797,6 @@ fn booru_pacing(url: &str) -> &'static str {
 const GALLERY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn booru_search(
     program: String,
     url: String,
@@ -3322,8 +3935,103 @@ async fn booru_search(
     }
 }
 
+/// Hash corto y estable de una URL, para indexar miniaturas sin depender de la
+/// posición en una lista que se reordena en cada búsqueda.
+fn hash_url(u: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    u.hash(&mut h);
+    h.finish()
+}
+
+/// Cosecha una etiqueta de personaje y devuelve los artistas que la dibujan.
+///
+/// POR QUÉ VARIAS PÁGINAS: con una sola, un artista con tres posts y otro con
+/// dieciocho aparecen casi igualados y el orden por relevancia deja de
+/// significar nada. Tres páginas —trescientos posts— bastan para que la
+/// diferencia se vea, medido sobre datos reales.
+///
+/// El ritmo entre páginas no es cortesía opcional: es un sitio público que no
+/// nos debe nada y al que se le piden trescientos posts de golpe.
+#[allow(clippy::too_many_arguments)]
+async fn cosechar_artistas(
+    client: reqwest::Client,
+    tag: String,
+    paginas: u32,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+    cancelar: Arc<AtomicBool>,
+) {
+    let mut posts: Vec<artistas::PostBooru> = Vec::new();
+    let mut fallo: Option<String> = None;
+
+    for p in 1..=paginas.max(1) {
+        // Parada pedida por el usuario. Se comprueba ANTES de dormir y antes
+        // de pedir: tres páginas con pausa son varios segundos, y con un booru
+        // lento bastante más. Sin esto no había forma de cambiar de personaje
+        // sin esperar a que terminara.
+        if cancelar.load(Ordering::Relaxed) {
+            return;
+        }
+        if p > 1 {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            if cancelar.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        let _ = tx.send(Ev::ArtistasProgreso(p, paginas.max(1), epoch));
+        let url = artistas::url_cosecha(&tag, p);
+        match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => match r.text().await {
+                Ok(txt) => {
+                    let lote = artistas::parse_posts(&txt);
+                    // Una página vacía significa que la etiqueta se acabó: no
+                    // tiene sentido pedir las siguientes.
+                    if lote.is_empty() {
+                        break;
+                    }
+                    posts.extend(lote);
+                }
+                Err(e) => {
+                    fallo = Some(e.to_string());
+                    break;
+                }
+            },
+            Ok(r) => {
+                fallo = Some(format!("HTTP {}", r.status().as_u16()));
+                break;
+            }
+            Err(e) => {
+                fallo = Some(e.to_string());
+                break;
+            }
+        }
+    }
+
+    // Un fallo a mitad no tira lo ya cosechado: es mejor una lista corta que
+    // ninguna, y la interfaz dirá que está incompleta.
+    if posts.is_empty() {
+        let msg = fallo.unwrap_or_else(|| {
+            msg_lang("sin resultados para esa etiqueta", "no results for that tag").to_string()
+        });
+        let _ = tx.send(Ev::ArtistasError(msg, epoch));
+        return;
+    }
+    let _ = tx.send(Ev::ArtistasListos(artistas::agrupar(&posts), epoch));
+}
+
 /// Descarga la miniatura de un post de booru para la rejilla.
-async fn fetch_booru_thumb(client: reqwest::Client, id: u64, url: String, tx: UnboundedSender<Ev>) {
+/// `hecho` decide a qué evento va la imagen: la misma descarga sirve para la
+/// rejilla de boorus y para las muestras del descubridor de artistas. Duplicar
+/// esta función solo para cambiar el evento habría duplicado también la cola
+/// global, el Referer y el reintento — y con ellos, la próxima corrección.
+async fn fetch_booru_thumb(
+    client: reqwest::Client,
+    id: u64,
+    url: String,
+    tx: UnboundedSender<Ev>,
+    hecho: fn(u64, egui::ColorImage) -> Ev,
+) {
     const MAX: usize = 4 * 1024 * 1024;
 
     // Cola global de miniaturas. Sin esto se lanzaban 40 peticiones de golpe
@@ -3375,7 +4083,7 @@ async fn fetch_booru_thumb(client: reqwest::Client, id: u64, url: String, tx: Un
     .ok()
     .flatten();
     if let Some(img) = img {
-        let _ = tx.send(Ev::BooruThumb(id, img));
+        let _ = tx.send(hecho(id, img));
     }
 }
 
@@ -4183,6 +4891,11 @@ async fn browse_gallery_hop(
     let sep = args.iter().position(|a| a == "--").unwrap_or(0);
     args.insert(sep, galdl_pacing(&url).to_string());
     args.insert(sep, "--sleep-request".into());
+    // Opciones propias del listado (ver `galdl_opts_listado`), antes del `--`.
+    let sep = args.iter().position(|a| a == "--").unwrap_or(0);
+    for (i, o) in galdl_opts_listado(&url).into_iter().enumerate() {
+        args.insert(sep + i, o);
+    }
 
     let mut cmd = tokio::process::Command::new(&program);
     utf8_env(&mut cmd);
@@ -5110,14 +5823,69 @@ fn galdl_pacing(url: &str) -> &'static str {
 
 /// Argumentos comunes de gallery-dl para una descarga
 fn galdl_base_args(dir: &std::path::Path, url: &str) -> Vec<String> {
-    vec![
+    let mut v = vec![
         "-D".into(),
         dir.to_string_lossy().into_owned(),
         "--sleep-request".into(),
         galdl_pacing(url).into(),
         "--download-archive".into(),
         galdl_archive_path().to_string_lossy().into_owned(),
-    ]
+    ];
+    v.extend(galdl_site_opts(url));
+    v
+}
+
+/// Ajustes por sitio para gallery-dl, cuando su plantilla por defecto no
+/// aguanta en Windows.
+///
+/// PATREON. Su plantilla es `{id}_{title}_{num:>02}.{extension}`, y en Patreon
+/// el título es una frase entera. Un post real da esto:
+///
+/// ```text
+/// 166592250_Sorry I was gone for a while umm so ...noises now (_´～｀_)_01.png
+/// ```
+///
+/// Ciento cinco caracteres solo el nombre. En una carpeta de prueba corta cabe;
+/// bajo `…\Downloads\Todo Downloads\<autor>\` se acerca al límite de 260 de
+/// Windows, y pasarse ahí da `[Errno 22] Invalid argument` — un error que no
+/// menciona la longitud por ningún lado y que parece cualquier otra cosa.
+///
+/// Se recorta el título a 60 y se conservan `id` y `num`, que son los que
+/// identifican el archivo de verdad. El título sigue estando para reconocerlo
+/// de un vistazo, que es para lo único que sirve en un nombre de archivo.
+fn galdl_site_opts(url: &str) -> Vec<String> {
+    let Some(host) = host_of(&url.to_ascii_lowercase()) else {
+        return Vec::new();
+    };
+    if host_matches(&host, "patreon.com") {
+        return vec![
+            "-o".into(),
+            "extractor.patreon.filename={id}_{title[:60]}_{num:>02}.{extension}".into(),
+        ];
+    }
+    Vec::new()
+}
+
+/// Ajustes por sitio para el LISTADO de la rejilla. Distintos de los de
+/// descarga, y esa distinción no es cosmética.
+///
+/// X: la portada de un vídeo existe, pero su extractor la emite solo si se le
+/// pide —`videos_previews = self.config("previews", False)`—, y por eso los
+/// vídeos salían en la rejilla con un triángulo en vez de imagen.
+///
+/// PERO SOLO AL LISTAR. En la descarga, `previews=true` hace que gallery-dl
+/// baje también el póster como un archivo más: acabarías con un JPEG suelto al
+/// lado de cada vídeo sin haberlo pedido. Poner esta opción en
+/// `galdl_base_args` —que es la ruta de DESCARGA— no arreglaba la rejilla y
+/// además ensuciaba las descargas. Aquí sí está en su sitio.
+fn galdl_opts_listado(url: &str) -> Vec<String> {
+    let Some(host) = host_of(&url.to_ascii_lowercase()) else {
+        return Vec::new();
+    };
+    if host_matches(&host, "x.com") || host_matches(&host, "twitter.com") {
+        return vec!["-o".into(), "extractor.twitter.previews=true".into()];
+    }
+    Vec::new()
 }
 
 /// Traduce errores crípticos de gallery-dl a algo accionable.
@@ -5129,6 +5897,26 @@ fn galdl_hint(lang: Lang, url: &str, err: &str) -> Option<&'static str> {
         && (e.contains("401") || e.contains("unauthorized") || e.contains("login"))
     {
         return Some(i18n::t(lang, "err.instagram_login"));
+    }
+    // UNA COOKIE CADUCADA NO ES UNA COOKIE QUE FALTA.
+    //
+    // gallery-dl lo dice con todas las letras —«cookies: fanbox.cc/FANBOXSESSID
+    // expired at …»— y luego añade «no cookie set», que es la consecuencia. Si
+    // solo se mira el segundo mensaje, la aplicación responde «comprueba que
+    // has iniciado sesión», el usuario mira el navegador, ve que sí lo está, y
+    // se queda sin saber que el problema es un cookies.txt viejo en disco.
+    if e.contains("expired at") || (e.contains("cookie") && e.contains("expired")) {
+        return Some(i18n::t(lang, "err.cookie_expired"));
+    }
+    // FANBOX: un 403 en `post.info` NO es falta de sesión.
+    //
+    // La sesión está entrando —si no, gallery-dl avisaría de que falta la
+    // cookie, como hacía antes—. Ese 403 significa que esos posts exigen un
+    // plan de pago de ESE creador. En Fanbox «Following» es gratis y no da
+    // acceso a nada: lo que abre los posts es «Support». Decir «comprueba tu
+    // sesión» mandaría a mirar justo donde no está el problema.
+    if e.contains("api.fanbox.cc/post.info") && e.contains("403") {
+        return Some(i18n::t(lang, "err.fanbox_plan"));
     }
     None
 }
@@ -5148,24 +5936,52 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
 
     let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
 
-    /// Publica el fallo con una explicación útil cuando la hay
-    fn report(spec: &DlSpec, url: &str, err: String, tx: &UnboundedSender<Ev>) {
+    /// Publica el fallo con una explicación útil cuando la hay, y **con el
+    /// comando delante**.
+    ///
+    /// POR QUÉ EL COMANDO: sin él, un fallo de gallery-dl solo se puede
+    /// diagnosticar adivinando qué argumentos le pasó la aplicación. Con
+    /// Patreon eso costó tres rondas de conjeturas —incluida una equivocada
+    /// mía— hasta que se reprodujo el comando a mano. La pestaña Booru ya lo
+    /// enseña desde hace unas horas y ahí cerró en una captura lo que aquí
+    /// seguía abierto.
+    ///
+    /// Redactado: del `cookies.txt` solo el nombre, nunca la ruta del perfil
+    /// de usuario. Lo que se compara son las OPCIONES, no las credenciales.
+    fn report(spec: &DlSpec, url: &str, err: String, args: &[String], tx: &UnboundedSender<Ev>) {
+        let mut visible = vec!["gallery-dl".to_string()];
+        let mut saltar = false;
+        for a in args {
+            if saltar {
+                saltar = false;
+                continue;
+            }
+            match a.as_str() {
+                "--cookies" => {
+                    visible.push("--cookies <tu cookies.txt>".into());
+                    saltar = true;
+                }
+                "--cookies-from-browser" => {
+                    visible.push("--cookies-from-browser".into());
+                }
+                _ => visible.push(a.clone()),
+            }
+        }
+        let cmd = visible.join(" ");
+
         let last = err
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("error gallery-dl");
-        match galdl_hint(spec.lang, url, &err) {
-            Some(hint) => {
-                // El consejo va primero en el tooltip; el error crudo, debajo
-                let _ = tx.send(Ev::ErrorDetail(spec.id, format!("{hint}\n\n{err}")));
-                let _ = tx.send(Ev::Status(spec.id, Status::Error(hint.chars().take(60).collect())));
-            }
-            None => {
-                let _ = tx.send(Ev::ErrorDetail(spec.id, err.clone()));
-                let _ = tx.send(Ev::Status(spec.id, Status::Error(last.chars().take(60).collect())));
-            }
-        }
+        let detalle = match galdl_hint(spec.lang, url, &err) {
+            // El consejo va primero en el tooltip; el error crudo, debajo
+            Some(hint) => format!("{hint}\n\n{err}\n\n$ {cmd}"),
+            None => format!("{err}\n\n$ {cmd}"),
+        };
+        let resumen = galdl_hint(spec.lang, url, &err).unwrap_or(last);
+        let _ = tx.send(Ev::ErrorDetail(spec.id, detalle));
+        let _ = tx.send(Ev::Status(spec.id, Status::Error(resumen.chars().take(60).collect())));
     }
 
     // gallery-dl imprime una ruta por archivo descargado: contamos líneas
@@ -5200,13 +6016,13 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
                     Ok(r2) if r2.ok => {
                         let _ = tx.send(Ev::Status(spec.id, Status::Done));
                     }
-                    Ok(r2) => report(spec, url, r2.stderr, tx),
+                    Ok(r2) => report(spec, url, r2.stderr, &retry, tx),
                     Err(e) => {
                         let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("gallery-dl: {e}"))));
                     }
                 }
             } else {
-                report(spec, url, r.stderr, tx);
+                report(spec, url, r.stderr, &args, tx);
             }
         }
         Err(e) => {
@@ -6073,6 +6889,107 @@ fn load_cjk_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Qué pinta detrás del panel principal.
+///
+/// `Imagen` es el valor por defecto **a propósito, y eso evita escribir código
+/// de migración**: unos ajustes de la v1.7.0 no tienen este campo, así que
+/// serde lo rellena con `Imagen`, y con su `bg_image` de siempre se comportan
+/// exactamente igual que antes. Una instalación nueva también cae en `Imagen`,
+/// pero con la ruta vacía, que es «sin fondo». `Ninguno` existe para apagarlo
+/// sin perder la ruta elegida.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum ModoFondo {
+    Ninguno,
+    #[default]
+    Imagen,
+    Pase,
+}
+
+/// Extensiones que el pase acepta.
+///
+/// Del GIF solo se usa el primer fotograma: un fondo animado es otra función y
+/// otra conversación sobre consumo, no un efecto secundario de esta.
+const BG_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif"];
+
+/// Tope de imágenes que el pase indexa.
+///
+/// Alguien apuntará a `C:\` sin querer. Diez mil rutas son unos cientos de
+/// kilobytes y bastan para no repetir fondo en años; recorrer medio disco
+/// entero no aportaría nada y dejaría la exploración colgada un minuto.
+const BG_MAX_IMAGENES: usize = 10_000;
+
+/// Número al azar, sin dependencias.
+///
+/// Los nanosegundos del reloj bastan y sobran aquí: entre una llamada y la
+/// siguiente pasan minutos, así que no hay correlación posible. Añadir un
+/// generador de verdad —o una dependencia— para elegir un fondo sería
+/// desproporcionado. Es la misma solución que ya usa el sorteo de los GIF.
+fn azar_usize() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize ^ (d.as_secs() as usize).rotate_left(17))
+        .unwrap_or(0)
+}
+
+fn es_imagen_de_fondo(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| BG_EXTS.contains(&e.as_str()))
+}
+
+/// Recorre las carpetas elegidas y devuelve las imágenes encontradas.
+///
+/// Se ejecuta en un hilo aparte: una carpeta de red o un disco lento con miles
+/// de archivos congelaría la interfaz si se recorriera dentro del frame.
+///
+/// El recorrido es iterativo, con su propia pila, y no sigue enlaces
+/// simbólicos: un enlace que apunte a un antecesor haría girar a un recorrido
+/// recursivo hasta agotar la memoria.
+fn escanear_fondos(carpetas: &[String], recursivo: bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut pila: Vec<PathBuf> = carpetas
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .map(PathBuf::from)
+        .collect();
+    let mut vistas: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    while let Some(dir) = pila.pop() {
+        if out.len() >= BG_MAX_IMAGENES {
+            break;
+        }
+        // Canonicalizar antes de marcar: dos carpetas elegidas pueden solaparse
+        // y sin esto se listarían las mismas imágenes dos veces.
+        let clave = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !vistas.insert(clave) {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entrada in rd.flatten() {
+            let p = entrada.path();
+            match entrada.file_type() {
+                Ok(t) if t.is_dir() => {
+                    if recursivo {
+                        pila.push(p);
+                    }
+                }
+                // El tope va en la guarda: el `while` de fuera ya corta entre
+                // directorios, pero un solo directorio con veinte mil archivos
+                // los metería todos antes de volver a comprobarlo.
+                Ok(t) if t.is_file() && es_imagen_de_fondo(&p) && out.len() < BG_MAX_IMAGENES => {
+                    out.push(p);
+                }
+                _ => {}
+            }
+        }
+    }
+    // Orden estable: el modo secuencial debe dar la misma vuelta en cada
+    // arranque, y `read_dir` no garantiza ningún orden.
+    out.sort();
+    out
+}
+
 /// Carga una imagen de disco y la sube como textura de fondo.
 ///
 /// Se reescala a 1920 px de ancho como máximo: un wallpaper 4K ocuparía ~33 MB
@@ -6345,8 +7262,14 @@ impl eframe::App for App {
         // Halos difuminados de fondo (solo en los temas que los usan)
         paint_bg_glow(ctx, self.settings.theme);
 
-        // Cargar la imagen de fondo cuando cambie la ruta elegida
-        if self.bg_loaded_from != self.settings.bg_image {
+        // Cargar la imagen de fondo cuando cambie la ruta elegida.
+        //
+        // Solo en el modo de imagen fija: en el pase, `bg_loaded_from` lleva la
+        // imagen que toca ahora, y compararla con `bg_image` haría que cada
+        // frame intentase volver a la fija y peleara con el pase.
+        if self.settings.bg_modo == ModoFondo::Imagen
+            && self.bg_loaded_from != self.settings.bg_image
+        {
             self.bg_loaded_from = self.settings.bg_image.clone();
             self.bg_source = if self.settings.bg_image.trim().is_empty() {
                 None
@@ -6363,6 +7286,53 @@ impl eframe::App for App {
                 .bg_source
                 .as_ref()
                 .and_then(|s| make_bg_texture(ctx, s, self.settings.bg_blur));
+        }
+
+        // ---- Pase de diapositivas ----
+        if self.settings.bg_modo == ModoFondo::Pase {
+            // Reindexar solo si cambiaron las carpetas o el recursivo.
+            if self.bg_firma != self.bg_firma_actual() && !self.bg_escaneando {
+                self.explorar_fondos();
+            }
+            // Primera imagen: en cuanto haya lista y no haya nada puesto.
+            if self.bg_cambio.is_none() && !self.bg_lista.is_empty() {
+                self.bg_indice = if self.settings.bg_aleatorio {
+                    azar_usize() % self.bg_lista.len()
+                } else {
+                    0
+                };
+                let ruta = self.bg_lista[self.bg_indice].to_string_lossy().into_owned();
+                self.bg_source = load_bg_source(&ruta);
+                self.bg_loaded_from = ruta;
+                self.bg_dirty = true;
+                self.bg_mezcla = 1.0;
+                self.programar_fondo();
+            }
+            // ¿Toca cambiar?
+            if self.bg_cambio.is_some_and(|t| Instant::now() >= t) {
+                self.avanzar_fondo(ctx);
+            }
+            // Avance del fundido. Solo aquí se pide repintado continuo: fuera
+            // del fundido la aplicación vuelve a estar quieta, que es lo que
+            // debe hacer un gestor de descargas.
+            if self.bg_mezcla < 1.0 {
+                let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                self.bg_mezcla =
+                    (self.bg_mezcla + dt / self.settings.bg_fundido.max(0.05)).min(1.0);
+                if self.bg_mezcla >= 1.0 {
+                    self.bg_saliente = None; // liberar la textura que sale
+                }
+                ctx.request_repaint();
+            } else if let Some(t) = self.bg_cambio {
+                // LA PIEZA CLAVE. egui repinta por eventos, no en bucle: sin
+                // esto el fondo solo cambiaría cuando movieras el ratón, que es
+                // peor que no cambiarlo. Se pide un despertar programado.
+                ctx.request_repaint_after(t.saturating_duration_since(Instant::now()));
+            }
+        } else if self.bg_saliente.is_some() {
+            // Al salir del modo pase no debe quedarse un fundido a medias.
+            self.bg_saliente = None;
+            self.bg_mezcla = 1.0;
         }
         // Antes de pintar: el delta inyectado debe llegar al área de scroll
         self.handle_autoscroll(ctx);
@@ -6428,6 +7398,9 @@ impl eframe::App for App {
                 }
                 if nav_item(ui, self.view == View::Capture, "🧲", t(lang, "nav.capture"), 0) {
                     self.view = View::Capture;
+                }
+                if nav_item(ui, self.view == View::Artistas, "🎨", t(lang, "nav.artists"), self.art_lista.len()) {
+                    self.view = View::Artistas;
                 }
                 if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
                     self.view = View::Booru;
@@ -6515,9 +7488,18 @@ impl eframe::App for App {
                 // Fondo personalizado: se pinta lo primero, así queda DETRÁS de
                 // todo el contenido. Solo aquí; la barra lateral sigue sólida
                 // para que el menú se lea siempre.
-                if let Some(tex) = &self.bg_texture {
+                if self.settings.bg_modo != ModoFondo::Ninguno {
                     let full = ui.max_rect().expand2(egui::vec2(22.0, 18.0)); // compensa el margen
-                    paint_bg_image(ui, tex, full, self.settings.bg_opacity);
+                    let op = self.settings.bg_opacity;
+                    // Durante un fundido se pintan las dos, con la opacidad
+                    // repartida. La suma se mantiene constante, así que el
+                    // fondo no parpadea a mitad de transición.
+                    if let Some(sal) = &self.bg_saliente {
+                        paint_bg_image(ui, sal, full, op * (1.0 - self.bg_mezcla));
+                    }
+                    if let Some(tex) = &self.bg_texture {
+                        paint_bg_image(ui, tex, full, op * self.bg_mezcla);
+                    }
                 }
 
                 match self.view {
@@ -6536,6 +7518,11 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| self.capture_ui(ui));
+                    }
+                    View::Artistas => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.artistas_ui(ui));
                     }
                     View::Booru => {
                         egui::ScrollArea::vertical()
@@ -6713,7 +7700,8 @@ impl App {
                         self.retry_failed();
                     }
                 }
-                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru | View::Support => {}
+                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru
+                | View::Artistas | View::Support => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_sized(
@@ -6735,7 +7723,8 @@ impl App {
                 View::Downloads => r.status != Status::Done && !matches!(r.status, Status::Error(_)),
                 View::Done => r.status == Status::Done,
                 View::Failed => matches!(r.status, Status::Error(_)),
-                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru | View::Support => false,
+                View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru
+                | View::Artistas | View::Support => false,
             })
             .filter(|(_, r)| {
                 search.is_empty()
@@ -7009,6 +7998,7 @@ impl App {
                 for k in [
                     "profile.sites_grid",
                     "profile.sites_whole",
+                    "profile.sites_patreon",
                     "profile.sites_cookies",
                     "profile.sites_capture",
                     "profile.sites_no",
@@ -7049,7 +8039,9 @@ impl App {
                 &mut self.settings.use_browser_cookies,
                 t(lang, "profile.cookies_inline"),
             );
-            if is_threads(&self.profile_url) {
+            if is_patreon_home(&self.profile_url) {
+                ui.label(RichText::new(t(lang, "profile.patreon_home")).size(11.5).color(AMBER()));
+            } else if is_threads(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.threads_note")).size(11.5).color(AMBER()));
             } else if is_douyin_profile(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED()));
@@ -8372,6 +9364,7 @@ impl App {
                                 p.id,
                                 p.preview_url.clone(),
                                 tx.clone(),
+                                Ev::BooruThumb,
                             ));
                         }
 
@@ -8838,6 +9831,36 @@ impl App {
             ui.add_space(10.0);
             ui.label(RichText::new(t(lang, "set.bg_image")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
+            // Selector de modo. Los tres son excluyentes y cada uno enseña solo
+            // sus propios controles: mezclarlos dejaba la tarjeta ilegible.
+            ui.horizontal(|ui| {
+                for (m, k) in [
+                    (ModoFondo::Ninguno, "set.bg_none"),
+                    (ModoFondo::Imagen, "set.bg_one"),
+                    (ModoFondo::Pase, "set.bg_slideshow"),
+                ] {
+                    if ui
+                        .selectable_label(self.settings.bg_modo == m, t(lang, k))
+                        .clicked()
+                    {
+                        self.settings.bg_modo = m;
+                        if m == ModoFondo::Pase {
+                            // Forzar reindexado al entrar: las carpetas pueden
+                            // haber cambiado desde la última vez.
+                            self.bg_firma.clear();
+                        } else {
+                            self.bg_cambio = None;
+                            self.bg_saliente = None;
+                            self.bg_mezcla = 1.0;
+                        }
+                        if m == ModoFondo::Imagen {
+                            self.bg_loaded_from.clear(); // recargar la fija
+                        }
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            if self.settings.bg_modo == ModoFondo::Imagen {
             ui.horizontal(|ui| {
                 if soft_button(ui, t(lang, "set.bg_pick")).clicked() {
                     if let Some(p) = rfd::FileDialog::new()
@@ -8860,39 +9883,9 @@ impl App {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 ui.label(RichText::new(name).size(11.0).color(CYAN()));
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t(lang, "set.bg_opacity")).size(12.0).color(MUTED()));
-                    ui.add(
-                        egui::Slider::new(&mut self.settings.bg_opacity, 0.0..=0.85)
-                            .show_value(false),
-                    );
-                    ui.label(
-                        RichText::new(format!("{:.0}%", self.settings.bg_opacity * 100.0))
-                            .size(12.0)
-                            .color(MUTED()),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t(lang, "set.bg_blur")).size(12.0).color(MUTED()));
-                    let resp = ui.add(
-                        egui::Slider::new(&mut self.settings.bg_blur, 0.0..=24.0).show_value(false),
-                    );
-                    // Difuminar cuesta CPU: se recalcula al SOLTAR, no mientras
-                    // se arrastra, o la interfaz se atascaría.
-                    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-                        self.bg_dirty = true;
-                    }
-                    ui.label(
-                        RichText::new(if self.settings.bg_blur < 0.1 {
-                            t(lang, "set.bg_blur_off").to_string()
-                        } else {
-                            format!("{:.0}", self.settings.bg_blur)
-                        })
-                        .size(12.0)
-                        .color(MUTED()),
-                    );
-                });
             }
+            }
+            self.bg_pase_ui(ui, lang);
             ui.label(RichText::new(t(lang, "set.bg_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
@@ -9470,6 +10463,134 @@ mod tests {
         assert!(!is_direct_media("https://cdn.example/v/mp4"));
         // Con punto sí, y el punto puede estar en cualquier parte del nombre.
         assert_eq!(url_extension("https://cdn.example/v/a.b.png").as_deref(), Some("png"));
+    }
+    /// Patreon entra por host, como todo lo demás desde la v1.7.0. Y entra
+    /// también en la lista de cookies de entrada: sin `session_id` el
+    /// extractor solo ve los posts públicos, y el síntoma sería «este creador
+    /// no tiene nada» en vez de «te falta la sesión».
+    /// El título de un post de Patreon es una frase entera. Con la plantilla
+    /// por defecto un nombre real ocupaba 105 caracteres, y bajo la carpeta de
+    /// descargas eso roza el límite de 260 de Windows — que se manifiesta como
+    /// `[Errno 22] Invalid argument`, un error que no menciona la longitud.
+    #[test]
+    fn patreon_acorta_el_titulo_en_el_nombre() {
+        let o = galdl_site_opts("https://www.patreon.com/c/Kei_Artworks/posts");
+        assert_eq!(o.len(), 2, "debe pasar -o y su valor");
+        assert_eq!(o[0], "-o");
+        assert!(o[1].contains("extractor.patreon.filename="));
+        assert!(o[1].contains("{title[:60]}"), "el título va acotado");
+        assert!(
+            o[1].contains("{id}") && o[1].contains("{num:>02}"),
+            "lo que identifica el archivo de verdad se conserva"
+        );
+
+        // A los demás sitios no se les toca la plantilla.
+        assert!(galdl_site_opts("https://www.instagram.com/alguien").is_empty());
+        // Ni a un impostor que solo contenga el nombre.
+        assert!(galdl_site_opts("https://patreon.com.atacante.example/c/x").is_empty());
+    }
+
+    /// La portada de un vídeo de X existe, pero su extractor la emite solo si
+    /// se le pide: `videos_previews = self.config("previews", False)`. Sin
+    /// esto, los vídeos salían en la rejilla con un triángulo y sin imagen.
+    #[test]
+    fn x_pide_las_portadas_de_los_videos() {
+        // En el LISTADO, no en la descarga: `previews=true` al bajar añadiría
+        // un JPEG de póster al lado de cada vídeo.
+        assert!(galdl_site_opts("https://x.com/alguien").is_empty(), "no en descarga");
+        for u in ["https://x.com/alguien", "https://twitter.com/alguien/media"] {
+            let o = galdl_opts_listado(u);
+            assert_eq!(o.len(), 2, "{u}");
+            assert_eq!(o[0], "-o");
+            assert_eq!(o[1], "extractor.twitter.previews=true", "{u}");
+        }
+        // Y el impostor de siempre no recibe nada.
+        assert!(galdl_opts_listado("https://x.com.atacante.example/alguien").is_empty());
+    }
+    #[test]
+    fn patreon_se_enruta_y_recibe_la_sesion() {
+        for u in [
+            "https://www.patreon.com/c/Kei_Artworks/posts",
+            "https://www.patreon.com/home",
+            "https://patreon.com/posts/166592250",
+            "https://www.patreon.com/collection/12345",
+        ] {
+            assert!(is_gallery_site(u), "debería ir a gallery-dl: {u}");
+            assert_eq!(engine_for_url(u), Engine::GalleryDl, "{u}");
+            assert!(needs_cookies_upfront(u), "necesita la sesión de entrada: {u}");
+        }
+        // Impostores por subcadena, el error que costó el enrutado de X.
+        assert!(!is_gallery_site("https://patreon.com.atacante.example/c/x"));
+        assert!(!is_gallery_site("https://nopatreon.com/c/x"));
+        assert!(!needs_cookies_upfront("https://patreon.com.atacante.example/home"));
+    }
+
+    /// `/home` son TODAS las suscripciones a la vez: puede encolar cientos de
+    /// archivos y merece un aviso que un creador suelto no necesita.
+    #[test]
+    fn el_feed_de_patreon_se_distingue_de_un_creador() {
+        assert!(is_patreon_home("https://www.patreon.com/home"));
+        assert!(is_patreon_home("https://patreon.com/home/"));
+        assert!(is_patreon_home("https://www.patreon.com/home?filter=all"));
+        assert!(!is_patreon_home("https://www.patreon.com/c/Kei_Artworks/posts"));
+        assert!(!is_patreon_home("https://www.patreon.com/c/home_studio"));
+        assert!(!is_patreon_home("https://otro.example/home"));
+    }
+    /// El pase filtra por extensión y recorre subcarpetas sin seguir enlaces
+    /// simbólicos ni repetir carpetas solapadas.
+    #[test]
+    fn el_pase_indexa_solo_imagenes_y_baja_a_las_subcarpetas() {
+        let raiz = std::env::temp_dir().join(format!("td_bg_{}", std::process::id()));
+        let sub = raiz.join("sub");
+        let _ = std::fs::create_dir_all(&sub);
+        for (d, n) in [(&raiz, "a.jpg"), (&raiz, "b.PNG"), (&raiz, "notas.txt"),
+                       (&raiz, "sin_extension"), (&sub, "c.webp")] {
+            let _ = std::fs::write(d.join(n), b"x");
+        }
+        let carpetas = vec![raiz.to_string_lossy().into_owned()];
+
+        let rec = escanear_fondos(&carpetas, true);
+        assert_eq!(rec.len(), 3, "jpg + PNG (mayúsculas) + webp de la subcarpeta");
+
+        let plano = escanear_fondos(&carpetas, false);
+        assert_eq!(plano.len(), 2, "sin recursivo, la subcarpeta no cuenta");
+
+        // La misma carpeta dos veces no duplica: se canonicaliza antes.
+        let dup = vec![carpetas[0].clone(), carpetas[0].clone()];
+        assert_eq!(escanear_fondos(&dup, true).len(), 3);
+
+        // Orden estable: el modo secuencial debe dar la misma vuelta siempre,
+        // y `read_dir` no garantiza ningún orden.
+        assert_eq!(rec, escanear_fondos(&carpetas, true));
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    #[test]
+    fn el_pase_reconoce_las_extensiones_esperadas() {
+        use std::path::Path;
+        for n in ["a.jpg", "a.jpeg", "a.PNG", "a.WebP", "a.bmp", "a.gif"] {
+            assert!(es_imagen_de_fondo(Path::new(n)), "debería valer: {n}");
+        }
+        for n in ["a.txt", "a.mp4", "a", "a.jpg.txt", "a.psd"] {
+            assert!(!es_imagen_de_fondo(Path::new(n)), "no debería valer: {n}");
+        }
+    }
+
+    /// Unos ajustes de la v1.7.0 no tienen `bg_modo`. Que serde lo rellene con
+    /// `Imagen` es lo que evita escribir código de migración: el fondo fijo de
+    /// quien actualice sigue funcionando igual.
+    #[test]
+    fn los_ajustes_viejos_conservan_su_fondo() {
+        let viejo = r#"{"bg_image":"C:/fondos/uno.jpg","bg_opacity":0.39}"#;
+        let s: Settings = serde_json::from_str(viejo).unwrap();
+        assert_eq!(s.bg_modo, ModoFondo::Imagen);
+        assert_eq!(s.bg_image, "C:/fondos/uno.jpg");
+        assert!((s.bg_opacity - 0.39).abs() < 1e-6);
+        // Y una instalación nueva cae en Imagen con la ruta vacía, que es
+        // exactamente «sin fondo».
+        assert_eq!(Settings::default().bg_modo, ModoFondo::Imagen);
+        assert!(Settings::default().bg_image.is_empty());
     }
     #[test]
     fn threads_se_reconoce_por_el_host() {

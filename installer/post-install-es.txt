@@ -35,6 +35,16 @@ Violentmonkey) es la mejor vía, y en Threads es la recomendada. Lo capturado
 vuelve a la pestaña Perfil, con vista previa, para que elijas qué bajar. No
 se envía nada a ningún sitio salvo a la aplicación, en 127.0.0.1.
 
+DESCUBRIR ARTISTAS
+
+La pestaña Artistas convierte el nombre de un personaje en los perfiles que lo
+dibujan. No construye ningún índice propio: lee el campo «source» de los posts
+de los boorus, que apunta al post original del artista en X, Pixiv, Patreon o
+Fanbox. Eliges uno y va a la cola, o se abre con vista previa.
+
+Solo encuentra lo que alguien atribuyó. Un artista al que nadie sube a un booru
+es invisible ahí, y eso no lo cambia ningún ajuste.
+
 ENLACES MAGNET
 
 Si quieres que los enlaces magnet: se abran con Todo Downloader, actívalo

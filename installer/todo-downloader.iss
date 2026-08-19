@@ -3,7 +3,7 @@
 ; ============================================================================
 ;  Built in CI by .github/workflows/build.yml. To build it by hand:
 ;
-;      iscc /DAppVersion=1.7.0 /DBinary=..\target\release\todo-downloader.exe ^
+;      iscc /DAppVersion=1.8.0 /DBinary=..\target\release\todo-downloader.exe ^
 ;           installer\todo-downloader.iss
 ;
 ;  WHY AN INSTALLER AT ALL. The portable .exe stays the primary download and

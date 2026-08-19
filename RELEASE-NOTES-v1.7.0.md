@@ -9,6 +9,99 @@ the current and previous ones are kept in the repository.
 
 ---
 
+## Hotfix — X images, and the Booru search
+
+Three things broke in ways that were hard to see, and the fourth is what made
+them visible.
+
+### X profiles downloaded every photo as a video
+
+Selecting images from an X profile queued them as `.mp4`, and they landed on
+disk as `.unknown_video`.
+
+X serves its images as `…/media/<id>?format=jpg&name=orig` — the type lives in
+the **query**, not in the path. `is_direct_media` only looked at the path, found
+no extension, and the URL fell through to the catch-all in the routing: yt-dlp.
+A profile full of photographs was handed to a video downloader.
+
+That also explains the file name nobody could place: **`unknown_video` is
+yt-dlp's own placeholder** for a format whose extension it cannot determine. It
+never appeared anywhere in this source tree because it was never ours.
+
+The extension is now read from `format=`, which is X's own convention rather
+than a guess. And when the caller already knows it — the profile grid always
+does, gallery-dl publishes it under each thumbnail — that wins over any
+deduction. A test pins the whole chain: the URL yields `jpg`, counts as direct
+media, and routes to the native HTTP engine.
+
+Fixing it surfaced an older flaw underneath. `rsplit('.')` on a path segment
+with no dot returns the **whole segment**, so `/v/abc` was read as a file named
+`.abc`. Harmless while this only named files; not harmless once it decides which
+engine runs. A dot is now required.
+
+### Booru credentials went to sites they did not belong to
+
+Danbooru, AIBooru, e621 and Konachan timed out. Safebooru and yande.re never
+did. And downloading the *full gallery* of the very same site worked fine —
+which ruled out the network, the session and the site itself.
+
+Settings hold **one** username/key pair. It was written into the configuration
+of whichever booru was being searched, so the numeric `user_id` and `api_key` of
+**Gelbooru** — the one site that requires them — reached Danbooru as a
+`username` and an `api-key` that are not its own. The four sites that read those
+fields choked on credentials meant for someone else; the two that ignore them
+never noticed. The full-gallery path has never passed a config file at all,
+which is why it was unaffected.
+
+Credentials now go only to a site that requires them. The Settings fields say
+**Gelbooru**, ask for the **numeric** `user_id`, and reject a non-numeric value
+on the spot — rather than letting the API answer that credentials are missing
+when they are merely malformed.
+
+### The boorus behind Cloudflare get your session
+
+Danbooru, AIBooru, Konachan and e621 sit behind Cloudflare. Safebooru and
+yande.re do not. Those four now receive the browser session — and the
+User-Agent with it, because Cloudflare ties the `cf_clearance` cookie to the
+User-Agent that earned it, and a mismatch makes the cookie worthless.
+
+The Booru tab states, before you search, whether a session is going out and
+**which one**: a `cookies.txt` takes priority over the selected browser, so it
+was possible to have Chrome ticked and be sending a stale file exported from
+Firefox.
+
+A Cloudflare challenge can still come back as a 403; the *Known limitations*
+below say so plainly rather than pretending otherwise.
+
+### And the reason all three took so long
+
+When a search exceeded its time limit, everything the engine had already written
+was **discarded**. That is where the cause always is, so the interface could only
+ever report *"it took too long"* — a sentence that does not distinguish between a
+site being down, an argument being wrong, and a tag with no results.
+
+The output is now kept, the Booru tab holds its error until the next search
+instead of flashing it in a four-second toast, and it prints the command that was
+run with the cookie path and the User-Agent redacted. There is a **📋 Copy
+diagnostics** button.
+
+The very first search after that change answered `Cloudflare challenge (403)`
+instead of a timeout. Three rounds of guessing ended in one screenshot.
+
+### Also
+
+- **A ■ Stop button for the booru search**, which kills the process rather than
+  only discarding its result — a slow site could otherwise hold you for the
+  whole timeout with no way out but closing the application.
+- **Douyin posts with several slides now say so.** Only the first is resolved,
+  and the panel reports it instead of showing "1 file" as though it had gone
+  well. The mixed carousel case is not solved, and pretending otherwise was
+  worse than admitting it.
+- The Threads capture button no longer sits underneath Threads' own compose
+  button.
+
+---
+
 ## X, Facebook and Bluesky profiles
 
 Pasting `https://x.com/someone` into the Profile tab answered *Unsupported URL*.

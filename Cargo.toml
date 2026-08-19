@@ -1,6 +1,6 @@
 [package]
 name = "todo-downloader"
-version = "1.7.0"
+version = "1.8.0"
 build = "build.rs"
 edition = "2021"
 description = "Todo Downloader - Lightweight, bloat-free download manager (JDownloader2 alternative)"

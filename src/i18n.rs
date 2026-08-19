@@ -121,6 +121,30 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         ),
         "cap.listening" => entry!("● Receptor escuchando en", "● Receiver listening on"),
         "cap.off" => entry!("● Receptor desactivado", "● Receiver disabled"),
+        "nav.artists" => entry!("Artistas", "Artists"),
+        "art.title" => entry!("Descubrir artistas", "Discover artists"),
+        "art.subtitle" => entry!(
+            "Escribe un personaje y te digo qué perfiles lo dibujan, ordenados por cuántas veces. De ahí, a la cola o a la pestaña Perfil.",
+            "Type a character and I will tell you which profiles draw them, ranked by how often. From there, to the queue or to the Profile tab."
+        ),
+        "art.depth" => entry!("Profundidad:", "Depth:"),
+        "art.depth_note" => entry!(
+            "Cuántas páginas del booru se recorren. Medido sobre Yukino: 3 páginas dan 17 artistas y 8 dan 36 — profundizar más que dobla el resultado, y lo que cuesta es tiempo. Se para sola cuando la etiqueta se agota.",
+            "How many booru pages are walked. Measured on Yukino: 3 pages give 17 artists and 8 give 36 — going deeper more than doubles the result, and what it costs is time. It stops on its own when the tag runs out."
+        ),
+        "art.tag" => entry!("PERSONAJE (ETIQUETA DE BOORU)", "CHARACTER (BOORU TAG)"),
+        "art.search" => entry!("🎨  Descubrir", "🎨  Discover"),
+        "art.how" => entry!(
+            "No busca en X ni en Pixiv: lee el campo «source» de los posts de yande.re, que apunta al post ORIGINAL del artista. Ese índice lo mantienen miles de personas y sale gratis. Las cuentas oficiales y las tiendas caen solas al fondo, porque el orden es por cuántas veces han dibujado a ESE personaje.",
+            "It does not search X or Pixiv: it reads the «source» field of yande.re posts, which points at the artist's ORIGINAL post. That index is maintained by thousands of people and costs nothing. Official accounts and stores sink to the bottom on their own, because the ranking is by how often they drew THAT character."
+        ),
+        "art.need_tag" => entry!("Escribe una etiqueta, o elige un ejemplo.", "Type a tag, or pick an example."),
+        "art.none" => entry!(
+            "Ningún post de esa etiqueta dice de dónde salió. Prueba con un personaje más popular: cuantos más posts, más fuentes atribuidas.",
+            "No post with that tag says where it came from. Try a more popular character: the more posts, the more attributed sources."
+        ),
+        "art.to_profile" => entry!("Ver en Perfil", "Open in Profile"),
+        "art.to_queue" => entry!("＋ A la cola", "＋ To queue"),
         "booru.copy_diag" => entry!("📋 Copiar diagnóstico", "📋 Copy diagnostics"),
         "booru.cf_file_wins" => entry!(
             "⚠ Tienes marcado el navegador, pero el cookies.txt tiene prioridad y es el que se manda. Si querías la sesión del navegador, vacía el archivo en Ajustes.",
@@ -281,6 +305,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "❌ Douyin: los PERFILES no se pueden analizar (no existe extractor). Vídeos sueltos sí funcionan, pero exigen cookies.txt. Para el perfil entero usa el script de consola y luego «Importar TXT/JSON».",
             "❌ Douyin: PROFILES cannot be analyzed (no extractor exists). Single videos do work, but require cookies.txt. For a whole profile use the console script, then «Import TXT/JSON»."
         ),
+        "profile.patreon_home" => entry!(
+            "▸ patreon.com/home es el feed de TODAS tus suscripciones activas. Puede encolar cientos de archivos de golpe, y no hay listado previo: se descarga entero. Para una sola cuenta, pega la URL de ese creador. gallery-dl salta por su cuenta los posts que tu cuenta no puede ver.",
+            "▸ patreon.com/home is the feed of ALL your active subscriptions. It can queue hundreds of files at once, and there is no listing first: it downloads whole. For a single account, paste that creator's URL. gallery-dl skips posts your account cannot see on its own."
+        ),
         "profile.threads_unsupported" => entry!(
             "Threads no lo lista ningún extractor. Te he abierto la pestaña Capturar con su script: instálalo como userscript, abre el perfil y pulsa el botón. Lo capturado vuelve aquí, a la rejilla.",
             "No extractor lists Threads. I have opened the Capture tab on its script: install it as a userscript, open the profile and press the button. What it captures comes back here, to the grid."
@@ -417,6 +445,14 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "toast.history_empty" => entry!("El historial ya estaba vacío", "History was already empty"),
 
         // ---------- Errores con explicación ----------
+        "err.fanbox_plan" => entry!(
+            "Tu sesión SÍ está entrando: lo que pasa es que esos posts exigen un plan de pago de ese creador. En Fanbox, «Following» es gratis y no abre nada; lo que da acceso es «Support». Prueba con un creador al que apoyes de verdad, o con uno que tenga posts públicos.",
+            "Your session IS getting through: those posts simply require a paid plan on that creator. On Fanbox, «Following» is free and unlocks nothing; «Support» is what grants access. Try a creator you actually support, or one with public posts."
+        ),
+        "err.cookie_expired" => entry!(
+            "Tu cookies.txt tiene la sesión de ese sitio CADUCADA. No es que falte: es que ya no vale. Vuelve a exportarlo con el sitio abierto en el navegador, o vacía el campo del archivo en Ajustes para que se use la sesión del navegador, que se relee en cada búsqueda y no envejece en disco.",
+            "Your cookies.txt holds an EXPIRED session for that site. It is not missing: it is no longer valid. Export it again with the site open in your browser, or clear the file field in Settings so the browser session is used instead — that one is re-read on every search and does not go stale on disk."
+        ),
         "err.instagram_login" => entry!(
             "Instagram exige sesión para listar el perfil entero: activa las cookies en Ajustes \
              (Firefox, o un archivo cookies.txt) y pulsa Reintentar",
@@ -442,8 +478,11 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "▸ Con vista previa y selección, viendo resolución y tipo de cada archivo:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH",
             "▸ With preview and selection, showing each file's resolution and type:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH"),
         "profile.sites_whole" => entry!(
-            "▸ Se descargan enteros, sin listado previo:  Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)",
-            "▸ Downloaded whole, with no listing first:  Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)"),
+            "▸ Se descargan enteros, sin listado previo:  Patreon · Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)",
+            "▸ Downloaded whole, with no listing first:  Patreon · Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)"),
+        "profile.sites_patreon" => entry!(
+            "▸ Patreon:  un creador, un post, una colección, o «patreon.com/home» para TODAS tus suscripciones a la vez. Necesita tu sesión, y solo trae lo que tu cuenta ya puede ver — los posts por encima de tu tramo se saltan. OJO: si el creador comparte su obra con un enlace a MEGA o Google Drive en vez de subirla al post, ese enlace NO se sigue; cópialo y pégalo en Descargas (MEGA tiene motor propio; Drive no está soportado).",
+            "▸ Patreon:  a creator, a post, a collection, or «patreon.com/home» for ALL your subscriptions at once. It needs your session, and it only brings what your account can already see — posts above your tier are skipped. NOTE: if the creator shares their work as a MEGA or Google Drive link instead of uploading it to the post, that link is NOT followed; copy it into Downloads (MEGA has its own engine; Drive is not supported)."),
         "profile.sites_cookies" => entry!(
             "▸ Necesitan tu sesión:  Instagram, X, Facebook, Weibo, Douyin, Threads y cualquier perfil privado o con restricción de edad. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt. En Threads la sesión es la del propio navegador, no hace falta exportar nada.",
             "▸ Need your session:  Instagram, X, Facebook, Weibo, Douyin, Threads and any private or age-restricted profile. Turn it on in Settings → Browser cookies, or load a cookies.txt. On Threads the session is the browser's own — nothing to export."),
@@ -646,7 +685,30 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "set.theme" => entry!("TEMA", "THEME"),
         "theme.classic" => entry!("Clásico", "Classic"),
         "theme.sober" => entry!("Sobrio", "Sober"),
-        "set.bg_image" => entry!("FONDO PERSONALIZADO", "CUSTOM BACKGROUND"),
+        "set.bg_image" => entry!("FONDO", "BACKGROUND"),
+        "set.bg_none" => entry!("Ninguno", "None"),
+        "set.bg_one" => entry!("Una imagen", "One image"),
+        "set.bg_slideshow" => entry!("Pase de diapositivas", "Slideshow"),
+        "set.bg_add_folder" => entry!("＋ Añadir carpeta…", "＋ Add folder…"),
+        "set.bg_remove" => entry!("Quitar", "Remove"),
+        "set.bg_recursive" => entry!("Incluir subcarpetas", "Include subfolders"),
+        "set.bg_rescan" => entry!("↻ Volver a explorar", "↻ Rescan"),
+        "set.bg_scanning" => entry!("Buscando imágenes…", "Looking for images…"),
+        "set.bg_no_folders" => entry!(
+            "⚠ Añade al menos una carpeta. Sin carpetas no hay pase.",
+            "⚠ Add at least one folder. Without folders there is no slideshow."
+        ),
+        "set.bg_empty" => entry!(
+            "⚠ No hay ninguna imagen en esas carpetas. Se admiten jpg, png, webp, bmp y gif (del gif, solo el primer fotograma).",
+            "⚠ No images in those folders. jpg, png, webp, bmp and gif are accepted (of a gif, only the first frame)."
+        ),
+        "set.bg_order" => entry!("Orden:", "Order:"),
+        "set.bg_seq" => entry!("Secuencial", "Sequential"),
+        "set.bg_shuffle" => entry!("Aleatorio", "Random"),
+        "set.bg_every" => entry!("Cambiar cada:", "Change every:"),
+        "set.bg_fade" => entry!("Fundido:", "Fade:"),
+        "set.bg_fade_off" => entry!("sin fundido", "no fade"),
+        "set.bg_next" => entry!("⏭ Siguiente ahora", "⏭ Next now"),
         "set.bg_pick" => entry!("🖼  Elegir imagen…", "🖼  Choose image…"),
         "set.bg_clear" => entry!("Quitar fondo", "Remove background"),
         "set.bg_opacity" => entry!("Intensidad:", "Strength:"),
@@ -879,6 +941,66 @@ pub fn booru_found(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("🔍 {n} resultados"),
         Lang::En => format!("🔍 {n} results"),
+    }
+}
+
+/// Cuántas imágenes indexó el pase de fondos.
+pub fn bg_found(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es if n == 1 => "1 imagen encontrada".into(),
+        Lang::Es => format!("{n} imágenes encontradas"),
+        Lang::En if n == 1 => "1 image found".into(),
+        Lang::En => format!("{n} images found"),
+    }
+}
+
+/// Minutos entre cambios, con el singular resuelto.
+pub fn bg_minutes(lang: Lang, m: u32) -> String {
+    match lang {
+        Lang::Es if m == 1 => "cada minuto".into(),
+        Lang::Es => format!("cada {m} min"),
+        Lang::En if m == 1 => "every minute".into(),
+        Lang::En => format!("every {m} min"),
+    }
+}
+
+
+/// Cuántos perfiles de artista se han encontrado.
+pub fn art_found(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es if n == 1 => "1 artista encontrado".into(),
+        Lang::Es => format!("{n} artistas encontrados"),
+        Lang::En if n == 1 => "1 artist found".into(),
+        Lang::En => format!("{n} artists found"),
+    }
+}
+
+/// Posts de ESE personaje que son de ESE artista.
+pub fn art_posts(lang: Lang, n: u32) -> String {
+    match lang {
+        Lang::Es if n == 1 => "1 post de este personaje".into(),
+        Lang::Es => format!("{n} posts de este personaje"),
+        Lang::En if n == 1 => "1 post of this character".into(),
+        Lang::En => format!("{n} posts of this character"),
+    }
+}
+
+
+/// Profundidad de la cosecha, en páginas.
+pub fn art_depth(lang: Lang, n: u32) -> String {
+    match lang {
+        Lang::Es if n == 1 => "1 página (~100 posts)".into(),
+        Lang::Es => format!("{n} páginas (~{} posts)", n * 100),
+        Lang::En if n == 1 => "1 page (~100 posts)".into(),
+        Lang::En => format!("{n} pages (~{} posts)", n * 100),
+    }
+}
+
+/// Progreso de la cosecha, para que una espera larga no parezca un cuelgue.
+pub fn art_page(lang: Lang, p: u32, total: u32) -> String {
+    match lang {
+        Lang::Es => format!("página {p} de {total}"),
+        Lang::En => format!("page {p} of {total}"),
     }
 }
 
