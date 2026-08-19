@@ -19,6 +19,7 @@ jobs:
   check:
     name: Check (fmt + clippy)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -32,12 +33,28 @@ jobs:
           # egui/winit needs X11, Wayland and OpenGL. GTK is NOT required:
           # file dialogs go through the XDG Desktop Portal (rfd -> ashpd).
           # libssl-dev: librqbit (BitTorrent) pulls in native-tls -> OpenSSL.
-          sudo apt-get update
-          sudo apt-get install -y \
-            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
-            libssl-dev pkg-config
+          # CON REINTENTOS Y CON TOPE. Los réplicas de Azure que usan los
+          # runners fallan a ratos, y `apt-get` se queda esperando en vez de
+          # rendirse: un run se pasó 1 h 43 min en este paso mientras los otros
+          # cuatro jobs ya habían terminado. `timeout` corta, y tres intentos
+          # bastan porque el fallo es transitorio.
+          for i in 1 2 3; do
+            timeout 300 sudo apt-get update && break
+            echo "apt-get update falló (intento $i), reintentando…"
+            sleep 10
+          done
+          for i in 1 2 3; do
+            timeout 600 sudo apt-get install -y --no-install-recommends \
+              libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+              libxkbcommon-dev libxkbcommon-x11-dev \
+              libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
+              libssl-dev pkg-config && break
+            echo "apt-get install falló (intento $i), reintentando…"
+            sleep 15
+          done
+          # Comprobación real: si pkg-config no ve x11, no seguimos a compilar
+          # para fallar veinte minutos después con un error críptico del linker.
+          pkg-config --exists x11 || { echo "::error::faltan las dependencias de X11"; exit 1; }
 
       - uses: Swatinem/rust-cache@v2
 
@@ -62,6 +79,9 @@ jobs:
     name: ${{ matrix.name }}
     needs: check
     runs-on: ${{ matrix.os }}
+    # La compilación en release con LTO gorda es lenta a propósito, pero no
+    # tanto. Un job que pase de esto está colgado, no trabajando.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -221,6 +241,7 @@ jobs:
   release:
     name: Publish release
     needs: build
+    timeout-minutes: 20
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
