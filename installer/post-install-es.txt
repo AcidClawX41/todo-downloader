@@ -45,6 +45,22 @@ Fanbox. Eliges uno y va a la cola, o se abre con vista previa.
 Solo encuentra lo que alguien atribuyó. Un artista al que nadie sube a un booru
 es invisible ahí, y eso no lo cambia ningún ajuste.
 
+MODELOS DE IA (HUGGING FACE)
+
+Pega la dirección de un repositorio de Hugging Face en la pestaña Perfil y se
+listan sus archivos con el tamaño de cada uno, para que elijas. Un modelo no es
+un archivo suelto: son varios trozos de pesos más la configuración, el
+tokenizador y el índice, y sin ese índice los trozos no los carga nadie. Por
+eso viene marcado el modelo completo y fuera el README y la licencia.
+
+Los archivos grandes se bajan por varias conexiones a la vez, que es lo que un
+navegador no hace. Se ajusta en Ajustes -> Descargas -> Conexiones por archivo,
+y solo se aplica cuando el servidor demuestra que admite descarga por rangos.
+
+Si un modelo tiene licencia que aceptar, se avisa antes de encolar nada: hay
+que pulsar «Agree and access repository» en su página y poner en Ajustes el
+token de esa misma cuenta.
+
 ENLACES MAGNET
 
 Si quieres que los enlaces magnet: se abran con Todo Downloader, actívalo

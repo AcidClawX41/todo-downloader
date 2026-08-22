@@ -42,3 +42,7 @@ MEGA-FEASIBILITY.md
 # Local build helpers. The documented way to build is `cargo build --release`,
 # so per-machine scripts stay out of the repository.
 *.bat
+
+# Volcado del arnés de pruebas cuando Build.bat falla: es de esta máquina
+# y de este momento, no del proyecto.
+test-failures.txt

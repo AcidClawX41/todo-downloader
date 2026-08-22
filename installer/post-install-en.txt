@@ -44,6 +44,22 @@ one and it goes to the queue or opens with previews.
 It only finds what somebody attributed. An artist nobody uploads to a booru is
 invisible there, and no setting changes that.
 
+AI MODELS (HUGGING FACE)
+
+Paste a Hugging Face repository address into the Profile tab and its files are
+listed with their sizes for you to pick from. A model is not one file: it is
+several shards of weights plus the config, the tokenizer and the index, and
+without that index nothing can load the shards. So the complete model comes
+ticked, and the README and licence do not.
+
+Large files are fetched over several connections at once, which is what a
+browser will not do. Set it in Settings -> Downloads -> Connections per file;
+it only applies when the server proves it supports ranged downloads.
+
+If a model has terms to accept, you are told before anything is queued: press
+"Agree and access repository" on its page and set the token of that same
+account in Settings.
+
 MAGNET LINKS
 
 If you want magnet: links to open in Todo Downloader, enable it from

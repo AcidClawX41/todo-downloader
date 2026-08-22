@@ -19,6 +19,7 @@ mod booru;
 mod buscar_x;
 mod cookies;
 mod gallery;
+mod hf;
 mod hosters;
 mod i18n;
 mod mega;
@@ -610,6 +611,11 @@ enum Ev {
     /// Resultados de explorar una galería (Instagram, Weibo): (elementos, página)
     GalleryResults(Vec<gallery::GalleryItem>, u32, u64),
     GalleryError(String, u64),
+    /// Un aviso que NO es un error: la lista salió bien, pero hay algo que
+    /// mirar antes de descargar (dos formatos del mismo peso, varias
+    /// cuantizaciones…). Va aparte porque `gallery_error` solo se pinta
+    /// cuando el listado viene vacío, y esto acompaña a un listado bueno.
+    GalleryNotice(String, u64),
     /// Miniatura de un elemento de galería ya decodificada (índice, imagen)
     GalleryThumb(usize, egui::ColorImage),
     /// Dimensiones REALES del archivo previsualizado, antes de reducirlo.
@@ -686,6 +692,11 @@ fn is_direct_media(url: &str) -> bool {
     const EXTS: &[&str] = &[
         "mp4", "webm", "mov", "mkv", "avi", "mp3", "m4a", "wav",
         "jpg", "jpeg", "png", "webp", "gif", "zip", "rar", "7z", "pdf",
+        // Pesos de modelos de IA. Un `.safetensors` de 300 MB no se parece en
+        // nada a un vídeo, pero sin estar aquí caía al último caso de
+        // `engine_for_url` —yt-dlp— y acababa en disco como `.mp4`. Es el
+        // mismo fallo que tuvieron las imágenes de X en la v1.7.0.
+        "safetensors", "gguf", "ckpt", "pt", "pth", "bin", "onnx", "npz",
     ];
     // Por `url_extension` y no comparando el final de la ruta: X sirve sus
     // imágenes como `…/media/<id>?format=jpg&name=orig`, sin extensión en la
@@ -922,6 +933,29 @@ fn is_patreon_home(url: &str) -> bool {
             .is_some_and(|p| p.trim_end_matches('/').ends_with("/home"))
 }
 
+/// Normaliza una URL de Hugging Face a su forma descargable.
+///
+/// LO QUE SE COPIA DEL NAVEGADOR ES `/blob/`, y eso es la PÁGINA del archivo,
+/// no el archivo. La que descarga es `/resolve/`. Medido contra el sitio:
+///
+/// ```text
+/// GET …/resolve/main/model.safetensors
+///   → 302 hacia us.aws.cdn.hf.co/… (enlace firmado)
+///   → accept-ranges: bytes, y la CDN responde 206
+///   → x-linked-size: 334643276   ← el tamaño real, en cabecera
+/// ```
+///
+/// Devuelve `None` si no es de Hugging Face o si ya está en forma descargable.
+fn normalizar_huggingface(url: &str) -> Option<String> {
+    if !es_huggingface(url) {
+        return None;
+    }
+    // `/blob/` → `/resolve/`. Solo ese segmento: un repo que se llame «blob»
+    // no debe reescribirse, y por eso se buscan las barras a los lados.
+    let cambiado = url.replacen("/blob/", "/resolve/", 1);
+    (cambiado != url).then_some(cambiado)
+}
+
 /// URL de Threads. No existe extractor —ni en gallery-dl ni en yt-dlp— y no
 /// puede haberlo fácilmente: Meta firma los enlaces de su CDN, así que la URL
 /// del original solo existe dentro de la respuesta JSON que pide la propia
@@ -970,6 +1004,19 @@ fn engine_for_url(url: &str) -> Engine {
     }
     if is_gallery_site(url) {
         return Engine::GalleryDl;
+    }
+    // Hugging Face antes que nada: sus URLs de `/resolve/` acaban en el nombre
+    // del archivo, pero las de `/blob/` no, y ninguna de las dos es una página
+    // de vídeo. Dejarlas caer al final las mandaba a yt-dlp.
+    //
+    // Solo los ARCHIVOS. La página de un repositorio también está en este host
+    // y es HTML: mandarla al motor HTTP guardaría la página con nombre de
+    // modelo, que es un fallo peor que un error, porque parece que funcionó.
+    // Esas se interceptan en `add_url_ext` y van al listado de la pestaña
+    // Perfil; si alguna se cuela hasta aquí, cae al final y el motor externo
+    // dice «Unsupported URL», que al menos es verdad.
+    if es_huggingface(url) && hf::clasificar_ruta(url) == hf::Destino::Archivo {
+        return Engine::Http;
     }
     if is_direct_media(url) {
         Engine::Http
@@ -1054,7 +1101,22 @@ fn referer_for(url: &str) -> &'static str {
 
 /// Extensión real del archivo a partir de la URL (sin query ni fragmento)
 fn url_extension(url: &str) -> Option<String> {
-    let plausible = |e: &str| {
+    // Dos límites distintos a propósito, porque las dos ramas de abajo no son
+    // lo mismo.
+    //
+    // En la RUTA la extensión es la del archivo y las hay largas: los pesos de
+    // modelos de IA usan `.safetensors`, once caracteres. Con el tope de cinco
+    // que había, `model.safetensors` se quedaba SIN extensión reconocida y
+    // caía al cajón de sastre de yt-dlp, que lo guardaba como `.mp4`.
+    //
+    // En la QUERY el valor de `format=` es la convención de X para sus
+    // imágenes (`?format=jpg`) y ahí sí es siempre corto. Ensancharlo
+    // convertiría cualquier parámetro largo que se llame «format» en una
+    // extensión inventada, así que se queda como estaba.
+    let plausible_ruta = |e: &str| {
+        (2..=12).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric())
+    };
+    let plausible_query = |e: &str| {
         (2..=5).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric())
     };
 
@@ -1069,7 +1131,7 @@ fn url_extension(url: &str) -> Option<String> {
     // ahora `is_direct_media` decide el MOTOR con ello: un segmento corto y
     // alfanumérico bastaba para que una página pasara por archivo directo.
     if let Some((_, ext)) = path.rsplit('/').next().and_then(|n| n.rsplit_once('.')) {
-        if plausible(ext) {
+        if plausible_ruta(ext) {
             return Some(ext.to_ascii_lowercase());
         }
     }
@@ -1083,7 +1145,7 @@ fn url_extension(url: &str) -> Option<String> {
         .filter_map(|p| p.split_once('='))
         .find(|(k, _)| *k == "format" || *k == "ext")
         .map(|(_, v)| v)
-        .filter(|v| plausible(v))
+        .filter(|v| plausible_query(v))
         .map(|v| v.to_ascii_lowercase())
 }
 
@@ -1174,6 +1236,25 @@ struct Settings {
     /// Sigma del desenfoque gaussiano del fondo (0 = nítido)
     bg_blur: f32,
     /// Una imagen fija o un pase de diapositivas.
+    /// Token de acceso de Hugging Face, opcional.
+    ///
+    /// Su propia respuesta lo pide: «You are sending unauthenticated requests
+    /// to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and
+    /// faster downloads». No hace falta para modelos públicos, pero sin él
+    /// compartes el cupo con el resto de internet.
+    ///
+    /// Es un secreto: viaja en la cabecera, nunca en la línea de comandos, y
+    /// no aparece en ningún diagnóstico.
+    hf_token: String,
+    /// Conexiones simultáneas POR ARCHIVO en las descargas directas.
+    ///
+    /// Distinto de `concurrency`, que son archivos a la vez. Esto trocea UN
+    /// archivo entre varias conexiones, que es lo que un navegador no hace y
+    /// la razón de que baje más despacio en archivos grandes.
+    ///
+    /// Solo se aplica a archivos pesados y con servidores que demuestren
+    /// admitir rangos; ver `vale_la_pena_trocear` y `sondear`.
+    http_conexiones: u8,
     /// Páginas de booru que cosecha el descubridor de artistas.
     ///
     /// Medido sobre `yukinoshita_yukino`: 3 páginas dan 17 artistas y 8 dan
@@ -1251,6 +1332,11 @@ impl Default for Settings {
             bg_image: String::new(),
             bg_opacity: 0.22,
             bg_blur: 0.0,
+            hf_token: String::new(),
+            // Cuatro es lo que usan los gestores de descargas de siempre: nota
+            // muchísimo frente a una sola conexión y sigue siendo educado con
+            // el servidor. Ocho ya solo compensa en enlaces muy lejanos.
+            http_conexiones: 4,
             art_paginas: 5,
             bg_modo: ModoFondo::default(),
             bg_carpetas: Vec::new(),
@@ -1702,6 +1788,7 @@ struct App {
     gallery_url: String,
     /// Último motivo de fallo, íntegro y legible en la propia vista
     gallery_error: String,
+    gallery_aviso: String,
     /// Texturas de previsualización, por índice en `gallery_items`
     gallery_thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
     /// Índices con petición en vuelo, para no pedir la misma dos veces
@@ -1892,6 +1979,7 @@ impl App {
             gallery_cancel: Arc::new(AtomicBool::new(false)),
             gallery_url: String::new(),
             gallery_error: String::new(),
+            gallery_aviso: String::new(),
             gallery_thumbs: std::collections::HashMap::new(),
             gallery_pending: std::collections::HashSet::new(),
             gallery_failed: std::collections::HashSet::new(),
@@ -2091,6 +2179,7 @@ impl App {
             // La captura no es una búsqueda: no se toca el epoch ni la página,
             // para no cancelar una exploración que estuviera en marcha.
             self.gallery_error.clear();
+            self.gallery_aviso.clear();
             self.view = View::Profile;
             let msg = i18n::received(self.settings.lang, nuevos);
             self.toast(msg);
@@ -2570,7 +2659,7 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     fn add_url(&mut self, url: &str, author: &str, title: &str, page_url: &str, vid_id: &str, thumb: &str) {
-        self.add_url_ext(url, author, title, page_url, vid_id, thumb, "");
+        self.add_url_ext(url, author, title, page_url, vid_id, thumb, "", "");
     }
 
     /// Igual que `add_url`, pero con la extensión REAL cuando quien llama ya la
@@ -2593,6 +2682,18 @@ impl App {
         vid_id: &str,
         thumb: &str,
         ext_hint: &str,
+        // Nombre con el que guardar, cuando quien llama ya lo conoce y no hay
+        // nada que deducir. Vacío = se construye como siempre.
+        //
+        // El listado de Hugging Face lo sabe: el repositorio publica la ruta
+        // exacta de cada archivo. Pasándolo por la construcción normal
+        // —autor, identificador, título, recorte a 110— salía esto:
+        //
+        //   Comfy-OrgHunyuanImage_2.1_ComfyUI_split_filesdiffusion_…_sp.safetensors
+        //
+        // y ComfyUI no reconoce eso. No es un nombre feo: es un archivo que no
+        // sirve para aquello por lo que se ha bajado.
+        nombre_exacto: &str,
     ) {
         let trimmed = url.trim();
         // Canal seguro: forzar HTTPS en cualquier enlace http:// (TLS obligatorio)
@@ -2606,6 +2707,25 @@ impl App {
         // Canonicalización ANTES de deduplicar y de enrutar. Sin esto, el
         // formato moderno y el antiguo del mismo archivo de MEGA se encolarían
         // como dos filas distintas y se descargaría dos veces.
+        // Hugging Face: lo que se copia del navegador es la PÁGINA del
+        // archivo, no el archivo. Se reescribe antes de deduplicar, o la misma
+        // descarga entraría dos veces según de dónde la hubieras copiado.
+        let hf_url;
+        let url: &str = match normalizar_huggingface(url) {
+            Some(u) => { hf_url = u; &hf_url }
+            None => url,
+        };
+        // Un repositorio no es un archivo: son shards, configuración y
+        // tokenizador. Encolarlo bajaría el HTML de la página con nombre de
+        // modelo —un fallo que parece un acierto hasta que intentas cargarlo—,
+        // así que se manda al listado, donde se elige. Mismo criterio que con
+        // los perfiles de Threads: la ruta que sí funciona está a un clic.
+        if es_huggingface(url) && hf::clasificar_ruta(url) != hf::Destino::Archivo {
+            self.profile_url = url.to_string();
+            self.view = View::Profile;
+            self.toast(t(self.settings.lang, "queue.hf_repo"));
+            return;
+        }
         let canonical;
         let url: &str = match mega::canonicalize(url) {
             Some(c) => {
@@ -2661,7 +2781,12 @@ impl App {
         }
         let stem = sanitize(&parts.join("_"), 110);
 
-        let filename = match engine {
+        // Quien conoce el nombre manda. Se sanea igual —Windows no admite
+        // `:` ni `?` en un nombre de archivo— pero no se le añade nada.
+        let filename = if !nombre_exacto.is_empty() {
+            sanitize(nombre_exacto, 150)
+        } else {
+            match engine {
             // Enlace directo: conservamos la extensión real (.jpeg, .webp, .mp4…)
             // pero con un nombre legible, no el identificador del CDN.
             Engine::Http => {
@@ -2688,6 +2813,7 @@ impl App {
             // El nombre real viene cifrado en los atributos y solo se conoce
             // tras resolver el enlace; esto es solo la etiqueta provisional.
             Engine::Mega => format!("{stem} (MEGA)"),
+            }
         };
 
         self.push_row(url, page_url, folder_author, engine, filename, thumb, "");
@@ -2839,6 +2965,17 @@ impl App {
             cancel: row.cancel.clone(),
             lang: self.settings.lang,
             cookie: row.dl_cookie.clone(),
+            // Solo a Hugging Face, y solo si hay token. Mandar una credencial
+            // a un host que no la pidió es la clase de descuido que ya rompió
+            // los boorus en la v1.7.0.
+            auth: {
+                let es_hf = host_of(&row.url).is_some_and(|h| {
+                    host_matches(&h, "huggingface.co") || host_matches(&h, "hf.co")
+                });
+                let t = self.settings.hf_token.trim();
+                if es_hf && !t.is_empty() { format!("Bearer {t}") } else { String::new() }
+            },
+            conexiones: self.settings.http_conexiones,
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
@@ -3112,6 +3249,8 @@ impl App {
                 }
                 Ev::GalleryResults(_, _, epoch) if epoch != self.gallery_epoch => {}
                 Ev::GalleryError(_, epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryNotice(_, epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryNotice(msg, _) => self.gallery_aviso = msg,
                 Ev::GalleryResults(items, page, _) => {
                     self.gallery_loading = false;
                     self.gallery_prefetching = false;
@@ -3354,6 +3493,19 @@ struct DlSpec {
     lang: Lang,
     /// Cookie de descarga (GoFile); vacía si no aplica
     cookie: String,
+    /// Valor de `Authorization`, ya montado. Vacío si no aplica.
+    ///
+    /// La POLÍTICA de a quién se le manda vive donde se construye el `DlSpec`,
+    /// no aquí: `try_http` solo pone la cabecera si viene. Así el motor no
+    /// repite comprobaciones de host, y añadir otro sitio con token no obliga
+    /// a tocarlo.
+    auth: String,
+    /// Conexiones simultáneas para ESTE archivo. 1 = comportamiento clásico.
+    ///
+    /// Viaja en el `DlSpec` y no se lee de los ajustes dentro del motor: así
+    /// una descarga en marcha no cambia de estrategia a mitad porque el
+    /// usuario haya movido el deslizador.
+    conexiones: u8,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3475,6 +3627,18 @@ async fn download_task(
         }
     }
 
+    // Un 401/403 de Hugging Face tiene una causa concreta y repetida, y
+    // «HTTP 403» a secas no la menciona.
+    if es_huggingface(&spec.url) && (last_err.contains("401") || last_err.contains("403")) {
+        last_err.push_str(msg_lang(
+            "\n\nHugging Face deja LISTAR los archivos de un modelo con licencia, pero no \
+             descargarlos. Abre su página en el navegador, pulsa «Agree and access repository» \
+             con la MISMA cuenta del token, y pon ese token en Ajustes → Hugging Face.",
+            "\n\nHugging Face lets you LIST the files of a gated model but not download them. \
+             Open its page in the browser, press «Agree and access repository» with THE SAME \
+             account as the token, and set that token in Settings → Hugging Face.",
+        ));
+    }
     let short: String = last_err.chars().take(60).collect();
     let _ = tx.send(Ev::ErrorDetail(spec.id, last_err));
     let _ = tx.send(Ev::Status(spec.id, Status::Error(short)));
@@ -4137,12 +4301,566 @@ async fn fetch_thumb(client: reqwest::Client, id: u64, url: String, tx: Unbounde
     }
 }
 
+// ===================== DESCARGA POR TROZOS (multiconexión) =====================
+//
+// Un navegador baja un archivo con UNA conexión. Sobre un CDN eso rara vez
+// satura la línea: el techo no es tu ancho de banda, es el de ESE flujo TCP
+// concreto —ventana, pérdida, distancia al nodo—. Pedir a varias conexiones a
+// la vez un rango distinto del mismo archivo es lo que llevan haciendo los
+// gestores de descargas de siempre, y es la diferencia entre bajar un modelo de
+// 6 GB en veinte minutos o en cinco.
+//
+// Medido contra Hugging Face antes de escribir una línea:
+//
+//   GET …/resolve/main/diffusion_pytorch_model.safetensors
+//     → 302 a us.aws.cdn.hf.co (URL firmada)
+//     → accept-ranges: bytes ; el CDN responde 206 Partial Content
+//     → x-linked-size: 334643276
+//
+// Nada de esto se aplica a ciegas, y las tres restricciones son deliberadas:
+//
+//   1. Solo si el servidor lo DEMUESTRA. No basta con que anuncie
+//      `accept-ranges`: se le pide un byte y se exige un 206 con
+//      `content-range`. Un servidor que anuncia rangos y no los respeta
+//      devolvería el archivo entero por cada hilo, y ocho copias escribiéndose
+//      encima serían un archivo corrupto sin un solo error por pantalla.
+//   2. Solo en archivos que lo justifiquen. Trocear una miniatura de 200 KB
+//      añade latencia, multiplica peticiones y contra un booru es la vía rápida
+//      a que te limiten. Se mira la extensión ANTES de gastar el sondeo.
+//   3. Y con caída limpia. Cualquier «no» de los anteriores vuelve al camino de
+//      una sola conexión, que es el que lleva funcionando desde la v1.0 y que
+//      esta función no toca.
+
+/// Por debajo de esto no se trocea: el sondeo y las peticiones extra cuestan
+/// más de lo que se gana.
+const UMBRAL_TROZOS: u64 = 8 * 1024 * 1024;
+
+/// Tamaño mínimo de cada tramo. Ocho conexiones sobre un archivo de 10 MB son
+/// ocho peticiones para 1,2 MB cada una: todo latencia y ninguna ganancia.
+const TRAMO_MINIMO: u64 = 4 * 1024 * 1024;
+
+/// Cuánto se acumula en memoria antes de escribir a disco, por conexión.
+/// Escribir cada trozo de red por separado son cientos de miles de syscalls;
+/// acumular medio mega las reduce sin que el progreso se note a saltos.
+const BUFER_ESCRITURA: usize = 512 * 1024;
+
+/// Tope duro de conexiones por archivo, pase lo que pase en los ajustes.
+const MAX_CONEXIONES: u64 = 16;
+
+/// Cabeceras de la descarga, ya resueltas y en propiedad.
+///
+/// Se pasan por valor a cada hilo en lugar de compartir el `DlSpec`: un
+/// `RequestBuilder` no se puede clonar y `spec` no es `'static`.
+#[derive(Clone)]
+struct Cabeceras {
+    /// `&'static str` y no `String`: `referer_for` devuelve una constante de la
+    /// tabla de sitios. Copiarla a un `String` por hilo no aportaría nada.
+    referer: &'static str,
+    auth: String,
+    cookie: String,
+}
+
+impl Cabeceras {
+    fn de(spec: &DlSpec) -> Self {
+        Self {
+            // Ojo: el Referer sale de la URL ORIGINAL, no de la del CDN. Es una
+            // comprobación anti-hotlink y espera el origen de la página.
+            referer: referer_for(&spec.url),
+            auth: spec.auth.clone(),
+            cookie: spec.cookie.clone(),
+        }
+    }
+
+    fn aplicar(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Sin compresión, y esto NO es opcional aquí. `reqwest` va compilado
+        // con gzip y lo descomprime solo; si un servidor comprimiera una
+        // respuesta parcial, `content-range` hablaría de los bytes comprimidos
+        // y nosotros escribiríamos los descomprimidos en ese desplazamiento.
+        // El archivo saldría corrupto sin un solo error por pantalla.
+        req = req.header(reqwest::header::ACCEPT_ENCODING, "identity");
+        if !self.referer.is_empty() {
+            req = req.header(reqwest::header::REFERER, self.referer);
+        }
+        if !self.auth.is_empty() {
+            req = req.header(reqwest::header::AUTHORIZATION, &self.auth);
+        }
+        if !self.cookie.is_empty() {
+            req = req.header(reqwest::header::COOKIE, &self.cookie);
+        }
+        req
+    }
+}
+
+/// Qué se aprende del sondeo de un byte.
+enum Sondeo {
+    /// Admite rangos de verdad y se sabe el tamaño: se puede trocear.
+    Trozos { url_final: String, total: u64 },
+    /// Responde, pero sin rangos verificados o sin tamaño: una sola conexión.
+    Simple,
+    /// 403/404/410: el enlace ya no vale y hay que probar otra variante.
+    Caducado(u16),
+}
+
+/// ¿Merece la pena gastar una petición extra en preguntar si admite rangos?
+///
+/// El sondeo cuesta un viaje de ida y vuelta. En una tanda de 300 miniaturas de
+/// un booru serían 300 viajes tirados, así que se pregunta solo cuando la
+/// extensión sugiere algo pesado: pesos de modelos, comprimidos y multimedia.
+/// Sin extensión conocida, no se sondea. Esto es lo que garantiza que las
+/// descargas de imágenes se comporten exactamente igual que antes.
+fn vale_la_pena_trocear(url: &str) -> bool {
+    const PESADOS: &[&str] = &[
+        // Pesos de modelos de IA: el caso que motivó todo esto
+        "safetensors", "gguf", "ckpt", "pt", "pth", "bin", "onnx", "npz", "pkl",
+        // Comprimidos
+        "zip", "rar", "7z", "tar", "gz", "xz", "zst", "iso",
+        // Multimedia grande
+        "mp4", "mkv", "webm", "mov", "avi", "flac", "wav", "m4a", "m4b",
+    ];
+    url_extension(url).is_some_and(|e| PESADOS.contains(&e.as_str()))
+}
+
+/// Pide un solo byte para averiguar tamaño y soporte de rangos.
+async fn sondear(client: &reqwest::Client, spec: &DlSpec) -> anyhow::Result<Sondeo> {
+    let req = Cabeceras::de(spec)
+        .aplicar(client.get(&spec.url))
+        .header(reqwest::header::RANGE, "bytes=0-0");
+    let resp = req.send().await?;
+    let code = resp.status().as_u16();
+
+    if matches!(code, 403 | 404 | 410) {
+        return Ok(Sondeo::Caducado(code));
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {code}");
+    }
+    // Un 200 aquí significa que el servidor IGNORÓ el Range y está mandando el
+    // archivo entero. Es exactamente el caso que corrompería el resultado.
+    if code != 206 {
+        return Ok(Sondeo::Simple);
+    }
+
+    // Hugging Face redirige a un CDN con URL firmada. Resolverla UNA vez y
+    // repartir esa misma URL entre los hilos evita que cada uno negocie su
+    // propio redirección y su propia firma.
+    let url_final = resp.url().to_string();
+
+    // `content-range: bytes 0-0/334643276`. Si el total viene como «*», el
+    // servidor no lo sabe y no hay nada que repartir.
+    let total = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit_once('/'))
+        .and_then(|(_, t)| t.trim().parse::<u64>().ok());
+
+    match total {
+        Some(t) if t >= UMBRAL_TROZOS => Ok(Sondeo::Trozos { url_final, total: t }),
+        _ => Ok(Sondeo::Simple),
+    }
+}
+
+/// Reparte `total` bytes entre `conexiones` tramos. Devuelve `(inicio, cursor,
+/// fin)` con `fin` INCLUSIVO, que es como los cuenta la cabecera `Range`.
+///
+/// Función pura y con test: es donde un error de un byte se convierte en un
+/// archivo corrupto.
+fn repartir(total: u64, conexiones: u8) -> Vec<(u64, u64, u64)> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let por_tamano = (total / TRAMO_MINIMO).max(1);
+    let n = (conexiones as u64).clamp(1, MAX_CONEXIONES).min(por_tamano);
+    let base = total / n;
+    (0..n)
+        .map(|i| {
+            let ini = i * base;
+            let fin = if i + 1 == n { total - 1 } else { (i + 1) * base - 1 };
+            (ini, ini, fin)
+        })
+        .collect()
+}
+
+/// Ruta del fichero de estado que acompaña al `.part`.
+fn ruta_estado(part: &std::path::Path) -> PathBuf {
+    let mut s = part.as_os_str().to_os_string();
+    s.push(".tdseg");
+    PathBuf::from(s)
+}
+
+/// Serializa el estado de los tramos.
+///
+/// Sin esto, cancelar un modelo de 6 GB al 90 % lo tiraría entero. El `.part`
+/// de una descarga troceada tiene AGUJEROS —cada hilo escribe en su zona—, así
+/// que su tamaño en disco no dice absolutamente nada sobre cuánto se ha bajado.
+/// La ruta de una sola conexión sí puede fiarse del tamaño; esta no.
+fn serializar_estado(total: u64, tramos: &[(u64, u64, u64)]) -> String {
+    let mut s = format!("tdseg1\n{total}\n");
+    for (ini, cur, fin) in tramos {
+        s.push_str(&format!("{ini},{cur},{fin}\n"));
+    }
+    s
+}
+
+/// Lee el estado y lo VALIDA contra el tamaño real del archivo remoto.
+///
+/// Devuelve `None` ante cualquier cosa rara —cabecera distinta, total que no
+/// coincide, cursor fuera de su tramo, huecos entre tramos—. Es la diferencia
+/// entre empezar de cero (lento) y escribir sobre un archivo mal reanudado
+/// (silenciosamente corrupto).
+fn parsear_estado(texto: &str, total: u64) -> Option<Vec<(u64, u64, u64)>> {
+    let mut lineas = texto.lines();
+    if lineas.next()?.trim() != "tdseg1" {
+        return None;
+    }
+    if lineas.next()?.trim().parse::<u64>().ok()? != total {
+        return None;
+    }
+
+    let mut tramos = Vec::new();
+    for linea in lineas {
+        let linea = linea.trim();
+        if linea.is_empty() {
+            continue;
+        }
+        let mut campos = linea.split(',');
+        let ini = campos.next()?.trim().parse::<u64>().ok()?;
+        let cur = campos.next()?.trim().parse::<u64>().ok()?;
+        let fin = campos.next()?.trim().parse::<u64>().ok()?;
+        if campos.next().is_some() {
+            return None;
+        }
+        // `cur == fin + 1` es el tramo terminado; más allá es basura.
+        if ini > fin || cur < ini || cur > fin + 1 {
+            return None;
+        }
+        tramos.push((ini, cur, fin));
+    }
+
+    // La cobertura tiene que ser exacta: de 0 a total-1, sin huecos ni solapes.
+    if tramos.is_empty() || tramos[0].0 != 0 || tramos.last()?.2 != total - 1 {
+        return None;
+    }
+    if tramos.windows(2).any(|p| p[1].0 != p[0].2 + 1) {
+        return None;
+    }
+    Some(tramos)
+}
+
+/// Escritura posicional: cada hilo escribe en SU desplazamiento del mismo
+/// archivo, sin turnarse un cursor compartido y sin necesidad de mutex.
+#[cfg(unix)]
+fn escribir_en(f: &std::fs::File, pos: u64, buf: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.write_all_at(buf, pos)
+}
+
+#[cfg(windows)]
+fn escribir_en(f: &std::fs::File, pos: u64, buf: &[u8]) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    // `seek_write` puede escribir menos de lo pedido; no existe un
+    // `write_all_at` en Windows, así que el bucle lo hace aquí.
+    let mut hecho = 0usize;
+    while hecho < buf.len() {
+        let n = f.seek_write(&buf[hecho..], pos + hecho as u64)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "seek_write no escribió nada",
+            ));
+        }
+        hecho += n;
+    }
+    Ok(())
+}
+
+/// Vuelca el búfer a disco y solo ENTONCES avanza el cursor y el contador.
+///
+/// El orden importa: si se contara al recibir de la red, un tramo que falla a
+/// medias y se reintenta sumaría dos veces los mismos bytes y la barra pasaría
+/// del 100 %. Aquí lo que se cuenta es lo que está en el disco.
+async fn volcar(
+    arch: &Arc<std::fs::File>,
+    pos: &mut u64,
+    buf: &mut Vec<u8>,
+    cursor: &std::sync::atomic::AtomicU64,
+    bajados: &std::sync::atomic::AtomicU64,
+) -> anyhow::Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let datos = std::mem::take(buf);
+    let n = datos.len() as u64;
+    let f = arch.clone();
+    let p = *pos;
+    // La escritura es bloqueante. Con ocho hilos golpeando el disco a la vez,
+    // hacerla en el hilo de tokio atascaría también las lecturas de red.
+    tokio::task::spawn_blocking(move || escribir_en(&f, p, &datos)).await??;
+    *pos += n;
+    cursor.store(*pos, Ordering::Relaxed);
+    bajados.fetch_add(n, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Baja un tramo desde donde lo dejó su cursor. `true` = el usuario canceló.
+#[allow(clippy::too_many_arguments)]
+async fn bajar_tramo(
+    client: &reqwest::Client,
+    url: &str,
+    cab: &Cabeceras,
+    arch: &Arc<std::fs::File>,
+    cursor: &std::sync::atomic::AtomicU64,
+    fin: u64,
+    bajados: &std::sync::atomic::AtomicU64,
+    cancel: &Arc<AtomicBool>,
+) -> anyhow::Result<bool> {
+    let inicio = cursor.load(Ordering::Relaxed);
+    let resp = cab
+        .aplicar(client.get(url))
+        .header(reqwest::header::RANGE, format!("bytes={inicio}-{fin}"))
+        .send()
+        .await?;
+
+    // Si el servidor deja de honrar rangos a mitad de la descarga, lo que viene
+    // detrás es el archivo entero desde el byte 0. Escribirlo dentro de este
+    // tramo sería corrupción sin un solo mensaje de error.
+    let code = resp.status().as_u16();
+    if code != 206 {
+        anyhow::bail!("el servidor dejó de aceptar rangos (HTTP {code})");
+    }
+
+    let mut resp = resp;
+    let mut buf: Vec<u8> = Vec::with_capacity(BUFER_ESCRITURA);
+    let mut pos = inicio;
+
+    while let Some(trozo) = resp.chunk().await? {
+        if cancel.load(Ordering::Relaxed) {
+            volcar(arch, &mut pos, &mut buf, cursor, bajados).await?;
+            return Ok(true);
+        }
+        buf.extend_from_slice(&trozo);
+        if buf.len() >= BUFER_ESCRITURA {
+            volcar(arch, &mut pos, &mut buf, cursor, bajados).await?;
+        }
+    }
+    volcar(arch, &mut pos, &mut buf, cursor, bajados).await?;
+    Ok(false)
+}
+
+/// Descarga troceada completa: reparte, lanza los hilos, informa y ensambla.
+#[allow(clippy::too_many_arguments)]
+async fn descarga_troceada(
+    client: &reqwest::Client,
+    spec: &DlSpec,
+    url: &str,
+    total: u64,
+    part: &std::path::Path,
+    estado: &std::path::Path,
+    tx: &UnboundedSender<Ev>,
+) -> anyhow::Result<HttpOutcome> {
+    use std::sync::atomic::AtomicU64;
+
+    // Reanudar si hay un estado válido para ESTE tamaño Y su `.part` sigue
+    // ahí. Un estado huérfano —el usuario borró el `.part` a mano, por
+    // ejemplo— llevaría a abrir en modo reanudación un archivo que no existe.
+    let previo = match tokio::fs::try_exists(part).await {
+        Ok(true) => tokio::fs::read_to_string(estado)
+            .await
+            .ok()
+            .and_then(|s| parsear_estado(&s, total)),
+        _ => None,
+    };
+    let reanuda = previo.is_some();
+    let tramos = previo.unwrap_or_else(|| repartir(total, spec.conexiones));
+    if tramos.is_empty() {
+        anyhow::bail!("no hay nada que repartir");
+    }
+
+    let arch = {
+        let mut op = std::fs::OpenOptions::new();
+        op.write(true).read(true);
+        if reanuda {
+            op.open(part)?
+        } else {
+            op.create(true).truncate(true).open(part)?
+        }
+    };
+    // Reservar el tamaño final de golpe: los hilos escriben en desplazamientos
+    // dispersos, y sin esto el primero que escriba al final crearía un archivo
+    // con agujeros a base de extensiones sucesivas.
+    arch.set_len(total)?;
+    let arch = Arc::new(arch);
+
+    let cursores: Arc<Vec<AtomicU64>> =
+        Arc::new(tramos.iter().map(|(_, c, _)| AtomicU64::new(*c)).collect());
+    let ya: u64 = tramos.iter().map(|(i, c, _)| c - i).sum();
+    let bajados = Arc::new(AtomicU64::new(ya));
+
+    let _ = tx.send(Ev::Size(spec.id, total));
+
+    let cab = Cabeceras::de(spec);
+    let mut tareas = Vec::with_capacity(tramos.len());
+    for (idx, (_, _, fin)) in tramos.iter().enumerate() {
+        let (client, url, cab) = (client.clone(), url.to_string(), cab.clone());
+        let (arch, cursores, bajados) = (arch.clone(), cursores.clone(), bajados.clone());
+        let cancel = spec.cancel.clone();
+        let fin = *fin;
+        tareas.push(tokio::spawn(async move {
+            let mut fallos = 0u32;
+            loop {
+                let antes = cursores[idx].load(Ordering::Relaxed);
+                if antes > fin {
+                    return Ok::<bool, anyhow::Error>(false); // tramo terminado
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(true);
+                }
+                // Ok(false) sin haber llegado al final = la conexión se cortó
+                // limpiamente antes de tiempo. Se reintenta desde el cursor.
+                let fallo = match bajar_tramo(
+                    &client, &url, &cab, &arch, &cursores[idx], fin, &bajados, &cancel,
+                )
+                .await
+                {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => None,
+                    Err(e) => Some(e),
+                };
+
+                let ahora = cursores[idx].load(Ordering::Relaxed);
+                if ahora > fin {
+                    return Ok(false);
+                }
+                // Solo cuenta como fallo si NO se avanzó nada. Una conexión que
+                // baja 200 MB y se corta no debe gastar un reintento.
+                if ahora > antes {
+                    fallos = 0;
+                } else {
+                    fallos += 1;
+                    if fallos > MAX_RETRIES {
+                        return Err(fallo
+                            .unwrap_or_else(|| anyhow::anyhow!("el tramo {idx} no avanza")));
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(800 * fallos.max(1) as u64)).await;
+            }
+        }));
+    }
+
+    // Informe de progreso y persistencia del estado mientras los hilos trabajan.
+    let t0 = Instant::now();
+    let mut ultimo_guardado = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let hecho = bajados.load(Ordering::Relaxed);
+        let vel = hecho.saturating_sub(ya) as f64 / t0.elapsed().as_secs_f64().max(0.001);
+        let _ = tx.send(Ev::Progress(spec.id, hecho, vel));
+
+        let acabado = tareas.iter().all(|h| h.is_finished());
+        if acabado || ultimo_guardado.elapsed() >= Duration::from_secs(2) {
+            let foto: Vec<(u64, u64, u64)> = tramos
+                .iter()
+                .enumerate()
+                .map(|(i, (ini, _, fin))| (*ini, cursores[i].load(Ordering::Relaxed), *fin))
+                .collect();
+            let _ = tokio::fs::write(estado, serializar_estado(total, &foto)).await;
+            ultimo_guardado = Instant::now();
+        }
+        if acabado {
+            break;
+        }
+    }
+
+    let mut cancelado = false;
+    let mut error: Option<anyhow::Error> = None;
+    for t in tareas {
+        match t.await {
+            Ok(Ok(true)) => cancelado = true,
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => error = Some(e),
+            Err(e) => error = Some(anyhow::anyhow!("hilo de descarga interrumpido: {e}")),
+        }
+    }
+
+    if let Some(e) = error {
+        // Se conservan `.part` y estado: el reintento retoma donde se quedó.
+        return Err(e);
+    }
+    if cancelado {
+        return Ok(HttpOutcome::Cancelled);
+    }
+
+    // Comprobación final. Entregar un modelo de 6 GB al que le falta un tramo
+    // es peor que fallar: el error solo aparecería al cargarlo en otro programa.
+    for (i, (_, _, fin)) in tramos.iter().enumerate() {
+        let cur = cursores[i].load(Ordering::Relaxed);
+        if cur <= *fin {
+            anyhow::bail!("tramo {i} incompleto: {cur} de {}", fin + 1);
+        }
+    }
+    arch.sync_all()?;
+    drop(arch);
+    let real = tokio::fs::metadata(part).await?.len();
+    if real != total {
+        anyhow::bail!("tamaño final {real} ≠ {total} esperados");
+    }
+
+    tokio::fs::rename(part, &spec.path).await?;
+    let _ = tokio::fs::remove_file(estado).await;
+    let _ = tx.send(Ev::Progress(spec.id, total, 0.0));
+    Ok(HttpOutcome::Done)
+}
+
 async fn try_http(
     client: &reqwest::Client,
     spec: &DlSpec,
     tx: &UnboundedSender<Ev>,
 ) -> anyhow::Result<HttpOutcome> {
     let part = PathBuf::from(format!("{}.part", spec.path.display()));
+    let estado = ruta_estado(&part);
+
+    // ¿Hay una descarga troceada a medias? Entonces hay que TERMINARLA como
+    // troceada, aunque el ajuste esté ahora en 1: ese `.part` tiene agujeros y
+    // la ruta de una conexión lo daría por reanudable a partir de su tamaño,
+    // que aquí no significa nada. Corromper el archivo del usuario no es una
+    // opción; retomarlo donde se quedó sí.
+    let a_medias = part.exists() && estado.exists();
+
+    if a_medias || (spec.conexiones > 1 && vale_la_pena_trocear(&spec.url)) {
+        match sondear(client, spec).await {
+            Ok(Sondeo::Caducado(code)) => return Ok(HttpOutcome::Expired(code)),
+
+            Ok(Sondeo::Trozos { url_final, total }) if a_medias || !part.exists() => {
+                return descarga_troceada(client, spec, &url_final, total, &part, &estado, tx)
+                    .await;
+            }
+            // Hay un `.part` pero SIN fichero de estado: viene de la ruta de una
+            // sola conexión. Se respeta y se reanuda por ahí, en vez de tirar lo
+            // que ya estaba bajado por empezar a trocear ahora.
+            Ok(Sondeo::Trozos { .. }) => {}
+
+            Ok(Sondeo::Simple) if a_medias => {
+                // El servidor ya no admite rangos y el `.part` tiene agujeros:
+                // no hay forma honesta de continuarlo. Se descarta y se empieza
+                // de cero, que es lento pero correcto.
+                let _ = tokio::fs::remove_file(&part).await;
+                let _ = tokio::fs::remove_file(&estado).await;
+            }
+            Ok(Sondeo::Simple) => {}
+
+            // Un sondeo fallido con una descarga troceada a medias NO puede
+            // caer a la vía de una conexión, y esto es lo más importante de
+            // toda la función: ese `.part` está preasignado al tamaño final y
+            // lleno de huecos, así que `offset` valdría el total y la vía
+            // clásica daría por terminado un archivo de ceros. Se propaga el
+            // error y el reintento vuelve a sondear.
+            Err(e) if a_medias => return Err(e),
+            // Sin nada que perder, el sondeo es solo un extra: si falla, no se
+            // da la descarga por perdida sin intentar siquiera la vía de siempre.
+            Err(_) => {}
+        }
+    }
+
     let offset = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
 
     let mut req = client.get(&spec.url);
@@ -4152,6 +4870,9 @@ async fn try_http(
         req = req.header(reqwest::header::REFERER, referer);
     }
     // Cookie de descarga que exige el hoster (GoFile: accountToken=…)
+    if !spec.auth.is_empty() {
+        req = req.header(reqwest::header::AUTHORIZATION, &spec.auth);
+    }
     if !spec.cookie.is_empty() {
         req = req.header(reqwest::header::COOKIE, &spec.cookie);
     }
@@ -4945,6 +5666,9 @@ async fn browse_gallery_hop(
     // («login required», «no results», un aviso del extractor). Descartarlo
     // dejaba al usuario con un «no devolvió nada» sin causa, que es justo el
     // fallo mudo que ya costó caro en el motor de MEGA.
+    // Fuera del cierre: lo necesitan tanto el mensaje de 403 como el del
+    // listado vacío, y son dos sitios distintos.
+    let de_weibo = host_of(&url).is_some_and(|h| es_weibo(&h));
     let motivo = |extra: &str| -> String {
         let err: String = stderr
             .lines()
@@ -4958,10 +5682,7 @@ async fn browse_gallery_hop(
         let crudo: String = stdout.trim().chars().take(300).collect();
         // Pista específica del sitio. El texto genérico habla de Instagram, que
         // en un 403 de Weibo despista más de lo que ayuda.
-        let es_weibo = host_of(&url)
-            .map(|h| host_matches(&h, "weibo.com") || host_matches(&h, "weibo.cn"))
-            .unwrap_or(false);
-        let extra = if es_weibo && (err.contains("403") || stdout.contains("403")) {
+        let extra = if de_weibo && (err.contains("403") || stdout.contains("403")) {
             format!(
                 "{extra}\n\n{}",
                 msg_lang(
@@ -5005,7 +5726,32 @@ async fn browse_gallery_hop(
             Ok(l) if !l.items.is_empty() => Accion::Listado(l.items),
             // gallery-dl delega en otro extractor: se sigue la pista.
             Ok(l) if !l.queued.is_empty() => Accion::Salto(l.queued[0].clone()),
-            Ok(_) => Accion::Fallo(motivo(msg_lang("gallery-dl no encontró archivos en este perfil.", "gallery-dl found no files in this profile."))),
+            Ok(_) => {
+                // Un listado vacío SIN error no es un fallo de red. En Weibo
+                // los saltos silenciosos del extractor —reenvíos, 快转, «me
+                // gusta» y vídeos de película— ya vienen todos activados por
+                // `opts_weibo`, así que si aún así no sale nada, la causa es
+                // otra y hay que decir cuál puede ser.
+                let pista = if de_weibo {
+                    msg_lang(
+                        "\n\nLos reenvíos, los 快转, los «赞过» y los vídeos de película ya \
+                         vienen activados, así que un resultado vacío apunta a otra cosa: \
+                         sesión caducada, post borrado o visible solo para seguidores.",
+                        "\n\nRetweets, 快转, 赞过 likes and movie videos are all enabled \
+                         already, so an empty result points elsewhere: an expired session, a \
+                         deleted post, or one visible to followers only.",
+                    )
+                } else {
+                    ""
+                };
+                Accion::Fallo(format!(
+                    "{}{pista}",
+                    motivo(msg_lang(
+                        "gallery-dl no encontró archivos en este perfil.",
+                        "gallery-dl found no files in this profile.",
+                    ))
+                ))
+            }
             Err(e) => Accion::Fallo(motivo(&e)),
         }
     };
@@ -5699,6 +6445,147 @@ async fn browse_v2ph(
     }
 }
 
+/// ¿Es una URL de Hugging Face? El host se comprueba AQUÍ y en un solo sitio:
+/// `huggingface.co.atacante.example` contiene la cadena «huggingface.co» y no
+/// es Hugging Face.
+fn es_huggingface(url: &str) -> bool {
+    host_of(url)
+        .is_some_and(|h| host_matches(&h, "huggingface.co") || host_matches(&h, "hf.co"))
+}
+
+/// Lista un repositorio de Hugging Face y lo manda a la rejilla.
+///
+/// No hace falta token para los repos públicos; si lo hay se manda, porque es
+/// lo único que abre los modelos con licencia aceptada y los privados.
+async fn browse_hf(
+    client: reqwest::Client,
+    repo: hf::Repo,
+    revision: String,
+    token: String,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+) {
+    let api = hf::url_api(&repo, &revision);
+    let mut req = client.get(&api);
+    if !token.is_empty() {
+        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let cuerpo = match req.send().await {
+        Ok(r) => {
+            let code = r.status().as_u16();
+            match r.text().await {
+                // Un 401/403 aquí tiene una causa muy concreta y muy repetida,
+                // y decirla ahorra media tarde: el modelo tiene licencia y hay
+                // que aceptarla en su página con la misma cuenta del token.
+                Ok(detalle) if code == 401 || code == 403 => {
+                    let _ = tx.send(Ev::GalleryError(
+                        format!(
+                            "{}\n\nHTTP {code}\n{api}\n\n{detalle}",
+                            msg_lang(
+                                "Hugging Face no deja ver este repositorio. Si el modelo tiene \
+                                 licencia («Gated model»), hay que entrar a su página con el \
+                                 navegador, aceptar las condiciones con LA MISMA cuenta del \
+                                 token, y poner ese token en Ajustes → Hugging Face.",
+                                "Hugging Face will not list this repository. If the model is \
+                                 gated, open its page in the browser, accept the terms with THE \
+                                 SAME account as the token, and set that token in Settings → \
+                                 Hugging Face.",
+                            )
+                        ),
+                        epoch,
+                    ));
+                    return;
+                }
+                Ok(cuerpo) => cuerpo,
+                Err(e) => {
+                    let _ = tx.send(Ev::GalleryError(format!("Hugging Face: {e}"), epoch));
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::GalleryError(format!("Hugging Face: {e}\n{api}"), epoch));
+            return;
+        }
+    };
+
+    let mut listado = match hf::parsear_arbol(&cuerpo) {
+        Ok(l) => l,
+        Err(e) => {
+            // Con el cuerpo recortado: sin él, «JSON ilegible» no se diagnostica.
+            let muestra: String = cuerpo.chars().take(400).collect();
+            let _ = tx.send(Ev::GalleryError(format!("Hugging Face: {e}\n{api}\n\n{muestra}"), epoch));
+            return;
+        }
+    };
+
+    // El nombre de cada archivo se decide mirando la lista ENTERA: solo lleva
+    // carpeta delante el que la necesita para no pisar a otro.
+    let nombres = hf::nombres(&listado.archivos);
+
+    let items: Vec<gallery::GalleryItem> = listado
+        .archivos
+        .iter()
+        .zip(nombres)
+        .map(|(a, nombre)| gallery::GalleryItem {
+            url: hf::url_descarga(&repo, &revision, &a.ruta),
+            filename: nombre,
+            ext: a.ruta.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default(),
+            filesize: a.bytes,
+            // Ni vídeo ni imagen: la rejilla enseña el marcador y la ficha.
+            is_video: false,
+            post_id: a.ruta.clone(),
+            author: match &repo {
+                hf::Repo::Modelo(id) | hf::Repo::Dataset(id) => id.clone(),
+            },
+            description: format!("{}  ·  {}", a.ruta, hf::tam_legible(a.bytes)),
+            post_url: hf::url_descarga(&repo, &revision, &a.ruta),
+            selected: a.marcado,
+            ..Default::default()
+        })
+        .collect();
+
+    // ¿Hay condiciones que aceptar? El árbol se lista igual —Hugging Face
+    // deja VER los archivos de un repositorio con licencia— pero cada descarga
+    // devolvería un 403. Preguntarlo cuesta 66 bytes y ahorra encolar
+    // cincuenta gigas condenados. Si la petición falla, se calla: es un extra,
+    // no una condición para listar.
+    let mut peticion = client.get(hf::url_gated(&repo));
+    if !token.is_empty() {
+        peticion = peticion.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Ok(r) = peticion.send().await {
+        if let Ok(txt) = r.text().await {
+            if let Some(modo) = hf::parsear_gated(&txt) {
+                // El primero de la lista: manda sobre cualquier otro aviso.
+                listado.avisos.insert(0, hf::Aviso::ConLicencia(modo));
+            }
+        }
+    }
+
+    // El resumen va SIEMPRE, no solo cuando hay avisos: veintidós nombres de
+    // archivo no dicen si lo que has marcado son cuatro gigas o sesenta.
+    let (n_marc, b_marc) = listado.marcado();
+    let (n_tot, b_tot) = listado.total();
+    let mut texto = vec![if i18n::lang() == i18n::Lang::Es {
+        format!(
+            "Marcados {n_marc} de {n_tot} archivos: {} de {}.",
+            hf::tam_legible(b_marc),
+            hf::tam_legible(b_tot)
+        )
+    } else {
+        format!(
+            "{n_marc} of {n_tot} files ticked: {} of {}.",
+            hf::tam_legible(b_marc),
+            hf::tam_legible(b_tot)
+        )
+    }];
+    texto.extend(listado.avisos.iter().map(i18n::hf_aviso));
+    let _ = tx.send(Ev::GalleryNotice(texto.join("\n"), epoch));
+    let _ = tx.send(Ev::GalleryResults(items, 1, epoch));
+}
+
 // ============================= Hilos auxiliares =============================
 
 fn spawn_clipboard_watcher(tx: UnboundedSender<Ev>, enabled: Arc<AtomicBool>, grab_any: Arc<AtomicBool>) {
@@ -5853,6 +6740,98 @@ fn galdl_base_args(dir: &std::path::Path, url: &str) -> Vec<String> {
 /// Se recorta el título a 60 y se conservan `id` y `num`, que son los que
 /// identifican el archivo de verdad. El título sigue estando para reconocerlo
 /// de un vistazo, que es para lo único que sirve en un nombre de archivo.
+/// Opciones de Weibo, iguales para listar y para descargar.
+///
+/// EL FALLO QUE ARREGLAN: `weibo.com/7187265342/QvRHJ0FYJ` devolvía `[]` con
+/// código de salida 0 y stderr vacío. No era una sesión caducada ni un
+/// problema de cookies. El extractor de gallery-dl 1.32.9 trae TRES
+/// interruptores apagados que descartan contenido en silencio, y los tres se
+/// registran a nivel `debug`, así que no llegan ni a stderr:
+///
+/// ```python
+/// self.retweets = self.config("retweets", False)   # weibo.py:36
+/// self.movies   = self.config("movies",   False)   # weibo.py:39
+/// self.likes    = self.config("likes",    False)   # weibo.py:40
+///
+/// if "ori_mid" in status and not self.retweets:            # 84  快转
+///     self.log.debug("Skipping %s (快转 retweet)", ...); continue
+/// if "retweeted_status" in status and not self.retweets:   # 88  reenvío
+///     self.log.debug("Skipping %s (retweet)", ...);        continue
+/// if is_like(...) and not self.likes:                      # 107 赞过
+///     self.log.debug("Skipping %s (赞过 like)", ...);      continue
+/// if info.get("type") != "5" or self.movies:               # 180 vídeo «movie»
+///     ...else: self.log.debug("%s: Ignoring 'movie' video", ...)
+/// ```
+///
+/// LOS TRES SE ACTIVAN. El criterio es del usuario, no del programa: si pega
+/// una dirección o la ve en la rejilla del perfil, la quiere. Decidir por él
+/// que un reenvío «no es obra suya» y esconderlo es exactamente el fallo mudo
+/// que este proyecto lleva persiguiendo desde la v1.5: lista vacía, cero
+/// errores y nada que leer.
+///
+/// `retweets=original` en vez de `true` porque las imágenes son del autor
+/// ORIGINAL: con `original`, gallery-dl usa los metadatos del post citado, así
+/// que los archivos se nombran y se atribuyen a quien hizo la foto, y el
+/// `post_url` para reintentar apunta al post original — el que seguirá
+/// existiendo si el reenvío desaparece.
+///
+/// `gifs`, `videos` y `livephoto` ya vienen activados de fábrica; no hace
+/// falta repetirlos y hacerlo solo añadiría ruido a la línea de comandos.
+fn opts_weibo() -> Vec<String> {
+    opts_de("weibo", &["retweets=original", "likes=true", "movies=true"])
+}
+
+/// Interruptores de X que esconden contenido, apagados de fábrica.
+///
+/// `twitter.py` de gallery-dl 1.32.9, mismo patrón que Weibo y con el mismo
+/// aviso a nivel `debug` que no llega a stderr:
+///
+/// ```python
+/// self.retweets = self.config("retweets", False)   # :40
+/// self.pinned   = self.config("pinned",   False)   # :43
+/// self.quoted   = self.config("quoted",   False)   # :44
+///
+/// if not self.retweets and "retweeted_status_id_str" in data:
+///     self.log.debug("Skipping %s (retweet)", ...);      continue   # :107
+/// if not self.quoted and "quoted_by_id_str" in data:
+///     self.log.debug("Skipping %s (quoted tweet)", ...); continue   # :110
+/// ```
+///
+/// `pinned` es el más sangrante de los tres: el tuit fijado es LO PRIMERO que
+/// se ve al abrir un perfil, y con el valor por defecto ni se pide.
+///
+/// Lo que se queda fuera y por qué: `cards` son las miniaturas de enlaces
+/// externos —no es obra de quien publica, y en modo `ytdl` además invoca a
+/// yt-dlp—; `ads` son tuits promocionados; `twitpic` es un servicio muerto
+/// desde 2017 y cada intento cuesta una petición; `unavailable` insiste en
+/// medios que el propio sitio ya ha marcado como no servibles.
+fn opts_x() -> Vec<String> {
+    opts_de("twitter", &["retweets=true", "quoted=true", "pinned=true"])
+}
+
+/// Lo mismo en Bluesky: `bluesky.py:40` y `:538`.
+///
+/// Con `reposts` o `quoted` activados, el extractor de perfil cambia su
+/// objetivo por defecto de `media` a `posts` (`bluesky.py:229-230`), que es
+/// justo el feed que se ve al abrir el perfil en el navegador. Sin ellos solo
+/// mira la pestaña de medios, y los reposts no están ahí.
+fn opts_bluesky() -> Vec<String> {
+    opts_de("bluesky", &["reposts=true", "quoted=true"])
+}
+
+/// Monta los pares `-o extractor.<sitio>.<opción>`.
+fn opts_de(sitio: &str, opciones: &[&str]) -> Vec<String> {
+    opciones
+        .iter()
+        .flat_map(|o| ["-o".to_string(), format!("extractor.{sitio}.{o}")])
+        .collect()
+}
+
+/// X y su nombre antiguo, por host y no por subcadena.
+fn es_x(host: &str) -> bool {
+    host_matches(host, "x.com") || host_matches(host, "twitter.com")
+}
+
 fn galdl_site_opts(url: &str) -> Vec<String> {
     let Some(host) = host_of(&url.to_ascii_lowercase()) else {
         return Vec::new();
@@ -5863,7 +6842,22 @@ fn galdl_site_opts(url: &str) -> Vec<String> {
             "extractor.patreon.filename={id}_{title[:60]}_{num:>02}.{extension}".into(),
         ];
     }
+    if es_weibo(&host) {
+        return opts_weibo();
+    }
+    if es_x(&host) {
+        return opts_x();
+    }
+    if host_matches(&host, "bsky.app") {
+        return opts_bluesky();
+    }
     Vec::new()
+}
+
+/// Los cuatro dominios de Weibo, distinguidos por host y no por subcadena.
+/// `passport.weibo.com` contiene «weibo.com» y no es lo mismo.
+fn es_weibo(host: &str) -> bool {
+    host_matches(host, "weibo.com") || host_matches(host, "weibo.cn")
 }
 
 /// Ajustes por sitio para el LISTADO de la rejilla. Distintos de los de
@@ -5879,13 +6873,21 @@ fn galdl_site_opts(url: &str) -> Vec<String> {
 /// `galdl_base_args` —que es la ruta de DESCARGA— no arreglaba la rejilla y
 /// además ensuciaba las descargas. Aquí sí está en su sitio.
 fn galdl_opts_listado(url: &str) -> Vec<String> {
+    // Todo lo del sitio vale también aquí, y hereda en vez de repetirse: si un
+    // interruptor se pone solo en una de las dos rutas, el perfil se lista
+    // bien y luego se descarga vacío, que es un fallo especialmente molesto
+    // porque parece que el listado mintió.
+    let mut v = galdl_site_opts(url);
+
     let Some(host) = host_of(&url.to_ascii_lowercase()) else {
-        return Vec::new();
+        return v;
     };
-    if host_matches(&host, "x.com") || host_matches(&host, "twitter.com") {
-        return vec!["-o".into(), "extractor.twitter.previews=true".into()];
+    // SOLO al listar. La miniatura del vídeo hace falta para la rejilla, pero
+    // en la descarga dejaría un JPEG suelto tirado junto a cada vídeo.
+    if es_x(&host) {
+        v.extend(opts_de("twitter", &["previews=true"]));
     }
-    Vec::new()
+    v
 }
 
 /// Traduce errores crípticos de gallery-dl a algo accionable.
@@ -8045,6 +9047,10 @@ impl App {
                 ui.label(RichText::new(t(lang, "profile.threads_note")).size(11.5).color(AMBER()));
             } else if is_douyin_profile(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED()));
+            } else if es_huggingface(&self.profile_url)
+                && matches!(hf::clasificar_ruta(&self.profile_url), hf::Destino::Repo { .. })
+            {
+                ui.label(RichText::new(t(lang, "profile.hf_note")).size(11.5).color(CYAN()));
             } else if is_gallery_site(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.gallery_note")).size(11.5).color(AMBER()));
             }
@@ -8058,6 +9064,47 @@ impl App {
                 let url = self.profile_url.trim().to_string();
                 if url.is_empty() || !url.starts_with("http") {
                     self.toast(t(lang, "profile.need_url"));
+                } else if es_huggingface(&url) {
+                    // Un modelo no es un archivo: son shards, configuración y
+                    // tokenizador. Se listan y el usuario elige, igual que una
+                    // galería. La API es abierta y no necesita gallery-dl.
+                    match hf::clasificar_ruta(&url) {
+                        hf::Destino::Repo { repo, revision } => {
+                            self.profile_entries.clear();
+                            self.profile_thumbs.clear();
+                            self.profile_pending.clear();
+                            self.profile_failed.clear();
+
+                            self.gallery_url = url.clone();
+                            self.gallery_items.clear();
+                            self.gallery_error.clear();
+                            self.gallery_aviso.clear();
+                            self.gallery_loading = true;
+                            self.gallery_page = 1;
+                            // Una sola petición trae el árbol entero: no hay
+                            // páginas que encadenar.
+                            self.gallery_prefetch_left = 0;
+                            self.gallery_prefetching = false;
+                            self.gallery_epoch += 1;
+                            let ep = self.gallery_epoch;
+                            self.rt.spawn(browse_hf(
+                                self.client.clone(),
+                                repo,
+                                revision,
+                                self.settings.hf_token.trim().to_string(),
+                                self.tx.clone(),
+                                ep,
+                            ));
+                        }
+                        // Un archivo suelto ya sabe descargarse solo.
+                        hf::Destino::Archivo => {
+                            self.add_url(&url, "", "", &url, "", "");
+                            self.view = View::Downloads;
+                        }
+                        hf::Destino::Coleccion => self.toast(t(lang, "profile.hf_coleccion")),
+                        hf::Destino::Espacio => self.toast(t(lang, "profile.hf_espacio")),
+                        hf::Destino::Otro => self.toast(t(lang, "profile.hf_otro")),
+                    }
                 } else if is_threads(&url) {
                     // Mandarlo a gallery-dl solo produciría «Unsupported URL»,
                     // que es cierto pero no le dice a nadie qué hacer. La ruta
@@ -8079,6 +9126,7 @@ impl App {
                     self.gallery_url = url.clone();
                     self.gallery_items.clear();
                     self.gallery_error.clear();
+                    self.gallery_aviso.clear();
                     self.gallery_loading = true;
                     self.gallery_page = 1;
                     // SIN carga encadenada en V2PH. En Instagram cada página
@@ -8118,6 +9166,7 @@ impl App {
                         self.gallery_url = url.clone();
                         self.gallery_items.clear();
                         self.gallery_error.clear();
+                        self.gallery_aviso.clear();
                         self.gallery_loading = true;
                         self.gallery_page = 1;
                         self.gallery_prefetch_left = paginas_encadenadas(&url);
@@ -8168,6 +9217,7 @@ impl App {
                     // conjuntos de casillas en pantalla.
                     self.gallery_items.clear();
                     self.gallery_error.clear();
+                    self.gallery_aviso.clear();
                     self.gallery_url.clear();
                     self.gallery_thumbs.clear();
                     self.gallery_pending.clear();
@@ -8219,6 +9269,18 @@ impl App {
                             .font(egui::TextStyle::Monospace),
                     );
                 }
+            });
+        }
+
+        // Un aviso NO es un error: la lista está bien y hay algo que mirar.
+        // Se pinta pegado a la rejilla, que es donde se toma la decisión.
+        if !self.gallery_aviso.is_empty() {
+            ui.add_space(12.0);
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width().min(880.0));
+                ui.label(RichText::new(t(lang, "gal.aviso")).size(11.0).color(AMBER()).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new(&self.gallery_aviso).size(12.0).color(TEXT()));
             });
         }
 
@@ -8319,7 +9381,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                         for &i in &visibles {
-                            let (thumb_url, is_video, marcado, resumen, pos, carrusel) = {
+                            let (thumb_url, is_video, marcado, resumen, pos, carrusel, nombre) = {
                                 let it = &self.gallery_items[i];
                                 (
                                     it.thumb_url.clone(),
@@ -8328,6 +9390,7 @@ impl App {
                                     it.summary(),
                                     it.position(),
                                     it.is_carousel(),
+                                    it.filename.clone(),
                                 )
                             };
 
@@ -8383,7 +9446,7 @@ impl App {
                                             let etiqueta = if thumb_url.is_empty()
                                                 || self.gallery_failed.contains(&i)
                                             {
-                                                if is_video { "▶" } else { "—" }
+                                                if is_video { "▶" } else { "📄" }
                                             } else {
                                                 "…"
                                             };
@@ -8415,6 +9478,21 @@ impl App {
                                                 );
                                             }
                                         });
+                                        // Sin miniatura, el nombre ES la única
+                                        // forma de saber qué hay en la celda.
+                                        // Treinta y dos rectángulos idénticos
+                                        // con el nombre escondido en el globo
+                                        // de ayuda no son una lista: son un
+                                        // muro. Con imagen no hace falta, que
+                                        // ya se ve lo que es.
+                                        if thumb_url.is_empty() && !nombre.is_empty() {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&nombre).size(9.5).color(TEXT()),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
                                         ui.add(
                                             egui::Label::new(
                                                 RichText::new(resumen).size(9.0).color(MUTED()),
@@ -8451,6 +9529,9 @@ impl App {
                             .unwrap_or_else(|| {
                                 author_from_url(&self.gallery_url)
                             });
+                        // Copiada antes del bucle: dentro se llama a
+                        // `&mut self` y no se puede seguir prestando el campo.
+                        let url_galeria = self.gallery_url.clone();
                         let elegidos: Vec<gallery::GalleryItem> = self
                             .gallery_items
                             .iter()
@@ -8461,6 +9542,12 @@ impl App {
                         for it in elegidos {
                             // El enlace de la publicación va como page_url: si la
                             // URL de CDN caduca, el motor puede reintentar por ahí.
+                            // En un listado de archivos el nombre NO se
+                            // deduce: viene dado. En una galería sí, porque
+                            // ahí `filename` es una etiqueta del extractor y
+                            // no un nombre único dentro de una carpeta.
+                            let exacto: &str =
+                                if es_huggingface(&url_galeria) { &it.filename } else { "" };
                             self.add_url_ext(
                                 &it.url,
                                 &autor,
@@ -8469,6 +9556,7 @@ impl App {
                                 &it.post_id,
                                 "",
                                 &it.ext,
+                                exacto,
                             );
                         }
                         self.toast(i18n::added_links(lang, n));
@@ -8517,11 +9605,18 @@ impl App {
                             RichText::new(t(lang, "gal.prefetching")).size(10.5).color(MUTED()),
                         );
                     }
-                    ui.label(
-                        RichText::new(t(lang, "gal.expiry_note"))
-                            .size(10.5)
-                            .color(AMBER()),
-                    );
+                    // Los enlaces de CDN de las redes sociales sí caducan en
+                    // horas. Los de Hugging Face no: `/resolve/` es una URL
+                    // estable que redirige a una firmada NUEVA en cada
+                    // petición. Meter prisa donde no la hay es tan malo como
+                    // no avisar donde sí.
+                    if !es_huggingface(&self.gallery_url) {
+                        ui.label(
+                            RichText::new(t(lang, "gal.expiry_note"))
+                                .size(10.5)
+                                .color(AMBER()),
+                        );
+                    }
                 });
             });
 
@@ -8533,6 +9628,7 @@ impl App {
                 self.gallery_pending.clear();
                 self.gallery_failed.clear();
                 self.gallery_error.clear();
+                self.gallery_aviso.clear();
                 self.gallery_url.clear();
                 self.gallery_page = 1;
                 // Detiene además el proceso que esté listando: vaciar la lista
@@ -9924,6 +11020,12 @@ impl App {
                 ui.add(egui::Slider::new(&mut self.settings.concurrency, 1..=8));
             });
             ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(t(lang, "set.conexiones"));
+                ui.add(egui::Slider::new(&mut self.settings.http_conexiones, 1..=8));
+            });
+            ui.label(RichText::new(t(lang, "set.conexiones_note")).size(11.5).color(MUTED()));
+            ui.add_space(6.0);
             ui.checkbox(&mut self.settings.prefer_bitrate, t(lang, "set.prefer_br"));
             ui.label(RichText::new(t(lang, "set.prefer_br_note")).size(11.5).color(MUTED()));
             ui.add_space(8.0);
@@ -10305,6 +11407,25 @@ impl App {
         });
         ui.add_space(12.0);
 
+        // ---- Hugging Face ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.hf")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t(lang, "set.hf_token")).size(12.0).color(MUTED()));
+                // password(true): un token es una credencial, y no tiene por
+                // qué quedar a la vista de quien mire la pantalla ni en una
+                // captura de las que acabas mandando para pedir ayuda.
+                ui.add_sized(
+                    [300.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.settings.hf_token).password(true),
+                );
+            });
+            ui.label(RichText::new(t(lang, "set.hf_note")).size(11.5).color(MUTED()));
+        });
+        ui.add_space(12.0);
+
         // ---- Manejador de enlaces magnet ----
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
@@ -10495,14 +11616,19 @@ mod tests {
     /// esto, los vídeos salían en la rejilla con un triángulo y sin imagen.
     #[test]
     fn x_pide_las_portadas_de_los_videos() {
-        // En el LISTADO, no en la descarga: `previews=true` al bajar añadiría
-        // un JPEG de póster al lado de cada vídeo.
-        assert!(galdl_site_opts("https://x.com/alguien").is_empty(), "no en descarga");
+        let previews = "extractor.twitter.previews=true";
+        // En el LISTADO, no en la descarga: `previews=true` al bajar dejaría
+        // un JPEG de póster tirado al lado de cada vídeo. Los DEMÁS
+        // interruptores de X sí van en las dos rutas.
+        assert!(
+            !galdl_site_opts("https://x.com/alguien").iter().any(|a| a == previews),
+            "las portadas no van en la descarga"
+        );
         for u in ["https://x.com/alguien", "https://twitter.com/alguien/media"] {
             let o = galdl_opts_listado(u);
-            assert_eq!(o.len(), 2, "{u}");
-            assert_eq!(o[0], "-o");
-            assert_eq!(o[1], "extractor.twitter.previews=true", "{u}");
+            assert!(o.iter().any(|a| a == previews), "{u}");
+            // Y el listado hereda lo del sitio en vez de reemplazarlo.
+            assert!(o.iter().any(|a| a == "extractor.twitter.pinned=true"), "{u}");
         }
         // Y el impostor de siempre no recibe nada.
         assert!(galdl_opts_listado("https://x.com.atacante.example/alguien").is_empty());
@@ -10591,6 +11717,272 @@ mod tests {
         // exactamente «sin fondo».
         assert_eq!(Settings::default().bg_modo, ModoFondo::Imagen);
         assert!(Settings::default().bg_image.is_empty());
+    }
+    /// El reparto de tramos es donde un error de un byte se convierte en un
+    /// archivo corrupto, así que se comprueban los invariantes, no ejemplos.
+    #[test]
+    fn el_reparto_cubre_el_archivo_entero() {
+        for (total, n) in [
+            (100u64 << 20, 4u8),
+            (8 << 20, 8),
+            (10 << 20, 8),
+            (1, 4),
+            (6 * 1024 * 1024 * 1024, 8),
+            (9 << 20, 3),
+            (UMBRAL_TROZOS, 2),
+        ] {
+            let t = repartir(total, n);
+            assert!(!t.is_empty(), "sin tramos para {total}");
+            assert_eq!(t[0].0, 0, "no empieza en 0 ({total}, {n})");
+            assert_eq!(t.last().unwrap().2, total - 1, "no acaba en total-1");
+            assert!(
+                t.windows(2).all(|p| p[1].0 == p[0].2 + 1),
+                "hueco o solape entre tramos ({total}, {n})"
+            );
+            let suma: u64 = t.iter().map(|(i, _, f)| f - i + 1).sum();
+            assert_eq!(suma, total, "los tramos no suman el total ({total}, {n})");
+            assert!(t.len() as u64 <= n as u64, "más tramos que conexiones");
+            // El cursor arranca pegado al inicio de su tramo.
+            assert!(t.iter().all(|(i, c, _)| i == c));
+        }
+        assert!(repartir(0, 4).is_empty());
+        // El tope duro manda por encima de los ajustes.
+        assert!(repartir(1 << 30, 255).len() <= MAX_CONEXIONES as usize);
+        // Y el tamaño mínimo de tramo también: 10 MiB no se parte en ocho.
+        assert_eq!(repartir(10 << 20, 8).len(), 2);
+    }
+
+    /// Sin este fichero, cancelar un modelo de 6 GB al 90 % lo tiraría entero.
+    /// Y un estado mal validado es peor: reanudaría sobre bytes equivocados.
+    #[test]
+    fn el_estado_de_los_tramos_va_y_vuelve() {
+        let total = 100u64 << 20;
+        let mut t = repartir(total, 4);
+        t[1].1 += 1234; // un tramo a medias
+        let texto = serializar_estado(total, &t);
+        assert_eq!(parsear_estado(&texto, total), Some(t.clone()));
+
+        // El total tiene que coincidir: si el archivo remoto cambió, el `.part`
+        // que hay en disco ya no vale para nada.
+        assert!(parsear_estado(&texto, total + 1).is_none());
+
+        assert!(parsear_estado("", 1).is_none());
+        assert!(parsear_estado("tdseg2\n100\n0,0,99\n", 100).is_none());
+        // Cobertura incompleta, hueco, cursor fuera de su tramo y campo de más.
+        assert!(parsear_estado("tdseg1\n100\n0,0,49\n", 100).is_none());
+        assert!(parsear_estado("tdseg1\n100\n0,0,49\n60,60,99\n", 100).is_none());
+        assert!(parsear_estado("tdseg1\n100\n0,999,49\n50,50,99\n", 100).is_none());
+        assert!(parsear_estado("tdseg1\n100\n0,0,49,7\n50,50,99\n", 100).is_none());
+        // Y lo que sí es válido no se rechaza.
+        assert!(parsear_estado("tdseg1\n100\n0,0,49\n50,50,99\n", 100).is_some());
+        // `cursor == fin + 1` es el tramo TERMINADO, no un desbordamiento.
+        assert!(parsear_estado("tdseg1\n100\n0,50,49\n50,100,99\n", 100).is_some());
+    }
+
+    /// El sondeo cuesta un viaje de ida y vuelta. Contra una tanda de 300
+    /// miniaturas de un booru serían 300 viajes tirados, así que esta función
+    /// es la que garantiza que las descargas de imágenes sigan yendo por el
+    /// camino de siempre, byte por byte igual que antes.
+    #[test]
+    fn solo_se_sondea_lo_que_pesa() {
+        for u in [
+            "https://cdn.hf.co/x/model.safetensors",
+            "https://a.b/pesos.gguf",
+            "https://a.b/v.mp4",
+            "https://a.b/p.zip",
+            "https://a.b/w.ckpt",
+        ] {
+            assert!(vale_la_pena_trocear(u), "debería sondearse: {u}");
+        }
+        for u in [
+            "https://booru.example/img/1234.jpg",
+            "https://a.b/foto.png",
+            "https://a.b/x.webp",
+            "https://a.b/doc.json",
+            // Sin extensión reconocible no se gasta el sondeo.
+            "https://huggingface.co/org/modelo",
+            "https://a.b/pagina",
+        ] {
+            assert!(!vale_la_pena_trocear(u), "NO debería sondearse: {u}");
+        }
+    }
+
+    /// El host se comprueba en UN solo sitio, y los impostores no pasan.
+    /// `huggingface.co.atacante.example` contiene la cadena «huggingface.co».
+    #[test]
+    fn los_impostores_de_hugging_face_no_cuelan() {
+        assert!(es_huggingface("https://huggingface.co/Qwen/X"));
+        assert!(es_huggingface("https://hf.co/Qwen/X"));
+        assert!(es_huggingface("https://cdn-lfs.huggingface.co/a/b"));
+        assert!(!es_huggingface("https://huggingface.co.atacante.example/x"));
+        assert!(!es_huggingface("https://nohuggingface.co/x"));
+        assert!(!es_huggingface("https://ejemplo.com/huggingface.co/x"));
+    }
+
+    /// La página de un repositorio TAMBIÉN vive en este host y es HTML.
+    /// Mandarla al motor HTTP guardaría la página con nombre de modelo: un
+    /// fallo peor que un error, porque parece que ha funcionado.
+    #[test]
+    fn solo_los_archivos_de_hugging_face_van_al_motor_http() {
+        assert_eq!(
+            engine_for_url("https://huggingface.co/Qwen/X/resolve/main/m.safetensors"),
+            Engine::Http
+        );
+        assert_eq!(
+            engine_for_url("https://huggingface.co/Qwen/X/blob/main/m.safetensors"),
+            Engine::Http
+        );
+        // La página del repo no. Cae al motor externo, que dirá que no la
+        // soporta, y eso al menos es verdad.
+        assert_ne!(engine_for_url("https://huggingface.co/Qwen/Qwen3-32B"), Engine::Http);
+        assert_ne!(engine_for_url("https://huggingface.co/collections/Qwen/qwen38"), Engine::Http);
+        // El impostor no recibe trato de Hugging Face: ni se le enruta por
+        // host, ni se le reescribe la URL, ni se le manda el token.
+        //
+        // Ojo con lo que se afirma aquí. La versión anterior de este test
+        // pedía que un `.bin` suyo NO fuera al motor HTTP, y eso estaba mal:
+        // un `.bin` es un archivo directo en cualquier host, y bajarlo por
+        // HTTP es exactamente lo correcto. Lo que el impostor no puede hacer
+        // es entrar por la puerta de Hugging Face. Por eso se prueba con una
+        // ruta sin extensión, que es donde se nota la diferencia: a Hugging
+        // Face se le enruta igual y a un desconocido no.
+        let impostor = "https://huggingface.co.atacante.example/Qwen/X/resolve/main/config";
+        assert!(!es_huggingface(impostor));
+        assert!(normalizar_huggingface(impostor).is_none());
+        assert_ne!(engine_for_url(impostor), Engine::Http);
+        // El mismo camino en el host de verdad sí va por HTTP.
+        assert_eq!(
+            engine_for_url("https://huggingface.co/Qwen/X/resolve/main/config"),
+            Engine::Http
+        );
+    }
+
+    /// Lo que se ve en un perfil se tiene que poder descargar. gallery-dl trae
+    /// apagados varios interruptores que esconden contenido EN SILENCIO —el
+    /// aviso va a nivel `debug` y no llega ni a stderr—, y el criterio de qué
+    /// merece la pena bajar es del usuario, no del programa.
+    #[test]
+    fn los_perfiles_no_esconden_nada_a_medias() {
+        // X: reenvíos, citas y —el más sangrante— el tuit FIJADO, que es lo
+        // primero que se ve al abrir un perfil y ni se pedía.
+        for u in ["https://x.com/alguien", "https://twitter.com/alguien", "https://x.com/a/status/1"] {
+            for o in [galdl_site_opts(u), galdl_opts_listado(u)] {
+                for esperada in [
+                    "extractor.twitter.retweets=true",
+                    "extractor.twitter.quoted=true",
+                    "extractor.twitter.pinned=true",
+                ] {
+                    assert!(o.iter().any(|a| a == esperada), "falta {esperada} en {u}");
+                }
+            }
+        }
+        // Bluesky: los reposts no están en la pestaña de medios, y activarlos
+        // hace que el extractor mire el feed de posts, que es el que se ve.
+        for u in ["https://bsky.app/profile/alguien.bsky.social"] {
+            for o in [galdl_site_opts(u), galdl_opts_listado(u)] {
+                assert!(o.iter().any(|a| a == "extractor.bluesky.reposts=true"), "{u}");
+                assert!(o.iter().any(|a| a == "extractor.bluesky.quoted=true"), "{u}");
+            }
+        }
+        // Lo que NO se activa, y no por descuido: tarjetas de enlaces externos
+        // (no son obra de quien publica), tuits promocionados, y twitpic, que
+        // lleva muerto desde 2017 y cuesta una petición por intento.
+        let o = galdl_site_opts("https://x.com/alguien");
+        for descartada in ["cards", "ads", "twitpic", "unavailable"] {
+            assert!(
+                !o.iter().any(|a| a.contains(descartada)),
+                "no debería activarse: {descartada}"
+            );
+        }
+        // Por host, no por subcadena.
+        assert!(es_x("x.com") && es_x("twitter.com") && es_x("mobile.twitter.com"));
+        assert!(!es_x("x.com.atacante.example"));
+        assert!(galdl_site_opts("https://x.com.atacante.example/a").is_empty());
+        assert!(galdl_site_opts("https://bsky.app.atacante.example/a").is_empty());
+    }
+
+    /// `weibo.com/7187265342/QvRHJ0FYJ` devolvía `[]` con código 0 y stderr
+    /// vacío. Son REENVÍOS: las imágenes están en el post citado, y el
+    /// extractor los descarta por defecto registrándolo a nivel `debug`, así
+    /// que ni siquiera salía en el diagnóstico.
+    #[test]
+    fn weibo_pide_los_reenvios_en_las_dos_rutas() {
+        for u in [
+            "https://weibo.com/7187265342/QvRHJ0FYJ",
+            "https://weibo.com/6260799632/R3Xgzu5B2",
+            "https://m.weibo.cn/status/123",
+            "https://weibo.com/u/7187265342",
+        ] {
+            for o in [galdl_site_opts(u), galdl_opts_listado(u)] {
+                // Los tres, y en las DOS rutas: si un interruptor se pone solo
+                // en una, el perfil se lista bien y luego se descarga vacío.
+                for esperada in [
+                    "extractor.weibo.retweets=original",
+                    "extractor.weibo.likes=true",
+                    "extractor.weibo.movies=true",
+                ] {
+                    assert!(o.iter().any(|a| a == esperada), "falta {esperada} en {u}");
+                }
+                // Cada opción va precedida de su `-o`.
+                assert_eq!(o.iter().filter(|a| *a == "-o").count(), 3, "{u}");
+            }
+        }
+        // Por host, no por subcadena: `passport.weibo.com` es el envoltorio de
+        // visitante, no un post, y `weibo.com.atacante.example` no es Weibo.
+        assert!(!es_weibo("weibo.com.atacante.example"));
+        assert!(!es_weibo("noweibo.com"));
+        assert!(es_weibo("passport.weibo.com"));
+        assert!(es_weibo("m.weibo.cn"));
+        // Y no se le cuela a nadie más: X tiene los suyos, pero ninguno de
+        // Weibo, e Instagram no tiene ninguno.
+        assert!(!galdl_site_opts("https://x.com/alguien").iter().any(|a| a.contains("weibo")));
+        assert!(galdl_opts_listado("https://www.instagram.com/alguien").is_empty());
+    }
+
+    /// Un `.safetensors` de 300 MB no se parece a un vídeo, pero sin estar en
+    /// la lista caía al cajón de sastre de `engine_for_url` —yt-dlp— y se
+    /// guardaba como `.mp4`. Es el mismo fallo que tuvieron las imágenes de X.
+    #[test]
+    fn los_modelos_de_ia_no_son_video() {
+        let u = "https://huggingface.co/org/modelo/resolve/main/model.safetensors";
+        assert_eq!(url_extension(u).as_deref(), Some("safetensors"));
+        assert!(is_direct_media(u));
+        assert_eq!(engine_for_url(u), Engine::Http);
+
+        for e in ["gguf", "ckpt", "pt", "pth", "bin", "onnx"] {
+            let u = format!("https://ejemplo.com/pesos.{e}");
+            assert!(is_direct_media(&u), "debería ser archivo directo: {u}");
+        }
+    }
+
+    /// Hugging Face enruta por HOST, no por extensión: una URL de `/blob/`
+    /// acaba en el nombre del archivo pero es una PÁGINA, y una de `/resolve/`
+    /// de un repo sin extensión tampoco es un vídeo.
+    #[test]
+    fn hugging_face_se_normaliza_y_se_enruta() {
+        // Lo que se copia del navegador es /blob/, que es la página.
+        assert_eq!(
+            normalizar_huggingface("https://huggingface.co/org/m/blob/main/a.safetensors")
+                .as_deref(),
+            Some("https://huggingface.co/org/m/resolve/main/a.safetensors")
+        );
+        // Ya descargable: no se toca.
+        assert!(normalizar_huggingface("https://huggingface.co/org/m/resolve/main/a.bin").is_none());
+        // El dominio corto también cuenta.
+        assert!(normalizar_huggingface("https://hf.co/org/m/blob/main/a.bin").is_some());
+        // Y los impostores no.
+        assert!(normalizar_huggingface("https://huggingface.co.atacante.example/x/blob/y").is_none());
+        assert!(normalizar_huggingface("https://ejemplo.com/org/m/blob/main/a.bin").is_none());
+
+        // Enrutado: un ARCHIVO va al motor HTTP aunque su ruta no acabe en una
+        // extensión conocida. La página del repositorio NO, que es HTML; de eso
+        // se ocupa `solo_los_archivos_de_hugging_face_van_al_motor_http`.
+        assert_eq!(engine_for_url("https://hf.co/org/m/resolve/main/config"), Engine::Http);
+        // El impostor sigue sin colar.
+        assert_ne!(
+            engine_for_url("https://huggingface.co.atacante.example/x"),
+            Engine::Http
+        );
     }
     #[test]
     fn threads_se_reconoce_por_el_host() {

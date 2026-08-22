@@ -335,6 +335,11 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "set.folder" => entry!("CARPETA DE DESCARGA", "DOWNLOAD FOLDER"),
         "set.per_author" => entry!("Crear subcarpeta por autor", "Create a subfolder per author"),
         "set.downloads" => entry!("DESCARGAS", "DOWNLOADS"),
+        "set.conexiones" => entry!("Conexiones por archivo:", "Connections per file:"),
+        "set.conexiones_note" => entry!(
+            "Trocea UN archivo grande entre varias conexiones, que es justo lo que no hace un navegador. Solo se aplica a archivos pesados (modelos, comprimidos, vídeo) y a servidores que demuestren admitir descarga por rangos; en cualquier otro caso se usa una sola conexión, como siempre. Pon 1 si un servidor te limita por abrir varias.",
+            "Splits ONE large file across several connections \u{2014} precisely what a browser will not do. It only applies to heavy files (models, archives, video) and to servers that prove they support ranged downloads; anything else uses a single connection, as before. Set it to 1 if a server rate-limits you for opening several."
+        ),
         "set.concurrency" => entry!("Descargas simultáneas:", "Simultaneous downloads:"),
         "set.prefer_br" => entry!("Priorizar bitrate sobre eficiencia de códec",
                                   "Prefer bitrate over codec efficiency"),
@@ -535,6 +540,27 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "gal.stop" => entry!("■ Detener", "■ Stop"),
         "gal.stopped" => entry!("Exploración detenida", "Search stopped"),
         "gal.no_more" => entry!("No hay más publicaciones", "No more posts"),
+        "gal.aviso" => entry!("ANTES DE DESCARGAR", "BEFORE YOU DOWNLOAD"),
+        "profile.hf_note" => entry!(
+            "Repositorio de Hugging Face: se listan sus archivos con el tamaño y eliges cuáles. Viene marcado el modelo completo (pesos más configuración y tokenizador), sin el README ni la licencia.",
+            "Hugging Face repository: its files are listed with their size and you pick which ones. The complete model comes ticked (weights plus config and tokenizer), without the README or the licence."
+        ),
+        "profile.hf_coleccion" => entry!(
+            "Eso es una COLECCIÓN, no un repositorio: es un índice de varios modelos. Abre el modelo que quieras y pega SU dirección.",
+            "That is a COLLECTION, not a repository \u{2014} it is an index of several models. Open the model you want and paste ITS address."
+        ),
+        "profile.hf_espacio" => entry!(
+            "Eso es un Space: una aplicación de demostración, no los pesos de un modelo.",
+            "That is a Space: a demo application, not a model's weights."
+        ),
+        "profile.hf_otro" => entry!(
+            "Esa dirección de Hugging Face no es un repositorio. Hace falta la página de un modelo o de un dataset, del estilo huggingface.co/autor/nombre.",
+            "That Hugging Face address is not a repository. It needs a model or dataset page, of the form huggingface.co/owner/name."
+        ),
+        "queue.hf_repo" => entry!(
+            "Un modelo son muchos archivos. Se ha abierto en Perfil para que elijas cuáles.",
+            "A model is many files. It has been opened in Profile so you can pick which ones."
+        ),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
         "gal.reason" => entry!("Lo que dijo gallery-dl:", "What gallery-dl said:"),
@@ -612,6 +638,12 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "v2ph.ok" => entry!("Sesión de V2PH iniciada y comprobada", "Signed in to V2PH and verified"),
         "v2ph.out" => entry!("Sesión de V2PH cerrada", "Signed out of V2PH"),
         "set.booru" => entry!("CUENTAS DE BOORU", "BOORU ACCOUNTS"),
+        "set.hf" => entry!("HUGGING FACE", "HUGGING FACE"),
+        "set.hf_token" => entry!("Token de acceso:", "Access token:"),
+        "set.hf_note" => entry!(
+            "Opcional. Los modelos públicos se bajan sin él, pero la propia respuesta de Hugging Face avisa: sin token compartes el cupo con todo internet y las descargas van más lentas. Se saca en huggingface.co → Settings → Access Tokens, con permiso de solo lectura. Viaja en la cabecera Authorization, nunca en la línea de comandos, y no sale en ningún diagnóstico.",
+            "Optional. Public models download without it, but Hugging Face's own response warns that without a token you share the quota with the whole internet and downloads are slower. Get one at huggingface.co → Settings → Access Tokens, read-only is enough. It travels in the Authorization header, never on the command line, and never appears in any diagnostic."
+        ),
         "set.booru_user" => entry!("Gelbooru — user_id (numérico):", "Gelbooru — user_id (numeric):"),
         "set.booru_key" => entry!("Gelbooru — api_key:", "Gelbooru — api_key:"),
         "set.booru_where" => entry!(
@@ -964,6 +996,77 @@ pub fn bg_minutes(lang: Lang, m: u32) -> String {
     }
 }
 
+
+/// Avisos del listado de Hugging Face.
+///
+/// Usa el idioma global (`lang()`) porque quien los construye es una tarea de
+/// fondo, que no tiene los ajustes a mano.
+pub fn hf_aviso(a: &crate::hf::Aviso) -> String {
+    let es = lang() == Lang::Es;
+    match a {
+        crate::hf::Aviso::FormatoDuplicado { safetensors, bin } => {
+            if es {
+                format!(
+                    "Este repositorio trae los MISMOS pesos dos veces: {safetensors} en \
+                     .safetensors y {bin} en .bin. Están marcados solo los .safetensors, que \
+                     son el formato moderno y el que no ejecuta código al cargarse. Bajar los \
+                     dos sería duplicar la descarga para nada."
+                )
+            } else {
+                format!(
+                    "This repository ships the SAME weights twice: {safetensors} as \
+                     .safetensors and {bin} as .bin. Only the .safetensors are ticked — \
+                     they are the modern format and the one that does not execute code when \
+                     loaded. Downloading both would duplicate the transfer for nothing."
+                )
+            }
+        }
+        crate::hf::Aviso::ConLicencia(modo) => {
+            let manual = modo == "manual";
+            if es {
+                format!(
+                    "MODELO CON LICENCIA. Hugging Face deja ver la lista de archivos, pero no \
+                     descargarlos hasta que aceptes sus condiciones. Abre la página del modelo \
+                     en el navegador, pulsa «Agree and access repository», y pon en Ajustes el \
+                     token de ESA MISMA cuenta.{}",
+                    if manual {
+                        " La aprobación es manual: la revisa una persona y puede tardar."
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                format!(
+                    "GATED MODEL. Hugging Face lets you see the file list but will not serve \
+                     the files until you accept its terms. Open the model page in your browser, \
+                     press «Agree and access repository», and set the token of THAT SAME account \
+                     in Settings.{}",
+                    if manual {
+                        " Approval is manual: a person reviews it and it can take a while."
+                    } else {
+                        ""
+                    }
+                )
+            }
+        }
+        crate::hf::Aviso::Cuantizaciones(qs) => {
+            let lista = qs.join(", ");
+            if es {
+                format!(
+                    "Hay varias cuantizaciones GGUF y son ALTERNATIVAS: se elige una, no \
+                     todas. Disponibles: {lista}. Ninguna viene marcada a propósito; a más \
+                     bits, más calidad y más tamaño."
+                )
+            } else {
+                format!(
+                    "This repository offers several GGUF quantisations, and they are \
+                     ALTERNATIVES — you pick one, not all of them. Available: {lista}. \
+                     None is ticked on purpose; more bits means better quality and a bigger file."
+                )
+            }
+        }
+    }
+}
 
 /// Cuántos perfiles de artista se han encontrado.
 pub fn art_found(lang: Lang, n: usize) -> String {

@@ -78,12 +78,29 @@ impl GalleryItem {
         if self.is_video {
             s.push_str(if crate::i18n::lang() == crate::i18n::Lang::Es { "VÍDEO  " } else { "VIDEO  " });
         }
-        s.push_str(&self.resolution());
+        // La resolución solo si se conoce. En un listado de archivos —los
+        // pesos de un modelo, por ejemplo— no existe, y un «—» al principio de
+        // cada ficha es ruido que empuja lo que sí importa hacia el final.
+        if self.width > 0 && self.height > 0 {
+            s.push_str(&self.resolution());
+        }
         if self.filesize > 0 {
-            s.push_str(&format!("  ·  {:.1} MB", self.filesize as f64 / 1_048_576.0));
+            if !s.is_empty() {
+                s.push_str("  ·  ");
+            }
+            // «3783.0 MB» hay que traducirlo mentalmente; «3.7 GB» no.
+            let mb = self.filesize as f64 / 1_048_576.0;
+            if mb >= 1024.0 {
+                s.push_str(&format!("{:.1} GB", mb / 1024.0));
+            } else {
+                s.push_str(&format!("{mb:.1} MB"));
+            }
         }
         if !self.ext.is_empty() {
-            s.push_str(&format!("  ·  {}", self.ext.to_uppercase()));
+            if !s.is_empty() {
+                s.push_str("  ·  ");
+            }
+            s.push_str(&self.ext.to_uppercase());
         }
         let pos = self.position();
         if !pos.is_empty() {
@@ -590,12 +607,57 @@ mod tests {
         assert!(!is_browsable("instagram.com.atacante.example"));
     }
 
+
+    /// El resumen de una ficha no puede inventarse lo que no sabe.
+    ///
+    /// En un listado de archivos —los pesos de un modelo de Hugging Face— no
+    /// hay resolución, y un «—» al principio de cada una de treinta y dos
+    /// fichas es ruido puro. Y «3783.0 MB» obliga a dividir mentalmente por
+    /// 1024 para saber si eso cabe en el disco.
+    #[test]
+    fn el_resumen_no_inventa_resolucion_y_se_lee_de_un_vistazo() {
+        let peso = GalleryItem {
+            filename: "model-00006-of-00018.safetensors".into(),
+            ext: "safetensors".into(),
+            filesize: 3_957_109_648,
+            ..Default::default()
+        };
+        let s = peso.summary();
+        assert!(!s.contains('—'), "no debería haber resolución: {s}");
+        assert!(s.starts_with("3.7 GB"), "{s}");
+        assert!(s.contains("SAFETENSORS"), "{s}");
+
+        // Por debajo de un giga se sigue leyendo en megas.
+        let chico = GalleryItem { filesize: 3_355_443, ext: "txt".into(), ..Default::default() };
+        assert!(chico.summary().starts_with("3.2 MB"), "{}", chico.summary());
+
+        // Y donde SÍ se conoce la resolución, sigue saliendo la primera.
+        let foto = GalleryItem {
+            width: 1440,
+            height: 1800,
+            filesize: 2_097_152,
+            ext: "jpg".into(),
+            ..Default::default()
+        };
+        assert_eq!(foto.summary(), "1440×1800  ·  2.0 MB  ·  JPG");
+    }
+
     #[test]
     fn el_resumen_no_miente_cuando_faltan_datos() {
         let vacio = GalleryItem::default();
         let s = vacio.summary();
-        assert!(s.contains('—'), "sin resolución debe decirlo: {s}");
-        assert!(!s.contains("MB"), "sin tamaño no debe inventarlo: {s}");
+        // Este test pedía antes un «—» donde no hubiera resolución. Se quitó al
+        // empezar a listar archivos de un modelo: ahí la resolución no es que
+        // se desconozca, es que NO EXISTE, y un guion en cada una de treinta y
+        // dos fichas es ruido que empuja hacia el final lo único que importa.
+        //
+        // El principio se mantiene igual: omitir un dato que no se tiene no es
+        // mentir; inventárselo sí.
+        assert!(s.is_empty(), "sin nada que decir, no se dice nada: {s}");
+        assert!(!s.contains("MB") && !s.contains("GB"), "sin tamaño no se inventa: {s}");
+        // `resolution()` sí sigue devolviendo «—»: ahí se pregunta
+        // explícitamente por la resolución, y callar sería peor que un guion.
+        assert_eq!(vacio.resolution(), "—");
         assert_eq!(vacio.position(), "", "sin carrusel no hay posición");
     }
 }

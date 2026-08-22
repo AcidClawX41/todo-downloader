@@ -1,6 +1,6 @@
 ﻿TODO DOWNLOADER — TERMS OF USE AND DISCLAIMER
 
-Version 1.8.0 — Copyright (c) 2026 Eric Valls Gramunt
+Version 1.8.5 — Copyright (c) 2026 Eric Valls Gramunt
 
 Please read this before installing. By choosing "I accept" you confirm that
 you have read and understood these terms. If you do not accept them, cancel

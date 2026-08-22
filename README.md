@@ -22,7 +22,15 @@ A download manager in the spirit of JDownloader2 — but **without Java, without
 
 It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
 
-**New in v1.8.0:**
+**New in v1.8.5:**
+
+- **Hugging Face model repositories** — paste one into the Profile tab and its files are listed with their sizes, for you to pick from. A model is not one file: `Qwen/Qwen3-32B` is seventeen shards plus the config, the tokenizer and the index, and without that index nothing loads. The complete model comes ticked; the README and the licence do not. Gated repositories are detected before anything is queued, and **each file keeps its own name**, so ComfyUI and the rest find what they expect.
+- **Several connections per file** — what a browser will not do. Only on heavy files, and only where the server *proves* it supports ranges by answering a one-byte probe with a `206`. Anything else takes the single-connection path exactly as before, and a `.tdseg` file lets a segmented download resume where it stopped.
+- **Profiles stop hiding posts** — gallery-dl ships reposts, quoted posts, pinned tweets, liked posts and Weibo "movie" videos turned off, and logs each skip at `debug`, so a Weibo repost listed as `[]` with exit code 0 and an empty stderr. All of them are on now, on both the listing and the download path.
+- **AI model weights are no longer saved as `.mp4`** — `url_extension` capped extensions at five characters and `safetensors` is eleven, so it was never recognised. Paths now allow twelve; the query stays at five, where X's `format=` lives.
+- The file name is shown in the grid instead of hidden in a tooltip, sizes above a gigabyte read as `GB`, and the build script names the test that failed.
+
+**Also in v1.8.0:**
 
 - **Discover artists** — type a character and the app answers with the *profiles that draw them*, ranked by how often, with sample thumbnails and one click to the queue. It builds no index: it reads the `source` field of booru posts, which points back at the artist's original post on X, Pixiv, Patreon or Fanbox. Measured on 300 posts, 299 carry one.
 - **One artist, all their houses** — `siino13` on Fanbox and `Siino_13` on X are merged into a single entry with both addresses. When a Fanbox needs a plan you do not have, their X is right underneath.
@@ -63,6 +71,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Always maximum quality.** For ByteDance images (TikTok/Douyin) it detects the CDN's `~tplv-` processing template — which applies watermarks and downscaling — and requests the unprocessed original first. The difference is real: from a recompressed thumbnail to **2160×2880, watermark-free**.
 - **Adaptive video quality**: with ffmpeg installed it merges separate video and audio streams (1080p+ on YouTube); without it, it falls back to the best pre-merged file instead of failing.
 - **Bilibili tuned for maximum bitrate.** Bilibili publishes every resolution twice — once in AVC, once in HEVC — and the AVC stream often carries far more bitrate (4174k vs 2503k at 1080p). The format sorter prefers resolution, then fps, then bitrate, ignoring the default codec preference. Note that 720p and above require cookies, and 4K / 1080p60 additionally require a premium (大会员) account.
+- **Several connections per file** (1–8, four by default), which is what a browser will not do: one file is split into ranges and fetched in parallel. Only on heavy files by extension, and only where the server *proves* it supports ranges — a one-byte probe must come back `206` with a `content-range`, because a server that advertises ranges and ignores them would return the whole file to every thread and quietly corrupt the result. Everything else, images included, takes the single-connection path exactly as before. A segmented `.part` has holes, so a `.tdseg` file records each segment's cursor and lets it resume.
 - Queue with **concurrent downloads** (1–8), per-file and global progress and speed.
 - **Real pause and resume** using HTTP Range over `.part` files. Pause also terminates engine subprocesses and their whole process tree — yt-dlp and gallery-dl are PyInstaller bundles that run Python in a grandchild process, so killing only what you spawned leaves an orphan downloading.
 - **Resumable galleries.** gallery-dl keeps an archive of what it already fetched, so when a site cuts you off halfway through a 400-post profile, *Retry* picks up where it stopped instead of starting over and hitting the same wall forever. Clearable from Settings.
@@ -79,6 +88,45 @@ A dedicated **Booru** tab for Danbooru, Safebooru, AIBooru, yande.re, Konachan, 
 Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danbooru, Gelbooru and Moebooru all expose different, shifting APIs; gallery-dl already maintains an extractor per site, so reimplementing them in Rust would be permanent maintenance for no gain. Parsing is deliberately tolerant — field names differ per site (`image_width` vs `width`, some booru APIs return integers **as strings**, e621 nests them under `file`).
 
 > **Gelbooru requires API credentials** (`AuthRequired` without them). Add them in *Settings → Booru accounts*; the key field is masked. Everything else works anonymously.
+
+### Hugging Face model repositories
+
+Paste a repository address into the **Profile** tab and pick from the file list.
+A model is not one file: `Qwen/Qwen3-32B` is seventeen shards of nearly 4 GB
+each plus `config.json`, `tokenizer.json`, `vocab.json`, `merges.txt` and
+`model.safetensors.index.json` — twenty-two copy-and-pastes from the site, and
+the classic mistake of sixty gigabytes of weights with no index to load them.
+
+The tree comes from Hugging Face's own open API, which needs no token:
+`api/models/<repo>/tree/main?recursive=true`. Above the grid you get
+`29 of 32 files ticked: 51.8 GB of 51.8 GB`, because thirty-two file names do
+not tell you whether what you marked is four gigabytes or sixty.
+
+- **The complete model comes ticked**: weights plus config, tokenizer and index.
+  Out go the README, the licence and the card images. The rule works by
+  exclusion, not inclusion — every architecture invents its own config files, so
+  a whitelist would fall short every couple of months.
+- **Alternatives are not ticked**, and only where that is objective: the same
+  weights in `.bin` and `.safetensors` (only the second), and several GGUF
+  quantisations (none — you pick one). A subdirectory is deliberately *not*
+  treated as a variant: in a diffusion model `transformer/`, `text_encoder/` and
+  `vae/` are components and all three are needed.
+- **Each file keeps its own name.** `hunyuanimage2.1_refiner_fp8_e4m3fn.safetensors`
+  is saved exactly like that, because that is what ComfyUI looks for in its own
+  `models/` subfolder. The folder is prefixed only where two files in the
+  repository share a name — a diffusion model has a `config.json` in three of
+  them.
+- **Gated repositories are caught before anything is queued.** Hugging Face lets
+  you list the files but will not serve them; without the check, fifty rows
+  would fail one by one with a 403 that never mentions the licence.
+- **An access token is optional**, in *Settings → Hugging Face*. Public models
+  download without it, but Hugging Face's own response asks for one for higher
+  rate limits and faster downloads. It travels in the `Authorization` header,
+  only to `huggingface.co` and `hf.co`, never on the command line and never in a
+  diagnostic.
+
+Large files are fetched over **several connections at once**, which is what a
+browser will not do — see *Downloading* above.
 
 ### V2PH albums and profiles
 
@@ -249,6 +297,8 @@ Being upfront about these:
 - **V2PH gates its login page behind Cloudflare**, so the in-app sign-in cannot work there and says so. Album pages are not challenged; a `cookies.txt` is the supported route.
 - The Torrent tab shows **connected peers**, not a swarm seeder/leecher split — librqbit's aggregate stats don't expose that cleanly, and per-peer inspection isn't worth the fragility. Peer GeoIP (countries) is intentionally omitted: it needs a multi-MB database and is unreliable behind VPNs.
 - BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
+- **A Hugging Face repository with several precision variants in one folder ticks all of them.** `Comfy-Org/Qwen-Image_ComfyUI` offers eight diffusion models — bf16, fp8_e4m3fn, fp8_hq, fp8mixed, nvfp4 — and only the `.bin`-vs-`.safetensors` and GGUF cases are recognised as alternatives. That listing marks around 260 GB. Use *Select none* and pick.
+- **Multi-connection downloads apply only where the server proves it supports ranges**, and only to heavy files. If a host rate-limits you for opening several, set connections per file to 1.
 - **Bilibili requires ffmpeg**, always — it only serves DASH, so video and audio arrive as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast; requests are spaced out to avoid it.
 
 ## Architecture
@@ -259,6 +309,7 @@ build.rs          Embeds the icon and version metadata into the Windows binary
 src/
 ├── main.rs       UI (egui) + download engine (tokio/reqwest)
 ├── gallery.rs    Gallery listing for the Instagram/Weibo preview grid
+├── hf.rs         Hugging Face repository listing: URL classification, tree, file naming
 ├── hosters.rs    Native resolvers for open-API file hosts (Pixeldrain, GoFile, MediaFire)
 ├── v2ph.rs       Native V2PH album and profile extractor (plain HTML, no engine)
 ├── cookies.rs    Reads Firefox's cookie database for the native engines
