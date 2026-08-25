@@ -133,6 +133,17 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "How many booru pages are walked. Measured on Yukino: 3 pages give 17 artists and 8 give 36 — going deeper more than doubles the result, and what it costs is time. It stops on its own when the tag runs out."
         ),
         "art.tag" => entry!("PERSONAJE (ETIQUETA DE BOORU)", "CHARACTER (BOORU TAG)"),
+        "art.en_chino" => entry!("En chino, para Weibo:", "In Chinese, for Weibo:"),
+        "art.en_chino_nota" => entry!(
+            "Abre la búsqueda de esa etiqueta en Weibo. Ningún extractor sabe enumerar una búsqueda de Weibo, así que esto es un atajo, no un listado: de los resultados copia el perfil que te interese y pégalo en Perfil, que eso sí se lista y se descarga.",
+            "Opens that tag's search on Weibo. No extractor can enumerate a Weibo search, so this is a shortcut and not a listing: from the results, copy the profile you want and paste it into Profile, which does list and download."
+        ),
+        "art.cn_serie" => entry!("la serie", "the series"),
+        "art.samples_cn" => entry!("En chino…", "In Chinese…"),
+        "art.samples_cn_note" => entry!(
+            "Los mismos personajes escritos como se buscan en China. Al pulsarlos se abre la búsqueda en Weibo o Bilibili: ningún extractor sabe enumerar una búsqueda de esas redes, así que esto es un atajo, no un listado. De los resultados copia el perfil que te interese y pégalo en Perfil, que eso sí se lista y se descarga.",
+            "The same characters written the way they are searched for in China. Clicking one opens the search on Weibo or Bilibili: no extractor can enumerate a search on those networks, so this is a shortcut and not a listing. From the results, copy the profile you want and paste it into Profile, which does list and download."
+        ),
         "art.search" => entry!("🎨  Descubrir", "🎨  Discover"),
         "art.how" => entry!(
             "No busca en X ni en Pixiv: lee el campo «source» de los posts de yande.re, que apunta al post ORIGINAL del artista. Ese índice lo mantienen miles de personas y sale gratis. Las cuentas oficiales y las tiendas caen solas al fondo, porque el orden es por cuántas veces han dibujado a ESE personaje.",
@@ -151,9 +162,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "⚠ You have the browser ticked, but the cookies.txt takes priority and is what gets sent. If you meant the browser session, clear the file in Settings."
         ),
         "booru.cf_403" => entry!(
-            "Un «Cloudflare challenge (403)» aquí NO significa que falten cookies: significa que la cookie cf_clearance no vale para ESTE sitio. Se obtiene visitando danbooru.donmai.us en el navegador, dura poco —del orden de media hora— y va atada al User-Agent que la consiguió. Exporta el cookies.txt justo después de abrir el sitio, y con el mismo navegador cuyo User-Agent tengas puesto.",
-            "A «Cloudflare challenge (403)» here does NOT mean cookies are missing: it means the cf_clearance cookie is not valid for THIS site. You get one by visiting danbooru.donmai.us in the browser, it is short-lived — around half an hour — and it is tied to the User-Agent that earned it. Export the cookies.txt right after opening the site, from the same browser whose User-Agent you have set."
+            "Un «Cloudflare challenge (403)» aquí NO significa que falten cookies: significa que la cookie cf_clearance no vale para ESTE sitio. Va atada al dominio que la emitió y al User-Agent que la consiguió, y dura poco —del orden de media hora—. Visita en el navegador el sitio que aparece abajo, y exporta el cookies.txt justo después, con el mismo navegador cuyo User-Agent tengas puesto.",
+            "A «Cloudflare challenge (403)» here does NOT mean cookies are missing: it means the cf_clearance cookie is not valid for THIS site. It is tied to the domain that issued it and to the User-Agent that earned it, and it is short-lived — around half an hour. Visit the site named below in your browser and export the cookies.txt right afterwards, from the same browser whose User-Agent you have set."
         ),
+        "booru.cf_visita" => entry!("Consigue la cookie visitando:", "Get the cookie by visiting:"),
         "booru.cf_none" => entry!(
             "▸ Este sitio está detrás de Cloudflare y no se le está mandando ninguna sesión. Sin ella cada petición vuelve a empezar por la comprobación y la búsqueda suele agotar el plazo. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt.",
             "▸ This site sits behind Cloudflare and no session is being sent. Without one, every request starts over at the challenge and the search usually runs out of time. Turn it on in Settings → Browser cookies, or load a cookies.txt."
@@ -165,6 +177,41 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "booru.cf_ok" => entry!(
             "▸ Se manda tu sesión y tu User-Agent: es lo que este sitio necesita para no plantarte la comprobación de Cloudflare en cada búsqueda.",
             "▸ Your session and your User-Agent are being sent: that is what this site needs so it does not put Cloudflare's challenge in front of every search."
+        ),
+        "booru.cf_viva" => entry!(
+            "▸ Se manda tu sesión, tu User-Agent y una cookie cf_clearance válida para ESTE sitio.",
+            "▸ Your session, your User-Agent and a valid cf_clearance cookie for THIS site are being sent."
+        ),
+        "booru.cf_caducada" => entry!(
+            "⚠ La cookie cf_clearance de este sitio está en el archivo, pero CADUCÓ. Dura del orden de media hora: vuelve a visitar el sitio en el navegador y exporta el cookies.txt otra vez.",
+            "⚠ This site's cf_clearance cookie is in the file, but it has EXPIRED. It lasts around half an hour: visit the site in your browser again and export the cookies.txt afresh."
+        ),
+        "booru.cf_falta" => entry!(
+            "⚠ Se manda tu sesión, pero NO lleva la cookie cf_clearance de este sitio, que es la única que evita el 403. Visita el sitio en el navegador y exporta el cookies.txt justo después.",
+            "⚠ Your session is being sent, but it does NOT carry this site's cf_clearance cookie, which is the only one that avoids the 403. Visit the site in your browser and export the cookies.txt right afterwards."
+        ),
+        "booru.cf_min" => entry!("min", "min"),
+        "booru.api_ok" => entry!(
+            "▸ Se usa tu clave de API de este sitio: sin topes de paginación y sin depender de ninguna cookie que caduque.",
+            "▸ Your API key for this site is being used: no pagination caps and no dependency on any cookie that expires."
+        ),
+        "booru.api_sugerida" => entry!(
+            "▸ Este sitio ofrece clave de API. Con ella desaparecen el tope de páginas, el de etiquetas por búsqueda y el desafío de Cloudflare. Es gratis y se pone una vez, en Ajustes.",
+            "▸ This site offers an API key. With one, the page cap, the tags-per-search cap and Cloudflare's challenge all go away. It is free and you set it once, in Settings."
+        ),
+        "booru.api_generar" => entry!("Generar la clave →", "Generate the key →"),
+        "set.booru_get_key" => entry!("Generar clave", "Generate key"),
+        "set.booru_api_note" => entry!(
+            "Danbooru, AIBooru y e621 dan una clave de API gratuita en tu perfil. No es obligatoria, pero levanta los límites del anónimo y evita el 403 de Cloudflare. Gelbooru sí la exige, y ahí el usuario es tu ID numérico, no tu nombre. Trata cada clave como una contraseña: no se muestra nunca en los diagnósticos.",
+            "Danbooru, AIBooru and e621 give you a free API key on your profile page. It is not required, but it lifts the anonymous limits and avoids Cloudflare's 403. Gelbooru does require one, and there the user is your numeric ID, not your name. Treat every key like a password: it is never shown in diagnostics."
+        ),
+        "booru.probar" => entry!("📡 Probar la conexión", "📡 Test the connection"),
+        "booru.thumb_fallos" => entry!("miniaturas no cargaron", "thumbnails did not load"),
+        "booru.verbose" => entry!("🔍 Repetir con detalle", "🔍 Retry with details"),
+        "booru.verbose_corriendo" => entry!("Repitiendo con detalle…", "Retrying with details…"),
+        "booru.verbose_hint" => entry!(
+            "Registro de gallery-dl para UNA sola entrada. Las cookies y la autorización salen redactadas: se ve QUE iban, nunca su valor. Se puede pegar en un informe de fallo tal cual.",
+            "gallery-dl's log for a SINGLE entry. Cookies and authorization are redacted: you can see THAT they were sent, never their value. Safe to paste into a bug report as-is."
         ),
         "booru.failed" => entry!("LA BÚSQUEDA NO DEVOLVIÓ NADA — ESTO DIJO GALLERY-DL:", "THE SEARCH RETURNED NOTHING — THIS IS WHAT GALLERY-DL SAID:"),
         "booru.failed_help" => entry!(
@@ -291,6 +338,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "profile.analyzing" => entry!(
             "Analizando perfil… puede tardar un poco en perfiles grandes",
             "Analyzing profile… this may take a while on large profiles"
+        ),
+        "profile.busqueda_china" => entry!(
+            "Eso es una BÚSQUEDA, no un perfil, y ningún extractor sabe enumerar una búsqueda de Weibo ni de Bilibili. Ábrela en el navegador, mira quién publica lo que te interesa, y pega AQUÍ la dirección de ese perfil: esa sí se lista con vistas previas y se descarga.",
+            "That is a SEARCH, not a profile, and no extractor can enumerate a Weibo or Bilibili search. Open it in your browser, see who posts what you want, and paste THAT profile's address here: that one does list with previews and download."
         ),
         "profile.need_url" => entry!("Pega primero la URL del perfil", "Paste the profile URL first"),
         "profile.gallery_queued" => entry!(
@@ -561,6 +612,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Un modelo son muchos archivos. Se ha abierto en Perfil para que elijas cuáles.",
             "A model is many files. It has been opened in Profile so you can pick which ones."
         ),
+        "gal.empty_patreon_col" => entry!(
+            "Tu sesión funciona: el motor terminó sin error y sin avisos. Devolvió cero publicaciones, y NO es cosa de las cookies. Afecta a creadores concretos —una publicación suelta del mismo creador falla igual, y eso ya es OTRO extractor—, así que apunta a cómo sirve Patreon esas páginas, no a la colección. Pulsa «Repetir con detalle»: ahí sale lo que gallery-dl encontró en la página, que es lo único que lo aclara.",
+            "Your session works: the engine finished with no error and no warnings. It returned zero posts, and this is NOT about cookies. It hits particular creators —a single post from the same creator fails too, and that is a DIFFERENT extractor— so it points at how Patreon serves those pages, not at the collection. Press «Retry with details»: that shows what gallery-dl found on the page, which is the only thing that settles it."
+        ),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
         "gal.reason" => entry!("Lo que dijo gallery-dl:", "What gallery-dl said:"),
@@ -637,6 +692,16 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         ),
         "v2ph.ok" => entry!("Sesión de V2PH iniciada y comprobada", "Signed in to V2PH and verified"),
         "v2ph.out" => entry!("Sesión de V2PH cerrada", "Signed out of V2PH"),
+        "set.red" => entry!("RED", "NETWORK"),
+        "set.ipv4" => entry!("Forzar IPv4", "Force IPv4"),
+        "set.ipv4_reinicio" => entry!(
+            "Se aplicará del todo al reiniciar la aplicación.",
+            "It will fully apply after restarting the application."
+        ),
+        "set.ipv4_note" => entry!(
+            "Actívalo si un sitio abre en el navegador pero aquí se queda esperando sin dar ningún error. Los sitios tras Cloudflare publican IPv6, y Windows lo prueba primero: si tu red no tiene salida IPv6, la conexión se agota sin llegar a hablar con el sitio. El navegador lo disimula porque prueba las dos a la vez; gallery-dl no. Usa «Probar la conexión» en la pestaña Booru para saber si es tu caso.",
+            "Turn this on if a site opens in your browser but hangs here with no error at all. Cloudflare-fronted sites publish IPv6 and Windows tries it first: with no IPv6 route on your network, the connection times out without ever reaching the site. Your browser hides it by racing both; gallery-dl does not. Use «Test the connection» in the Booru tab to find out if this is your case."
+        ),
         "set.booru" => entry!("CUENTAS DE BOORU", "BOORU ACCOUNTS"),
         "set.hf" => entry!("HUGGING FACE", "HUGGING FACE"),
         "set.hf_token" => entry!("Token de acceso:", "Access token:"),
@@ -644,23 +709,20 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Opcional. Los modelos públicos se bajan sin él, pero la propia respuesta de Hugging Face avisa: sin token compartes el cupo con todo internet y las descargas van más lentas. Se saca en huggingface.co → Settings → Access Tokens, con permiso de solo lectura. Viaja en la cabecera Authorization, nunca en la línea de comandos, y no sale en ningún diagnóstico.",
             "Optional. Public models download without it, but Hugging Face's own response warns that without a token you share the quota with the whole internet and downloads are slower. Get one at huggingface.co → Settings → Access Tokens, read-only is enough. It travels in the Authorization header, never on the command line, and never appears in any diagnostic."
         ),
-        "set.booru_user" => entry!("Gelbooru — user_id (numérico):", "Gelbooru — user_id (numeric):"),
-        "set.booru_key" => entry!("Gelbooru — api_key:", "Gelbooru — api_key:"),
+        "set.booru_hint_user" => entry!("usuario", "username"),
+        "set.booru_hint_id" => entry!("user_id (numérico)", "user_id (numeric)"),
+        "set.booru_hint_key" => entry!("clave de API", "API key"),
         "set.booru_where" => entry!(
-            "Los dos están en gelbooru.com → Account → Options → «API Access Credentials», en una línea con esta forma:\n&api_key=<clave>&user_id=<número>\nEl user_id es el NÚMERO, no tu nombre de usuario: con el nombre, la API responde «'api-key' & 'user-id' needed to access the API» aunque los hayas rellenado.",
-            "Both are at gelbooru.com → Account → Options → «API Access Credentials», on a line shaped like this:\n&api_key=<key>&user_id=<number>\nThe user_id is the NUMBER, not your username: with the name, the API answers «'api-key' & 'user-id' needed to access the API» even though you filled both in."
+            "Gelbooru: los dos están en gelbooru.com → Account → Options → «API Access Credentials», en una línea con esta forma:\n&api_key=<clave>&user_id=<número>\nEl user_id es el NÚMERO, no tu nombre de usuario: con el nombre, la API responde «'api-key' & 'user-id' needed to access the API» aunque los hayas rellenado.",
+            "Gelbooru: both are at gelbooru.com → Account → Options → «API Access Credentials», on a line shaped like this:\n&api_key=<key>&user_id=<number>\nThe user_id is the NUMBER, not your username: with the name, the API answers «'api-key' & 'user-id' needed to access the API» even though you filled both in."
         ),
         "set.booru_user_nan" => entry!(
             "⚠ Esto no es un número. Gelbooru espera el user_id numérico; con el nombre de usuario rechaza la petición.",
             "⚠ That is not a number. Gelbooru expects the numeric user_id; with a username it rejects the request."
         ),
         "set.booru_auth_note" => entry!(
-            "Solo se mandan a Gelbooru, que es el único que las exige. Antes iban a cualquier booru que buscaras, y un user-id de Gelbooru presentado a Danbooru como nombre de usuario dejaba la búsqueda colgada hasta agotar el plazo.",
-            "These are only sent to Gelbooru, the one site that requires them. They used to go to whichever booru you searched, and a Gelbooru user-id offered to Danbooru as a username left the search hanging until it timed out."
-        ),
-        "set.booru_note" => entry!(
-            "Solo hacen falta para Gelbooru (obligatorias) y para funciones de cuenta en Danbooru. Se guardan en tu configuración local y se pasan al motor sin aparecer en registros.",
-            "Only needed for Gelbooru (mandatory) and for account features on Danbooru. Stored in your local settings and passed to the engine without appearing in logs."
+            "Cada clave va SOLO a su sitio, nunca a otro. Antes había un único par para todos, y un user-id de Gelbooru presentado a Danbooru como nombre de usuario dejaba la búsqueda colgada hasta agotar el plazo.",
+            "Each key goes ONLY to its own site, never to another. There used to be a single pair for all of them, and a Gelbooru user-id offered to Danbooru as a username left the search hanging until it timed out."
         ),
 
         "gal.analyzing" => entry!("Analizando…", "Analyzing…"),

@@ -143,6 +143,22 @@ fn num(meta: &Value, keys: &[&str]) -> u64 {
     0
 }
 
+/// Un texto que vive DENTRO de otro objeto: `thumbnail.url`, `image.thumb_url`…
+///
+/// Hace falta porque no todos los extractores ponen la portada en un campo
+/// plano. Patreon la mete dentro de `thumbnail`, y buscarla como texto suelto
+/// devolvía vacío sin que nadie se enterara: se acababa bajando el original.
+fn anidado(meta: &Value, rutas: &[(&str, &str)]) -> String {
+    for (padre, hijo) in rutas {
+        if let Some(x) = meta.get(*padre).and_then(|p| p.get(*hijo)).and_then(|x| x.as_str()) {
+            if !x.trim().is_empty() {
+                return x.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 /// Primera cadena no vacía de entre varias claves posibles.
 fn text(meta: &Value, keys: &[&str]) -> String {
     for k in keys {
@@ -168,12 +184,37 @@ const VIDEO_EXTS: &[&str] = &["mp4", "mov", "webm", "mkv", "m4v", "avi"];
 /// `--no-download` es la garantía de que explorar no consume ancho de banda ni
 /// escribe nada; `--range` es lo que permite traer de 30 en 30 en vez de
 /// esperar a que Instagram entregue un perfil de 2000 publicaciones.
-pub fn list_args(url: &str, first: u32, last: u32) -> Vec<String> {
+/// Argumentos para listar EN FLUJO: una sola invocación, sin `--range`.
+///
+/// POR QUÉ ESTO SUSTITUYE A LA PAGINACIÓN. `--range` no salta, FILTRA: para
+/// dar la página 10 el extractor recorre otra vez de la 1 a la 9. Con treinta
+/// por página y cuarenta páginas encadenadas, llegar al final costaba unas
+/// ochocientas veinte unidades de recorrido para mil doscientos elementos, más
+/// cuarenta arranques de un binario PyInstaller que descomprime Python cada
+/// vez. De ahí que cada tanda tardara más que la anterior.
+///
+/// `output.jsonl` es la salida por la que se cambia. No está en la ayuda de la
+/// línea de comandos, pero su `DataJob` hace esto:
+///
+/// ```python
+/// def out(self, msg):
+///     self.file.write(util.json_dumps(msg))
+///     self.file.write("\n")
+///     self.file.flush()      # por elemento
+/// ```
+///
+/// Es decir: una línea JSON por elemento, volcada en el acto, con la misma
+/// tupla `[3, "url", {…}]` que ya entiende `parse_listing`. Un recorrido, y la
+/// rejilla se llena según llegan las cosas en vez de por tandas completas.
+///
+/// Sin tope de elementos a propósito: el botón ■ Parar mata el árbol de
+/// procesos, así que quien decide hasta dónde llegar es quien mira la pantalla.
+pub fn list_args_flujo(url: &str) -> Vec<String> {
     vec![
         "-j".into(),
+        "-o".into(),
+        "output.jsonl=true".into(),
         "--no-download".into(),
-        "--range".into(),
-        format!("{first}-{last}"),
         "--".into(),
         url.to_string(),
     ]
@@ -299,10 +340,31 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
                 // Se prefiere una portada explícita: bajar el original a tamaño
                 // completo solo para previsualizar 30 elementos es tirar ancho
                 // de banda y velocidad.
+                //
+                // `thumbnail_url` ES UNA CLAVE PROPIA Y FALTABA. En Patreon,
+                // `thumbnail` es un OBJETO —`{"url": …, "large_url": …}`— así
+                // que buscarlo como texto no encontraba nada y se acababa
+                // bajando el PNG original, de varios megas, para un recuadro
+                // de 180 píxeles. Con ciento veintisiete elementos, eso es la
+                // diferencia entre segundos y minutos.
                 let t = text(
                     meta,
-                    &["display_url", "thumbnail", "preview_url", "thumb", "cover", "image"],
+                    &[
+                        "display_url",
+                        "thumbnail_url",
+                        "thumbnail",
+                        "preview_url",
+                        "thumb",
+                        "cover",
+                        "image",
+                    ],
                 );
+                // Y si viene anidado, se entra a buscarlo.
+                let t = if t.is_empty() {
+                    anidado(meta, &[("thumbnail", "url"), ("image", "thumb_url"), ("image", "url")])
+                } else {
+                    t
+                };
                 if !t.is_empty() {
                     t
                 } else if !is_video {
@@ -440,18 +502,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(post_url_de(&meta), "https://www.instagram.com/p/ABC/");
-    }
-
-    #[test]
-    fn list_args_no_descarga_y_pagina() {
-        let a = list_args("https://www.instagram.com/alguien/", 1, 30);
-        assert!(a.contains(&"--no-download".to_string()), "explorar no debe descargar");
-        assert!(a.contains(&"-j".to_string()));
-        assert!(a.contains(&"1-30".to_string()));
-        // La URL siempre tras `--`, como el resto de motores
-        let sep = a.iter().position(|s| s == "--").unwrap();
-        assert_eq!(a.last().unwrap(), "https://www.instagram.com/alguien/");
-        assert!(sep < a.len() - 1);
     }
 
     #[test]
@@ -642,6 +692,20 @@ mod tests {
         assert_eq!(foto.summary(), "1440×1800  ·  2.0 MB  ·  JPG");
     }
 
+
+    /// El listado en flujo no lleva `--range`: ese era el coste cuadrático.
+    #[test]
+    fn el_listado_en_flujo_no_pagina() {
+        let a = list_args_flujo("https://x.com/alguien");
+        assert!(!a.iter().any(|x| x == "--range"), "sin paginar: {a:?}");
+        assert!(a.iter().any(|x| x == "output.jsonl=true"), "una línea por elemento");
+        assert!(a.iter().any(|x| x == "--no-download"));
+        // La URL va la última y detrás del `--`, que cierra las opciones: sin
+        // eso, una URL que empiece por guion se tomaría por una opción.
+        assert_eq!(a.last().unwrap(), "https://x.com/alguien");
+        assert_eq!(a[a.len() - 2], "--");
+    }
+
     #[test]
     fn el_resumen_no_miente_cuando_faltan_datos() {
         let vacio = GalleryItem::default();
@@ -659,5 +723,37 @@ mod tests {
         // explícitamente por la resolución, y callar sería peor que un guion.
         assert_eq!(vacio.resolution(), "—");
         assert_eq!(vacio.position(), "", "sin carrusel no hay posición");
+    }
+
+    /// Patreon guarda la portada DENTRO de `thumbnail`, y `thumbnail_url` ni
+    /// siquiera estaba en la lista de claves. El resultado era bajarse el PNG
+    /// original —varios megas— para pintar un recuadro de 180 píxeles.
+    #[test]
+    fn la_portada_se_busca_tambien_anidada() {
+        let plano: Value = serde_json::from_str(
+            r#"{"thumbnail_url":"https://cdn/thumb.jpg","url":"https://cdn/original.png"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            text(&plano, &["display_url", "thumbnail_url", "thumbnail"]),
+            "https://cdn/thumb.jpg"
+        );
+
+        let dentro: Value = serde_json::from_str(
+            r#"{"thumbnail":{"url":"https://cdn/small.jpg","large_url":"https://cdn/big.jpg"}}"#,
+        )
+        .unwrap();
+        // Como texto plano no está: por eso hacía falta `anidado`.
+        assert_eq!(text(&dentro, &["thumbnail"]), "");
+        assert_eq!(
+            anidado(&dentro, &[("thumbnail", "url")]),
+            "https://cdn/small.jpg"
+        );
+        // Se prefiere la pequeña: es una vista previa, no la descarga.
+        assert_ne!(anidado(&dentro, &[("thumbnail", "url")]), "https://cdn/big.jpg");
+
+        // Sin nada que rascar, cadena vacía y el que llama decide.
+        let vacio: Value = serde_json::from_str(r#"{"thumbnail":{}}"#).unwrap();
+        assert_eq!(anidado(&vacio, &[("thumbnail", "url")]), "");
     }
 }

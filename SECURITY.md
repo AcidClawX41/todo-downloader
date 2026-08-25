@@ -29,6 +29,21 @@ credentials were requested. That stopped being true in v1.6.2 and the claim has
 been rewritten rather than quietly softened. The principle that survived is the
 one that matters: **passwords are never written to disk**.
 
+**Booru API keys**: Danbooru, AIBooru, e621 and Gelbooru credentials are stored
+in the local settings file and are sent **only to the site they belong to** —
+there is one pair per site precisely so one site's account cannot be offered to
+another. They are written to a temporary config file that gallery-dl reads and
+that is deleted afterwards, never passed as command-line arguments, where any
+process listing would expose them. The key never appears in the diagnostics, in
+the copyable command, or in error messages; `BooruCred`'s `Debug` prints
+`<oculta>` in place of the value so that a stray `{:?}` cannot leak it, and a
+unit test asserts exactly that.
+
+Where a site publishes a client policy, the application follows it rather than
+working around it. Danbooru asks clients not to impersonate browsers; since
+v1.8.6 it is sent an identifying `TodoDownloader/<version>` User-Agent and no
+browser cookies. See ADR-007.
+
 **Reading browser cookies**: the native engines can read Firefox's
 `cookies.sqlite` to reuse a session you already have open. The database is
 copied to a temporary file before being opened — Firefox locks it while running

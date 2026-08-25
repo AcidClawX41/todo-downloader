@@ -611,20 +611,23 @@ enum Ev {
     /// Resultados de explorar una galería (Instagram, Weibo): (elementos, página)
     GalleryResults(Vec<gallery::GalleryItem>, u32, u64),
     GalleryError(String, u64),
+    /// El listado en flujo ha terminado de recorrer. No trae elementos: esos
+    /// ya se fueron entregando por tandas según llegaban.
+    GalleryDone(u64),
     /// Un aviso que NO es un error: la lista salió bien, pero hay algo que
     /// mirar antes de descargar (dos formatos del mismo peso, varias
     /// cuantizaciones…). Va aparte porque `gallery_error` solo se pinta
     /// cuando el listado viene vacío, y esto acompaña a un listado bueno.
     GalleryNotice(String, u64),
     /// Miniatura de un elemento de galería ya decodificada (índice, imagen)
-    GalleryThumb(usize, egui::ColorImage),
+    GalleryThumb(usize, egui::ColorImage, u64),
     /// Dimensiones REALES del archivo previsualizado, antes de reducirlo.
     ///
     /// La miniatura descarga y decodifica la imagen completa y luego la encoge
     /// a 320 px. Hasta ahora esas dimensiones se tiraban, y un item capturado
     /// del navegador —que no las trae— se quedaba con «—» para siempre aunque
     /// la aplicación acabara de tener el archivo entero en memoria.
-    GalleryDims(usize, u32, u32),
+    GalleryDims(usize, u32, u32, u64),
     /// Miniatura de una entrada del análisis de perfil (TikTok, Bilibili…)
     ProfileThumb(usize, egui::ColorImage),
     /// La miniatura no se pudo obtener (CDN caducado, anti-hotlink, formato
@@ -639,11 +642,22 @@ enum Ev {
     /// Resultados de una búsqueda en un booru, con su número de generación
     BooruResults(Vec<booru::Post>, u64),
     BooruError(String, u64),
+    /// Registro de un reintento con `-v`, ya redactado.
+    GaldlVerbose(String),
+    /// Una miniatura que no se pudo traer, con el motivo.
+    BooruThumbFallo(String),
     /// Artistas cosechados de una etiqueta de personaje.
     ArtistasListos(Vec<artistas::Artista>, u64),
     ArtistasError(String, u64),
     /// Página que se está cosechando, de cuántas.
     ArtistasProgreso(u32, u32, u64),
+    /// Qué aportó cada fuente. No es un error: la búsqueda salió bien y esto
+    /// dice CON QUÉ. Sin ello, una cosecha que se cae deja al usuario con una
+    /// lista más corta y ninguna forma de saber que le falta media.
+    ArtistasAviso(String, bool, u64),
+    /// Cómo se llama ese personaje en chino. Sale del wiki de Danbooru y es
+    /// lo que se busca de verdad en Weibo: `#飞鸟马时#`, no `toki_(blue_archive)`.
+    ArtistasAlias(Vec<String>, u64),
     /// Miniatura de muestra de un artista, indexada por hash de su URL.
     ArtThumb(u64, egui::ColorImage),
     /// Imágenes encontradas por la exploración de carpetas del pase de fondos.
@@ -1198,6 +1212,38 @@ enum View {
     Settings,
 }
 
+/// Usuario y clave de API de un booru.
+///
+/// La clave es un secreto con el mismo valor que una contraseña —lo dicen los
+/// dos sitios con esas palabras—, así que no se imprime nunca: ni en el
+/// diagnóstico, ni en el comando visible, ni en los errores. `Debug` se
+/// implementa a mano justo para eso.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+struct BooruCred {
+    user: String,
+    key: String,
+}
+
+impl BooruCred {
+    fn completo(&self) -> bool {
+        !self.user.trim().is_empty() && !self.key.trim().is_empty()
+    }
+}
+
+impl std::fmt::Debug for BooruCred {
+    /// Un `{:?}` descuidado en un `dbg!` o en un mensaje de error no puede ser
+    /// la vía por la que se escape una clave.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BooruCred {{ user: {:?}, key: <{}> }}",
+            self.user,
+            if self.key.is_empty() { "vacía" } else { "oculta" }
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 struct Settings {
@@ -1272,7 +1318,35 @@ struct Settings {
     bg_minutos: u32,
     /// Segundos de fundido entre una imagen y la siguiente. 0 = corte seco.
     bg_fundido: f32,
-    /// Credenciales de boorus: usuario/clave por clave de extractor
+    /// Salir siempre por IPv4, aunque el sitio publique IPv6.
+    ///
+    /// POR QUÉ EXISTE. Un sitio detrás de Cloudflare publica direcciones de
+    /// las dos familias, y Windows resuelve poniendo las IPv6 delante. En una
+    /// red sin salida IPv6 —lo normal en muchas casas— un cliente que las
+    /// pruebe en orden se queda esperando hasta agotar el plazo, sin un solo
+    /// error del sitio: nunca llegó a hablar con él.
+    ///
+    /// Los navegadores no caen porque implementan «Happy Eyeballs» (RFC 8305):
+    /// lanzan IPv4 e IPv6 a la vez y se quedan con la primera que conteste. La
+    /// librería `requests` de Python, que es la que usa gallery-dl, NO lo hace,
+    /// y `reqwest` tampoco por omisión.
+    ///
+    /// Eso explicaba el reparto exacto de los fallos: Danbooru, AIBooru y
+    /// Konachan —los tres tras Cloudflare, los tres con IPv6— no iban; Gelbooru
+    /// y yande.re —solo IPv4— iban. Y en Linux funcionaba todo, porque su
+    /// resolutor descarta los destinos IPv6 cuando la máquina no tiene una
+    /// dirección IPv6 global.
+    forzar_ipv4: bool,
+    /// Credenciales de boorus, por clave de extractor.
+    ///
+    /// Antes eran UN par global, porque solo Gelbooru las pedía. Desde el
+    /// agosto de 2026 también las usan Danbooru, AIBooru y e621, y cada uno tiene su
+    /// cuenta: un par global habría mandado el usuario de un sitio a otro,
+    /// que es la misma clase de fallo que mandar las cookies de un sitio a
+    /// otro. Los dos campos viejos siguen ahí solo para migrar lo guardado.
+    booru_creds: std::collections::BTreeMap<String, BooruCred>,
+    /// OBSOLETOS. Se vuelcan a `booru_creds["gelbooru"]` al arrancar y ya no
+    /// se escriben. No se borran para no perder lo que el usuario ya tenía.
     booru_user: String,
     booru_key: String,
     receiver_enabled: bool,
@@ -1345,6 +1419,10 @@ impl Default for Settings {
             bg_minutos: 5,
             bg_aleatorio: true,
             bg_fundido: 1.0,
+            // Apagado por omisión: quien SÍ tenga IPv6 no debe perderlo por
+            // un problema que no tiene.
+            forzar_ipv4: false,
+            booru_creds: std::collections::BTreeMap::new(),
             booru_user: String::new(),
             booru_key: String::new(),
             post_to_grid: true,
@@ -1359,6 +1437,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Credenciales de un booru, o unas vacías si no las hay.
+    fn cred(&self, key: &str) -> BooruCred {
+        self.booru_creds.get(key).cloned().unwrap_or_default()
+    }
+
     /// Carpeta efectiva de torrents: la elegida, o <dest>/Torrents por defecto.
     fn torrent_folder(&self) -> PathBuf {
         if self.torrent_dir.trim().is_empty() {
@@ -1371,6 +1454,53 @@ impl Settings {
 
 /// Argumentos de cookies. Un archivo cookies.txt tiene prioridad porque no
 /// depende de que el navegador esté cerrado.
+/// Cookie de sesión para el motor HTTP nativo, cuando el CDN de destino la
+/// necesita.
+///
+/// EL DESEQUILIBRIO QUE ARREGLA. Un perfil se LISTA con gallery-dl, que recibe
+/// las cookies; pero cada archivo se DESCARGA con el motor nativo, que hasta
+/// ahora solo mandaba el `Referer` y la cookie de GoFile. Para casi todos los
+/// sitios da igual, y el código ya lo tenía razonado sitio por sitio: el CDN de
+/// X y el de Bluesky son públicos, y los de Facebook, Instagram y Patreon van
+/// firmados en la propia URL.
+///
+/// FANBOX ES LA EXCEPCIÓN. Sus archivos viven en `downloads.fanbox.cc` con
+/// rutas sin firma —`/images/post/<id>/<hash>.jpeg`—, así que el control de
+/// acceso tiene que estar en otro sitio, y gallery-dl los baja con la sesión
+/// puesta porque comparte el mismo `requests.Session` que usó para listar.
+///
+/// NO HE PODIDO COMPROBAR que el CDN la exija: no tengo sesión de Fanbox y el
+/// host no responde desde donde se escribió esto. Se manda igualmente porque
+/// el coste es cero y el riesgo también: es la sesión del propio usuario
+/// viajando al dominio al que pertenece, no a un tercero.
+///
+/// SOLO DESDE UN `cookies.txt`, que es leer un archivo pequeño. Leer la base de
+/// Firefox implica copiarla y abrir SQLite, y esto se resuelve al arrancar cada
+/// fila: en una tanda de cien archivos serían cien copias de la base.
+fn cookie_descarga(s: &Settings, url: &str) -> String {
+    const CON_SESION: &[&str] = &["fanbox.cc"];
+
+    let Some(host) = host_of(url) else { return String::new() };
+    if !CON_SESION.iter().any(|d| host_matches(&host, d)) {
+        return String::new();
+    }
+    let ruta = s.cookies_file.trim();
+    if ruta.is_empty() {
+        return String::new();
+    }
+    std::fs::read_to_string(ruta)
+        .ok()
+        .and_then(|txt| {
+            // El dominio del CDN, no el del host: las cookies de `.fanbox.cc`
+            // valen para `downloads.fanbox.cc`, que es como las emitió el sitio.
+            CON_SESION
+                .iter()
+                .find(|d| host_matches(&host, d))
+                .and_then(|d| v2ph::cookie_header_de(&txt, d))
+        })
+        .unwrap_or_default()
+}
+
 fn cookie_args(s: &Settings) -> Vec<String> {
     if !s.cookies_file.trim().is_empty() {
         vec!["--cookies".into(), s.cookies_file.trim().to_string()]
@@ -1664,6 +1794,20 @@ struct App {
     /// Último error del buscador de boorus, tal cual lo dijo gallery-dl.
     /// Persistente a propósito: ver el comentario de `Ev::BooruError`.
     booru_error: String,
+    /// Registro de un reintento con `-v`, cuando el usuario lo pide.
+    ///
+    /// POR QUÉ EXISTE. Un fallo que dice «no respondió en 45 s» y nada más es
+    /// el peor diagnóstico posible: no distingue un sitio caído de una
+    /// credencial mal puesta, de un cortafuegos que acepta la conexión y no
+    /// contesta. `gallery-dl -v` registra cada petición y cada respuesta, y
+    /// con eso la diferencia se ve en una línea.
+    galdl_verbose: String,
+    galdl_verbose_corriendo: bool,
+    /// Cuántas miniaturas fallaron y por qué la primera.
+    ///
+    /// Se guarda solo el primer motivo: cuarenta fallos del mismo CDN son un
+    /// fallo, no cuarenta, y repetirlo cuarenta veces esconde el dato.
+    booru_thumb_fallos: (u32, String),
     /// Corta la búsqueda en curso. Como en la exploración de perfiles, subir el
     /// epoch solo descarta el resultado: el proceso seguiría pidiendo páginas a
     /// un sitio que ya no interesa, y con un ritmo de 1,5 s eso son minutos.
@@ -1751,6 +1895,14 @@ struct App {
     // ---- Booru Browser ----
     booru_site: usize,
     booru_tags: String,
+    /// Estado de la `cf_clearance` del booru elegido, con memoria.
+    ///
+    /// `(ruta del cookies.txt, dominio, estado, cuándo se miró)`. Mirarlo
+    /// exige LEER el archivo, y esto se pinta sesenta veces por segundo: sin
+    /// recordarlo, abrir la pestaña Booru sería leer un archivo de cookies en
+    /// bucle. Se vuelve a mirar al cambiar de sitio o de archivo, y si no,
+    /// cada pocos segundos —que es lo que tarda alguien en reexportarlo.
+    booru_cf: Option<(String, String, Option<v2ph::Clearance>, std::time::Instant)>,
     booru_page: u32,
     /// Generación de la búsqueda en curso. Una respuesta con un número
     /// distinto llega de una búsqueda que el usuario ya descartó, y pisarla
@@ -1789,6 +1941,26 @@ struct App {
     /// Último motivo de fallo, íntegro y legible en la propia vista
     gallery_error: String,
     gallery_aviso: String,
+    /// Con qué fuentes salió la última búsqueda de artistas.
+    art_aviso: String,
+    /// Nombres del personaje en chino, para buscarlo en Weibo.
+    art_alias: Vec<String>,
+    /// ¿Salió la búsqueda con todas sus fuentes?
+    ///
+    /// Viaja como dato y no se adivina mirando el principio del mensaje: eso
+    /// era comparar contra un texto TRADUCIDO, y bastaba con anteponerle una
+    /// línea —como hace ahora la traza de la sesión— para que dejara de
+    /// acertar. Un color que miente es peor que no tener color.
+    art_aviso_ok: bool,
+    /// A qué red china llevan los ejemplos en chino.
+    art_red: artistas::RedChina,
+    /// Hay un listado en flujo recorriendo ahora mismo.
+    ///
+    /// Se necesita porque el listado ya no llega de golpe: la primera tanda
+    /// aparece a los pocos segundos y el extractor sigue trabajando. Sin esta
+    /// bandera, esa primera tanda apagaría el indicador de actividad y daría a
+    /// entender que ya está todo.
+    gallery_flujo: bool,
     /// Texturas de previsualización, por índice en `gallery_items`
     gallery_thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
     /// Índices con petición en vuelo, para no pedir la misma dos veces
@@ -1819,6 +1991,28 @@ struct App {
 }
 
 impl App {
+    /// Credenciales de API listas para usar, indexadas por DOMINIO.
+    ///
+    /// La tabla de ajustes va por clave de extractor (`danbooru`) y quien pide
+    /// solo conoce el host de la URL (`danbooru.donmai.us`). La traducción
+    /// sale de `booru::SITES`, que es la única lista, para que añadir un sitio
+    /// no obligue a acordarse de una segunda tabla.
+    fn api_boorus(&self) -> std::collections::HashMap<String, (String, String)> {
+        booru::SITES
+            .iter()
+            .filter(|s| s.admite_clave())
+            .filter_map(|s| {
+                let c = self.settings.cred(s.key);
+                c.completo().then(|| {
+                    (
+                        s.dominio().to_string(),
+                        (c.user.trim().to_string(), c.key.trim().to_string()),
+                    )
+                })
+            })
+            .collect()
+    }
+
     fn new(cc: &eframe::CreationContext<'_>, cli_link: Option<String>) -> Self {
         let mut settings: Settings = cc
             .storage
@@ -1837,6 +2031,24 @@ impl App {
                 settings.dest = Settings::default().dest;
                 break;
             }
+        }
+
+        // Migración de las credenciales globales de booru a la tabla por sitio.
+        // Eran de Gelbooru —el único que las pedía— así que ahí van. Se hace
+        // una sola vez: si ya hay entrada, lo guardado manda.
+        if !settings.booru_user.trim().is_empty() || !settings.booru_key.trim().is_empty() {
+            settings
+                .booru_creds
+                .entry("gelbooru".to_string())
+                .or_insert_with(|| BooruCred {
+                    user: std::mem::take(&mut settings.booru_user),
+                    key: std::mem::take(&mut settings.booru_key),
+                });
+            // Se vacían pase lo que pase: si la entrada ya existía, estos dos
+            // son una copia vieja de un secreto, y un secreto duplicado es un
+            // secreto que alguien olvidará borrar.
+            settings.booru_user.clear();
+            settings.booru_key.clear();
         }
 
         load_cjk_font(&cc.egui_ctx);
@@ -1861,11 +2073,15 @@ impl App {
             reqwest::header::ACCEPT,
             "image/avif,image/webp,image/apng,image/*,video/*,*/*;q=0.8".parse().unwrap(),
         );
-        let client = reqwest::Client::builder()
+        let mut cb = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client");
+            .connect_timeout(Duration::from_secs(15));
+        if settings.forzar_ipv4 {
+            // Atarse a la dirección IPv4 comodín obliga a un zócalo IPv4, con
+            // lo que las direcciones IPv6 del sitio ni se intentan.
+            cb = cb.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        }
+        let client = cb.build().expect("reqwest client");
 
         let clip_enabled = Arc::new(AtomicBool::new(settings.clipboard_watch));
         let grab_any_flag = Arc::new(AtomicBool::new(settings.grab_any_url));
@@ -1906,6 +2122,9 @@ impl App {
             clip_enabled,
             grab_any_flag,
             booru_error: String::new(),
+            galdl_verbose: String::new(),
+            galdl_verbose_corriendo: false,
+            booru_thumb_fallos: (0, String::new()),
             booru_cancel: Arc::new(AtomicBool::new(false)),
             recv_enabled,
             recv_error,
@@ -1963,6 +2182,7 @@ impl App {
             tip_reload: true,
             booru_site: 0,
             booru_tags: String::new(),
+            booru_cf: None,
             booru_page: 1,
             booru_epoch: 0,
             booru_posts: Vec::new(),
@@ -1980,6 +2200,11 @@ impl App {
             gallery_url: String::new(),
             gallery_error: String::new(),
             gallery_aviso: String::new(),
+            art_aviso: String::new(),
+            art_alias: Vec::new(),
+            art_aviso_ok: false,
+            art_red: artistas::RedChina::default(),
+            gallery_flujo: false,
             gallery_thumbs: std::collections::HashMap::new(),
             gallery_pending: std::collections::HashSet::new(),
             gallery_failed: std::collections::HashSet::new(),
@@ -2227,6 +2452,9 @@ impl App {
                         self.art_cancel.store(true, Ordering::Relaxed);
                         self.art_buscando = false;
                         self.art_epoch += 1;
+                        self.art_aviso.clear();
+                        self.art_alias.clear();
+                        self.art_aviso_ok = false;
                         self.art_error = t(lang, "gal.stopped").to_string();
                     }
                 } else if primary_button(ui, t(lang, "art.search")).clicked() {
@@ -2245,7 +2473,48 @@ impl App {
                             }
                         }
                     });
+
+                // Segundo desplegable: los mismos personajes EN CHINO, y sin
+                // pasar por ninguna etiqueta de booru.
+                //
+                // NO BUSCA AQUÍ, ABRE ALLÍ, y la diferencia no es pereza:
+                // gallery-dl tiene nueve extractores de Weibo y ninguno busca
+                // —solo perfiles, pestañas de perfil, álbumes y posts sueltos—.
+                // Enumerar un hashtag desde la aplicación no se puede. Lo que
+                // sí se puede es dejarte en la búsqueda de un clic; de ahí
+                // copias el perfil que te interese y ESE se lista y se
+                // descarga con vistas previas.
+                egui::ComboBox::from_id_source("art_ejemplos_chinos")
+                    .selected_text(t(lang, "art.samples_cn"))
+                    .show_ui(ui, |ui| {
+                        for e in artistas::EJEMPLOS_CHINOS {
+                            // «la serie» lo pone la interfaz, no la lista: si
+                            // fuera parte de la etiqueta saldría en castellano
+                            // dentro de la interfaz en inglés.
+                            let fila = if e.serie {
+                                format!(
+                                    "{}   ·   {} ({})",
+                                    e.chino,
+                                    e.etiqueta,
+                                    t(lang, "art.cn_serie")
+                                )
+                            } else {
+                                format!("{}   ·   {}", e.chino, e.etiqueta)
+                            };
+                            if ui.selectable_label(false, fila).clicked() {
+                                let _ = open::that(self.art_red.url(e.chino));
+                            }
+                        }
+                    });
+                egui::ComboBox::from_id_source("art_red_china")
+                    .selected_text(self.art_red.nombre())
+                    .show_ui(ui, |ui| {
+                        for r in [artistas::RedChina::Weibo, artistas::RedChina::Bilibili] {
+                            ui.selectable_value(&mut self.art_red, r, r.nombre());
+                        }
+                    });
             });
+            ui.label(RichText::new(t(lang, "art.samples_cn_note")).size(11.0).color(MUTED()));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(t(lang, "art.depth")).size(12.0).color(MUTED()));
@@ -2278,6 +2547,9 @@ impl App {
                 self.art_error.clear();
                 self.art_lista.clear();
                 self.art_epoch += 1;
+                self.art_aviso.clear();
+                self.art_alias.clear();
+                self.art_aviso_ok = false;
                 // Se baja la bandera al empezar. Sin esto, la primera
                 // cancelación dejaría el buscador inservible para siempre.
                 self.art_cancel.store(false, Ordering::Relaxed);
@@ -2286,6 +2558,14 @@ impl App {
                     self.client.clone(),
                     tag,
                     self.settings.art_paginas,
+                    self.settings.cookies_file.clone(),
+                    if self.settings.use_browser_cookies {
+                        self.settings.cookies_browser.clone()
+                    } else {
+                        String::new()
+                    },
+                    ua_efectivo(&self.settings),
+                    self.api_boorus(),
                     self.tx.clone(),
                     self.art_epoch,
                     self.art_cancel.clone(),
@@ -2297,6 +2577,38 @@ impl App {
             return;
         }
         ui.add_space(10.0);
+        // El nombre chino del personaje, que es lo que se busca en Weibo.
+        //
+        // ES UN ENLACE, NO UN LISTADO, y la diferencia importa: gallery-dl
+        // tiene nueve extractores de Weibo y NINGUNO busca — solo perfiles,
+        // pestañas de perfil, álbumes y posts sueltos. Enumerar un hashtag
+        // desde aquí no se puede. Lo que sí se puede es llevarte a la búsqueda
+        // en un clic; de ahí copias el perfil que te interese y ese sí se
+        // lista y se descarga.
+        if !self.art_alias.is_empty() {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t(lang, "art.en_chino")).size(11.5).color(MUTED()));
+                for nombre in &self.art_alias {
+                    if soft_button(ui, &format!("#{nombre}#")).clicked() {
+                        let _ = open::that(artistas::url_busqueda_weibo(nombre));
+                    }
+                }
+            });
+            ui.label(RichText::new(t(lang, "art.en_chino_nota")).size(11.0).color(MUTED()));
+            ui.add_space(4.0);
+        }
+
+        // Con qué fuentes salió esto. Si Danbooru no contestó, la lista no
+        // está mal: está INCOMPLETA, y son dos cosas distintas.
+        if !self.art_aviso.is_empty() {
+            ui.label(
+                RichText::new(&self.art_aviso)
+                    .size(11.5)
+                    .color(if self.art_aviso_ok { MUTED() } else { AMBER() }),
+            );
+            ui.add_space(4.0);
+        }
         ui.label(
             RichText::new(i18n::art_found(lang, self.art_lista.len()))
                 .size(12.0)
@@ -2640,6 +2952,7 @@ impl App {
     /// proceso dejaría a gallery-dl pidiendo páginas para nadie.
     fn detener_exploracion(&mut self) {
         self.gallery_cancel.store(true, Ordering::Relaxed);
+        self.gallery_flujo = false;
         self.gallery_prefetch_left = 0;
         self.gallery_prefetching = false;
         self.gallery_loading = false;
@@ -2964,7 +3277,12 @@ impl App {
             prefer_bitrate: self.settings.prefer_bitrate,
             cancel: row.cancel.clone(),
             lang: self.settings.lang,
-            cookie: row.dl_cookie.clone(),
+            // La de GoFile manda: la resolvió el hoster para ESE archivo.
+            cookie: if row.dl_cookie.is_empty() {
+                cookie_descarga(&self.settings, &row.url)
+            } else {
+                row.dl_cookie.clone()
+            },
             // Solo a Hugging Face, y solo si hay token. Mandar una credencial
             // a un host que no la pidió es la clase de descuido que ya rompió
             // los boorus en la v1.7.0.
@@ -3249,11 +3567,21 @@ impl App {
                 }
                 Ev::GalleryResults(_, _, epoch) if epoch != self.gallery_epoch => {}
                 Ev::GalleryError(_, epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryDone(epoch) if epoch != self.gallery_epoch => {}
+                Ev::GalleryDone(_) => {
+                    self.gallery_flujo = false;
+                    self.gallery_loading = false;
+                    self.gallery_prefetching = false;
+                }
                 Ev::GalleryNotice(_, epoch) if epoch != self.gallery_epoch => {}
                 Ev::GalleryNotice(msg, _) => self.gallery_aviso = msg,
                 Ev::GalleryResults(items, page, _) => {
                     self.gallery_loading = false;
-                    self.gallery_prefetching = false;
+                    // En flujo lo apaga `GalleryDone`: aquí el extractor sigue
+                    // recorriendo y decir que ha acabado sería mentir.
+                    if !self.gallery_flujo {
+                        self.gallery_prefetching = false;
+                    }
                     self.gallery_page = page;
 
                     // Encadenar la siguiente página en silencio. Se hace ANTES
@@ -3349,7 +3677,17 @@ impl App {
                         ctx.load_texture(format!("prof_{idx}"), img, egui::TextureOptions::LINEAR);
                     self.profile_thumbs.insert(idx, tex);
                 }
-                Ev::GalleryDims(idx, w, h) => {
+                // ÉPOCA OBLIGATORIA EN LOS DOS.
+                //
+                // Estos eventos solo llevan un ÍNDICE, y un índice no
+                // significa nada por sí solo: el 7 de un listado y el 7 del
+                // siguiente son cosas distintas. Sin esta guarda, una
+                // miniatura que llegaba tarde del listado anterior se pintaba
+                // encima del elemento 7 del nuevo — y el resultado era una
+                // rejilla con las FECHAS de un creador y las IMÁGENES de otro.
+                Ev::GalleryDims(_, _, _, ep) if ep != self.gallery_epoch => {}
+                Ev::GalleryThumb(_, _, ep) if ep != self.gallery_epoch => {}
+                Ev::GalleryDims(idx, w, h, _) => {
                     // Solo si el extractor no las sabía. Un dato medido por
                     // nosotros no debe pisar al que vino de la fuente.
                     if let Some(it) = self.gallery_items.get_mut(idx) {
@@ -3362,7 +3700,7 @@ impl App {
                         }
                     }
                 }
-                Ev::GalleryThumb(idx, img) => {
+                Ev::GalleryThumb(idx, img, _) => {
                     self.gallery_pending.remove(&idx);
                     let tex = ctx.load_texture(
                         format!("gal_{idx}"),
@@ -3372,6 +3710,7 @@ impl App {
                     self.gallery_thumbs.insert(idx, tex);
                 }
                 Ev::GalleryError(msg, _) => {
+                    self.gallery_flujo = false;
                     self.gallery_loading = false;
                     // Si lo que ha fallado es una página que nadie pidió y ya
                     // hay resultados en pantalla, se corta la cadena y se calla.
@@ -3392,6 +3731,13 @@ impl App {
                     let _ = posts;
                 }
                 // Resultados de una búsqueda que ya no interesa.
+                Ev::ArtistasAviso(_, _, ep) if ep != self.art_epoch => {}
+                Ev::ArtistasAviso(a, completo, _) => {
+                    self.art_aviso = a;
+                    self.art_aviso_ok = completo;
+                }
+                Ev::ArtistasAlias(_, ep) if ep != self.art_epoch => {}
+                Ev::ArtistasAlias(v, _) => self.art_alias = v,
                 Ev::ArtistasProgreso(_, _, ep) if ep != self.art_epoch => {}
                 Ev::ArtistasProgreso(p, total, _) => {
                     self.art_progreso = (p, total);
@@ -3431,6 +3777,7 @@ impl App {
                 Ev::BooruResults(posts, _) => {
                     self.booru_searching = false;
                     self.booru_error.clear();
+                    self.booru_thumb_fallos = (0, String::new());
                     let n = posts.len();
                     self.booru_posts = posts;
                     // Las miniaturas de la búsqueda anterior ya no sirven
@@ -3446,7 +3793,20 @@ impl App {
                     // había llegado a hacerse. Todas las demás vistas de la
                     // aplicación conservan su error a la vista; esta no.
                     self.booru_error = e.clone();
+                    // Un error nuevo invalida el detalle del anterior: dejarlo
+                    // sería enseñar el registro de otra búsqueda.
+                    self.galdl_verbose.clear();
                     self.toast(i18n::booru_error(self.settings.lang, &e));
+                }
+                Ev::BooruThumbFallo(m) => {
+                    self.booru_thumb_fallos.0 += 1;
+                    if self.booru_thumb_fallos.1.is_empty() {
+                        self.booru_thumb_fallos.1 = m;
+                    }
+                }
+                Ev::GaldlVerbose(t) => {
+                    self.galdl_verbose_corriendo = false;
+                    self.galdl_verbose = t;
                 }
                 Ev::BooruThumb(id, img) => {
                     self.booru_pending.remove(&id);
@@ -3811,6 +4171,112 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 /// Al agotarse el plazo se mata el ÁRBOL de procesos, no solo el hijo:
 /// gallery-dl es un empaquetado PyInstaller y deja un nieto de Python vivo si
 /// se termina únicamente el lanzador.
+/// Ejecuta un proceso leyendo su stdout LÍNEA A LÍNEA, y llama a `por_linea`
+/// con cada una según llega.
+///
+/// La diferencia con `run_capture_timeout` no es de estilo: aquella espera a
+/// que el proceso termine para entregar nada, y con un listado en flujo eso
+/// anularía la ventaja entera. Aquí cada línea se entrega en cuanto gallery-dl
+/// la escribe, así que la rejilla se llena mientras el extractor sigue
+/// trabajando.
+///
+/// EL BUCLE NO ESPERA DIRECTAMENTE SOBRE `next_line`. Un `select!` que cancela
+/// una lectura a medias puede perder lo que llevaba en el búfer, así que las
+/// líneas viajan por un canal —cuya recepción sí es segura de cancelar— y el
+/// bucle principal alterna entre recibirlas y comprobar la parada y el plazo.
+async fn run_lineas_timeout<F>(
+    mut cmd: tokio::process::Command,
+    limite: Duration,
+    cancelar: Option<Arc<AtomicBool>>,
+    mut por_linea: F,
+) -> std::io::Result<(std::process::ExitStatus, String)>
+where
+    F: FnMut(&str),
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let salida = child.stdout.take();
+    let mut errores = child.stderr.take();
+
+    // stderr en su propia tarea: hay que drenarlo mientras tanto o el hijo se
+    // bloquearía al llenar la tubería, y el plazo saltaría por un motivo
+    // equivocado.
+    let t_err = tokio::spawn(async move {
+        let mut s = String::new();
+        if let Some(h) = errores.as_mut() {
+            let _ = h.read_to_string(&mut s).await;
+        }
+        s
+    });
+
+    let (ltx, mut lrx) = unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let Some(h) = salida else { return };
+        let mut lineas = BufReader::new(h).lines();
+        while let Ok(Some(l)) = lineas.next_line().await {
+            if ltx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+
+    let fin = Instant::now() + limite;
+    let abortar = |motivo: &'static str, es: &'static str| {
+        std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            if i18n::lang() == i18n::Lang::Es { es } else { motivo },
+        )
+    };
+
+    loop {
+        tokio::select! {
+            linea = lrx.recv() => match linea {
+                Some(l) => por_linea(&l),
+                // stdout cerrado: el proceso ha terminado de escribir.
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // Se mata el ÁRBOL, no solo el proceso: gallery-dl es Python y
+                // puede tener hijos propios, y matar solo al padre dejaría al
+                // nieto pidiendo páginas sin que nadie escuche la respuesta.
+                if cancelar.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    kill_tree(&mut child).await;
+                    let _ = child.wait().await;
+                    return Err(abortar("search stopped", "búsqueda detenida"));
+                }
+                if Instant::now() >= fin {
+                    kill_tree(&mut child).await;
+                    let _ = child.wait().await;
+                    return Err(abortar("timed out", "se agotó el tiempo"));
+                }
+            }
+        }
+    }
+
+    // Ya no llegan líneas; se espera al proceso sin dejar de vigilar la parada.
+    let estado = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if cancelar.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(abortar("search stopped", "búsqueda detenida"));
+        }
+        if Instant::now() >= fin {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(abortar("timed out", "se agotó el tiempo"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    Ok((estado, t_err.await.unwrap_or_default()))
+}
+
 async fn run_capture_timeout(
     mut cmd: tokio::process::Command,
     limite: Duration,
@@ -3903,6 +4369,522 @@ async fn run_capture_timeout(
     ))
 }
 
+/// Repite UNA búsqueda con el registro detallado de gallery-dl.
+///
+/// Solo a petición del usuario y con `--range 1-1`: pedir una sola entrada
+/// basta para ver el intercambio HTTP entero y es lo más suave que se le puede
+/// hacer a un sitio que acaba de fallar.
+///
+/// `-v` escribe por la salida de errores cada petición, cada respuesta y cada
+/// cabecera. Ahí dentro van la cookie y la autorización, así que **nada de
+/// esto se enseña sin pasar antes por `redactar_verbose`**.
+#[allow(clippy::too_many_arguments)]
+async fn galdl_verbose(
+    program: String,
+    url: String,
+    auth_cfg: Option<String>,
+    cookies: Vec<String>,
+    ua: String,
+    ipv4: bool,
+    tx: UnboundedSender<Ev>,
+) {
+    let cfg_path = match &auth_cfg {
+        Some(json) => write_booru_auth(json).await,
+        None => None,
+    };
+    let mut cmd = tokio::process::Command::new(&program);
+    utf8_env(&mut cmd);
+    cmd.args(["-j", "-v", "--range", "1-1", "--no-download"]);
+    // Las mismas condiciones que la búsqueda real: un reintento que salga por
+    // otro camino describiría un fallo distinto del que se investiga.
+    if ipv4 {
+        cmd.args(["-o", "source-address=0.0.0.0"]);
+    }
+    if !cookies.is_empty() {
+        cmd.args(&cookies);
+    }
+    if !ua.trim().is_empty() {
+        cmd.args(["--user-agent", ua.trim()]);
+    }
+    if let Some(p) = &cfg_path {
+        cmd.arg("-c").arg(p);
+    }
+    cmd.arg("--").arg(&url);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    // SE LEE EN FLUJO, NO CON `output()`.
+    //
+    // `output()` espera a que el proceso TERMINE. Si se cuelga, al agotarse el
+    // plazo se pierde todo lo que ya había escrito — y esta función existe
+    // precisamente para recoger eso. La primera versión hacía justo eso y dejó
+    // un informe vacío en el único caso que importaba: `gallery-dl -v` imprime
+    // su versión, su configuración y CADA reintento de conexión antes de
+    // colgarse, y ahí estaba la respuesta.
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut hijo = match cmd.spawn() {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = tx.send(Ev::GaldlVerbose(format!("no se pudo lanzar gallery-dl: {e}")));
+            return;
+        }
+    };
+    let mut lineas: Vec<String> = Vec::new();
+    {
+        use tokio::io::AsyncBufReadExt;
+        let err = hijo.stderr.take();
+        let out = hijo.stdout.take();
+        let (tx_l, mut rx_l) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // `-v` escribe el registro por la salida de ERRORES y los resultados
+        // por la normal. Las dos interesan, y en el mismo orden en que salen.
+        if let Some(e) = err {
+            let tx_l = tx_l.clone();
+            tokio::spawn(async move {
+                let mut l = tokio::io::BufReader::new(e).lines();
+                while let Ok(Some(x)) = l.next_line().await {
+                    if tx_l.send(x).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        if let Some(o) = out {
+            let tx_l = tx_l.clone();
+            tokio::spawn(async move {
+                let mut l = tokio::io::BufReader::new(o).lines();
+                while let Ok(Some(x)) = l.next_line().await {
+                    if tx_l.send(x).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx_l);
+        let plazo = tokio::time::sleep(Duration::from_secs(60));
+        tokio::pin!(plazo);
+        loop {
+            tokio::select! {
+                l = rx_l.recv() => match l {
+                    Some(l) => lineas.push(l),
+                    None => break,
+                },
+                _ = &mut plazo => {
+                    // El plazo NO tira lo recogido: se anota y se conserva.
+                    lineas.push(msg_lang(
+                        "— plazo de 60 s agotado; esto es lo que llegó a decir —",
+                        "— 60 s deadline reached; this is what it managed to say —",
+                    ).to_string());
+                    break;
+                }
+            }
+        }
+    }
+    let _ = hijo.start_kill();
+    if let Some(p) = &cfg_path {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+
+    let texto = if lineas.is_empty() {
+        msg_lang(
+            "gallery-dl no llegó a escribir ni una línea. Eso no es lentitud del sitio: \
+             ni siquiera arrancó el registro.",
+            "gallery-dl did not write a single line. That is not the site being slow: \
+             the log never even started.",
+        )
+        .to_string()
+    } else {
+        lineas.join("\n")
+    };
+    let _ = tx.send(Ev::GaldlVerbose(redactar_verbose(&texto)));
+}
+
+/// Quita del registro detallado todo lo que sea un secreto.
+///
+/// `-v` vuelca las cabeceras enteras, y ahí van la cookie de sesión y la
+/// autorización básica —que es el usuario y la clave de API en base64—. Un
+/// registro pensado para pegarse en un informe de fallo NO puede llevarlas.
+fn redactar_verbose(texto: &str) -> String {
+    let mut fuera = String::with_capacity(texto.len());
+    for linea in texto.lines() {
+        let bajo = linea.to_ascii_lowercase();
+        let sensible = ["cookie", "authorization", "api_key", "api-key", "set-cookie"]
+            .iter()
+            .any(|k| bajo.contains(k));
+        if sensible {
+            // Se conserva el NOMBRE de la cabecera —saber que iba una
+            // autorización es el dato útil; su valor, nunca— pero SOLO si la
+            // línea tiene forma de cabecera.
+            //
+            // La versión anterior cortaba por el primer `:` sin comprobarlo, y
+            // una línea como `api_key=SECRETO` no tiene ninguno: el «nombre»
+            // pasaba a ser la línea entera, secreto incluido. Lo cazó su
+            // propio test antes de compilar.
+            let cabecera = linea
+                .split_once(':')
+                .map(|(n, _)| {
+                    let n = n.trim();
+                    !n.is_empty()
+                        && n.len() <= 40
+                        && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                })
+                .unwrap_or(false);
+            if cabecera {
+                let nombre = linea.split(':').next().unwrap_or("").trim();
+                fuera.push_str(&format!("{nombre}: <redactado>"));
+            } else {
+                // Sin forma de cabecera no hay parte segura que salvar.
+                fuera.push_str("<línea redactada>");
+            }
+        } else {
+            fuera.push_str(linea);
+        }
+        fuera.push('\n');
+    }
+    // Últimas líneas: el final es donde está el fallo, y un volcado entero no
+    // cabe en la pantalla ni en un informe.
+    let lineas: Vec<&str> = fuera.lines().collect();
+    let desde = lineas.len().saturating_sub(60);
+    lineas[desde..].join("\n")
+}
+
+/// Prueba de conexión por capas contra un sitio.
+///
+/// POR QUÉ EXISTE. «No respondió en 45 s» junta en un mismo mensaje cuatro
+/// averías que se arreglan de formas distintas:
+///
+/// 1. El nombre no se resuelve, o resuelve a una dirección falsa → DNS.
+/// 2. Resuelve bien pero el puerto 443 no abre → cortafuegos, ruta o antivirus.
+/// 3. Abre pero el saludo TLS falla → certificados, o algo interceptando.
+/// 4. Todo va y el sitio contesta un error → ahí sí, credenciales o permisos.
+///
+/// Sin separarlas se buscó el fallo en las cookies, en el User-Agent, en la
+/// clave de API y en el proxy del sistema. Ninguna era. Esta función lo dice
+/// en cuatro líneas, y usa el cliente NATIVO de Rust: si el resultado difiere
+/// de lo que hace gallery-dl, eso también es un dato —señalaría al binario de
+/// Python y no a la red.
+async fn probar_conexion(client: &reqwest::Client, host: &str) -> Vec<String> {
+    let mut pasos = Vec::new();
+    let es = i18n::lang() == i18n::Lang::Es;
+
+    // 1. DNS. Se enseñan las direcciones: una respuesta como 0.0.0.0 o
+    //    127.0.0.1 delata un filtro de contenido en el resolutor.
+    let t0 = std::time::Instant::now();
+    let ips: Vec<String> = match tokio::net::lookup_host(format!("{host}:443")).await {
+        Ok(it) => it.map(|a| a.ip().to_string()).collect(),
+        Err(e) => {
+            pasos.push(format!("1) DNS: {} — {e}", if es { "FALLA" } else { "FAILED" }));
+            return pasos;
+        }
+    };
+    if ips.is_empty() {
+        pasos.push(format!("1) DNS: {}", if es { "sin direcciones" } else { "no addresses" }));
+        return pasos;
+    }
+    pasos.push(format!("1) DNS: {} ({} ms)", ips.join(", "), t0.elapsed().as_millis()));
+
+    // 2. TCP, PROBANDO IPv4 E IPv6 POR SEPARADO.
+    //
+    // Aquí está el fallo que costó dos días. Un sitio detrás de Cloudflare
+    // publica direcciones de las dos familias, y Windows resuelve poniendo las
+    // IPv6 DELANTE. Si la red no tiene salida IPv6 —lo normal en muchas casas—
+    // un cliente que pruebe en orden se queda esperando hasta agotar el plazo.
+    //
+    // Los navegadores no caen porque implementan «Happy Eyeballs» (RFC 8305):
+    // lanzan las dos a la vez y se quedan con la que conteste. La librería
+    // `requests` de Python, que es la que usa gallery-dl, NO lo hace.
+    //
+    // Y por eso Gelbooru y yande.re funcionaban: no están detrás de Cloudflare
+    // y solo tienen IPv4, así que no hay nada que probar en el orden malo.
+    let mut ok4 = false;
+    let mut ok6 = false;
+    let mut hay6 = false;
+    for ip in &ips {
+        let v6 = ip.contains(':');
+        if v6 {
+            hay6 = true;
+        }
+        if (v6 && ok6) || (!v6 && ok4) {
+            continue;
+        }
+        let dir = if v6 { format!("[{ip}]:443") } else { format!("{ip}:443") };
+        let t1 = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(6), tokio::net::TcpStream::connect(&dir)).await;
+        let fam = if v6 { "IPv6" } else { "IPv4" };
+        match r {
+            Ok(Ok(_)) => {
+                if v6 {
+                    ok6 = true;
+                } else {
+                    ok4 = true;
+                }
+                pasos.push(format!("2) TCP {fam} {ip}: OK ({} ms)", t1.elapsed().as_millis()));
+            }
+            Ok(Err(e)) => pasos.push(format!(
+                "2) TCP {fam} {ip}: {} — {e}",
+                if es { "RECHAZADO" } else { "REFUSED" }
+            )),
+            Err(_) => pasos.push(format!(
+                "2) TCP {fam} {ip}: {}",
+                if es { "SIN RESPUESTA en 6 s" } else { "NO ANSWER in 6 s" }
+            )),
+        }
+    }
+    if hay6 && !ok6 && ok4 {
+        // El veredicto, escrito para que no haga falta interpretarlo.
+        pasos.push(if es {
+            "\n➤ DIAGNÓSTICO: este sitio publica IPv6, tu red NO tiene salida IPv6, y Windows \
+             prueba primero las IPv6. El navegador lo disimula porque lanza las dos a la vez; \
+             gallery-dl no. Activa «Forzar IPv4» en Ajustes → Red."
+                .to_string()
+        } else {
+            "\n\u{27a4} DIAGNOSIS: this site publishes IPv6, your network has NO IPv6 route, and \
+             Windows tries IPv6 first. Your browser hides it by racing both at once; gallery-dl \
+             does not. Turn on «Force IPv4» in Settings \u{2192} Network."
+                .to_string()
+        });
+    }
+    if !ok4 && !ok6 {
+        return pasos;
+    }
+
+    // 3 y 4. TLS y HTTP, con el cliente nativo.
+    let t2 = std::time::Instant::now();
+    let url = format!("https://{host}/");
+    match tokio::time::timeout(Duration::from_secs(15), client.get(&url).send()).await {
+        Ok(Ok(r)) => pasos.push(format!(
+            "3) HTTPS: {} ({} ms)",
+            r.status().as_u16(),
+            t2.elapsed().as_millis()
+        )),
+        Ok(Err(e)) => pasos.push(format!("3) HTTPS: {} — {e}", if es { "FALLA" } else { "FAILED" })),
+        Err(_) => pasos.push(if es {
+            "3) HTTPS: sin respuesta en 15 s, aunque el TCP sí abría".to_string()
+        } else {
+            "3) HTTPS: no answer in 15 s, even though TCP did open".to_string()
+        }),
+    }
+    pasos
+}
+
+/// Cambia una URL de colección de Patreon por la del creador, si hace falta.
+///
+/// Devuelve la original cuando no es una colección o cuando no se puede
+/// averiguar la campaña: fallar hacia lo de antes es mejor que no listar nada.
+///
+/// Las cookies salen de los argumentos que ya lleva gallery-dl —`--cookies
+/// <archivo>`— para no tener que pasar los ajustes hasta aquí y para que las
+/// dos vías usen exactamente la misma sesión.
+async fn patreon_resolver_coleccion(url: String, cookies: &[String]) -> String {
+    let Some(coleccion) = patreon_coleccion_id(&url) else {
+        return url;
+    };
+    let cliente = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return url,
+    };
+    let api = format!("https://www.patreon.com/api/collection/{coleccion}");
+    let mut req = cliente.get(&api).header(reqwest::header::USER_AGENT, UA);
+    // `--cookies <ruta>`: se lee el archivo y se filtra por dominio, igual que
+    // en el resto de la aplicación. Una colección privada no se lista sin esto.
+    if let Some(i) = cookies.iter().position(|a| a == "--cookies") {
+        if let Some(ruta) = cookies.get(i + 1) {
+            if let Ok(txt) = tokio::fs::read_to_string(ruta).await {
+                if let Some(h) = v2ph::cookie_header_de(&txt, "patreon.com") {
+                    req = req.header(reqwest::header::COOKIE, h);
+                }
+            }
+        }
+    }
+    let Ok(r) = tokio::time::timeout(Duration::from_secs(15), req.send()).await else {
+        return url;
+    };
+    let Ok(r) = r else { return url };
+    if !r.status().is_success() {
+        return url;
+    }
+    let Ok(txt) = r.text().await else { return url };
+    match patreon_campaign_de_json(&txt) {
+        Some(c) => patreon_url_por_creador(&c, &coleccion),
+        None => url,
+    }
+}
+
+/// El número de una colección de Patreon, si la URL es de una.
+fn patreon_coleccion_id(url: &str) -> Option<String> {
+    let u = url.to_ascii_lowercase();
+    if !host_of(&u).is_some_and(|h| host_matches(&h, "patreon.com")) {
+        return None;
+    }
+    let resto = u.split("/collection/").nth(1)?;
+    let id: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Saca el identificador de campaña de la respuesta de `/api/collection/N`.
+///
+/// TOLERANTE A PROPÓSITO. gallery-dl lo busca en un solo sitio:
+///
+/// ```python
+/// campaign_id = text.extr(collection["thumbnail"]["url"], "/campaign/", "/")
+/// ```
+///
+/// y cuando esa URL no tiene esa forma, el filtro sale vacío y Patreon
+/// contesta `400 Bad Request` —lo dice un comentario del propio gallery-dl—.
+/// Aquí se prueban las dos vías que puede haber, en orden de fiabilidad:
+///
+/// 1. La relación `campaign` del JSON:API, que es donde le corresponde estar.
+/// 2. Cualquier `/campaign/<número>/` del cuerpo, que cubre la de la miniatura
+///    y cualquier otra URL que lo lleve dentro.
+fn patreon_campaign_de_json(texto: &str) -> Option<String> {
+    // 1. La relación, por el camino formal.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(texto) {
+        let id = v
+            .get("data")
+            .and_then(|d| d.get("relationships"))
+            .and_then(|r| r.get("campaign"))
+            .and_then(|c| c.get("data"))
+            .and_then(|d| d.get("id"))
+            .and_then(|i| i.as_str().map(str::to_string).or_else(|| i.as_u64().map(|n| n.to_string())));
+        if let Some(id) = id {
+            if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+                return Some(id);
+            }
+        }
+    }
+    // 2. Rebuscando por el cuerpo entero.
+    let mut resto = texto;
+    while let Some(i) = resto.find("/campaign/") {
+        resto = &resto[i + "/campaign/".len()..];
+        let id: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// La misma colección, pedida por la vía del CREADOR.
+///
+/// POR QUÉ FUNCIONA. `PatreonCreatorExtractor` acepta un creador con la forma
+/// `id:<campaña>` —lo resuelve sin mirar ninguna miniatura— y convierte los
+/// parámetros `filters[...]` de la URL en filtros de la API. Así que esto:
+///
+/// ```text
+/// patreon.com/id:123?filters[collection_id]=456
+/// ```
+///
+/// acaba pidiendo la misma colección, pero con el `filter[campaign_id]` bien
+/// puesto, que es justo lo que faltaba.
+fn patreon_url_por_creador(campaign: &str, coleccion: &str) -> String {
+    format!("https://www.patreon.com/id:{campaign}?filters[collection_id]={coleccion}")
+}
+
+/// ¿Es una URL de Patreon?
+///
+/// Importa porque Patreon falla de una manera propia: el proceso termina con
+/// código 0, sin una línea en la salida de errores, y devuelve `[]`. El aviso
+/// general de «suele ser falta de sesión» manda entonces a mirar unas cookies
+/// que están bien.
+///
+/// LO QUE SE SABE, MEDIDO: de dos colecciones del mismo creador, una lista y
+/// la otra no; y una PUBLICACIÓN SUELTA de un creador afectado también
+/// devuelve vacío. Eso descarta el extractor de colecciones, porque las
+/// publicaciones sueltas usan otro distinto.
+///
+/// Lo que queda por ver está en `PatreonPostExtractor`:
+///
+/// ```python
+/// try:
+///     post = bootstrap["post"]
+/// except KeyError:
+///     self.log.debug(bootstrap)   # solo visible con -v
+///     return ()                   # ← la lista vacía
+/// ```
+///
+/// Cuando la página no trae la clave que espera, se calla y devuelve nada. Ese
+/// `debug` es el dato que falta, y solo sale con `-v`: de ahí el botón de
+/// repetir con detalle en la pestaña Perfil.
+fn es_patreon(url: &str) -> bool {
+    host_of(&url.to_ascii_lowercase()).is_some_and(|h| host_matches(&h, "patreon.com"))
+}
+
+/// Qué proxy le está imponiendo el sistema a gallery-dl sin que nadie lo pida.
+///
+/// ESTA ES LA DIFERENCIA ENTRE WINDOWS Y LINUX. La opción `proxy-env` de
+/// gallery-dl viene a `true` de fábrica, y su documentación dice:
+///
+/// > Collect proxy configuration information from environment variables
+/// > (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) **and Windows Registry
+/// > settings**.
+///
+/// En Linux no hay registro. Así que el mismo binario, en la misma máquina y
+/// la misma red, sale por caminos distintos según el sistema — y un proxy
+/// muerto o mal configurado ahí produce exactamente lo que se observó: la
+/// conexión no llega a establecerse, cinco reintentos con espera creciente, y
+/// ni una línea de error del sitio, porque con el sitio nunca se habló.
+///
+/// Que un sitio funcione y otro no encaja igual: la lista de excepciones
+/// (`ProxyOverride`) decide quién se salta el proxy.
+///
+/// Se lee con `reg.exe` y no con un crate del registro, por el mismo motivo
+/// que `set_magnet_handler`: no añadir una dependencia por cuatro claves.
+fn proxy_del_sistema() -> Vec<String> {
+    let mut hallazgos = Vec::new();
+    for v in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"] {
+        if let Ok(x) = std::env::var(v) {
+            if !x.trim().is_empty() {
+                hallazgos.push(format!("{v}={x}"));
+            }
+        }
+        // Las variables de entorno distinguen mayúsculas en algunos sistemas.
+        if let Ok(x) = std::env::var(v.to_ascii_lowercase()) {
+            if !x.trim().is_empty() {
+                hallazgos.push(format!("{}={x}", v.to_ascii_lowercase()));
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000;
+        const KEY: &str =
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+        let leer = |valor: &str| -> Option<String> {
+            let out = std::process::Command::new("reg")
+                .args(["query", KEY, "/v", valor])
+                .creation_flags(NO_WINDOW)
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let txt = String::from_utf8_lossy(&out.stdout).into_owned();
+            // La línea tiene tres campos: «    ProxyServer    REG_SZ    valor».
+            // Se saltan el nombre y el tipo y se une el resto: un ProxyServer
+            // puede llevar varios cuando define uno por protocolo.
+            let linea = txt.lines().find(|l| l.trim_start().starts_with(valor))?;
+            let resto: Vec<&str> = linea.split_whitespace().skip(2).collect();
+            (!resto.is_empty()).then(|| resto.join(" "))
+        };
+        let activo = leer("ProxyEnable").map(|v| v.ends_with('1')).unwrap_or(false);
+        if activo {
+            hallazgos.push(format!(
+                "registro de Windows: ProxyEnable=1, ProxyServer={}",
+                leer("ProxyServer").unwrap_or_else(|| "?".into())
+            ));
+            if let Some(o) = leer("ProxyOverride") {
+                hallazgos.push(format!("excepciones del proxy: {o}"));
+            }
+        }
+    }
+    hallazgos
+}
+
 /// Tope para una búsqueda en un booru.
 ///
 /// Corto a propósito. Un booru sano contesta en 2-5 segundos; pasados 25 no
@@ -3919,7 +4901,85 @@ async fn run_capture_timeout(
 /// 45 s no arregla un sitio caído, pero deja de cortar a uno que solo es lento.
 const BOORU_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// ¿Este booru se beneficia de que le mandemos la sesión del navegador?
+/// Cómo se presenta la aplicación ante quien pide que los clientes se
+/// identifiquen.
+///
+/// Danbooru lo dice con estas palabras en su `help:api`:
+///
+/// > Clients should identify themselves with a unique User-Agent header that
+/// > contains your user ID. **Don't impersonate browsers or use the default
+/// > header of your library.** Badly-behaved bots will be banned swiftly.
+///
+/// Hasta la v1.8.5 se le mandaba un User-Agent de Chrome sobre la huella TLS
+/// de `requests`, que no es un disfraz convincente sino una contradicción: un
+/// bot fingiendo ser navegador puntúa peor que uno que dice su nombre. El
+/// nombre de usuario va dentro cuando se conoce, que es lo más parecido al
+/// `user #id` que piden y lo que permite que un administrador sepa a quién
+/// avisar antes de banear. Fuente: danbooru.donmai.us/wiki_pages/help:api.
+fn ua_identificado(usuario: &str) -> String {
+    let base = concat!(
+        "TodoDownloader/",
+        env!("CARGO_PKG_VERSION"),
+        " (+https://github.com/AcidClawX41/todo-downloader)"
+    );
+    let u = usuario.trim();
+    if u.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} (user {u})")
+    }
+}
+
+/// Con qué se habla a un booru: cookies y User-Agent, según lo que pida.
+///
+/// Dos contratos distintos, y meterlos en el mismo saco es lo que causó el
+/// 403 de la v1.8.5:
+///
+/// - Sitios que PIDEN identificación (Danbooru, e621): se les dice quién eres.
+///   Ni cookies de navegador ni User-Agent prestado.
+/// - El resto (AIBooru, Konachan): sesión del navegador como siempre. AIBooru
+///   lleva además su clave de API, que va por otro camino —el archivo de
+///   configuración— y no tiene nada que ver con el User-Agent.
+///
+/// LOS DOS CASOS ESTABAN JUNTOS Y ERA UN FALLO: a AIBooru se le mandaba un
+/// User-Agent propio porque admitía clave, y pasó de contestar 403 a no
+/// contestar nada hasta agotar el plazo. Su fork no pide identificación; solo
+/// Danbooru y e621 lo piden.
+fn sesion_para_booru(
+    site: &booru::Site,
+    settings: &Settings,
+    cred: &BooruCred,
+) -> (Vec<String>, String) {
+    // NI UNA COOKIE A LA FAMILIA DANBOORU, tenga clave o no.
+    //
+    // Medido, no deducido: la versión de Linux de la v1.8.5 lista Danbooru y
+    // AIBooru con «sin cookies» en la barra lateral, sin cuenta y sin clave de
+    // API. Lo único que la de Windows hacía de más era mandar un `cookies.txt`
+    // con una `cf_clearance` vieja de esos dominios.
+    //
+    // Una cookie caducada NO es equivalente a ninguna cookie: la primera
+    // presenta un permiso inválido y se gana un rechazo; la segunda entra por
+    // la puerta normal. Es el mismo fallo que las cookies de YouTube en la
+    // v1.6.0 —mandar credenciales a quien no las pide— y ya está en dos sitios
+    // más de este archivo.
+    if site.se_identifica() || site.admite_clave() {
+        return (Vec::new(), ua_identificado(&cred.user));
+    }
+    let ck = if booru_needs_cookies(site.dominio()) {
+        cookie_args(settings)
+    } else {
+        Vec::new()
+    };
+    (ck, settings.user_agent.clone())
+}
+
+/// ¿Este booru está detrás de Cloudflare?
+///
+/// OJO: esto ya NO decide por sí solo si se mandan cookies.
+/// Lo decide `sesion_para_booru`, y a los sitios con clave de API no se les
+/// manda ninguna aunque estén en esta lista: la clave hace ese trabajo mejor.
+/// En la práctica el único que sigue llegando aquí es Konachan, que ni
+/// publica política de clientes ni ofrece clave.
 ///
 /// Danbooru, AIBooru, Konachan y e621 están **detrás de Cloudflare**, y son
 /// exactamente los cuatro que fallan. Safebooru y yande.re no lo están, y son
@@ -3972,6 +5032,7 @@ async fn booru_search(
     cancelar: Arc<AtomicBool>,
     cookies: Vec<String>,
     ua: String,
+    ipv4: bool,
 ) {
     let first = (page.saturating_sub(1)) * per_page + 1;
     let last = first + per_page - 1;
@@ -3997,6 +5058,14 @@ async fn booru_search(
     // —mismo motor, límite anónimo estrecho— y Konachan responden 429 o
     // simplemente dejan de contestar.
     cmd.args(["--sleep-request", booru_pacing(&url)]);
+
+    // FORZAR IPv4. `source-address` ata el zócalo del cliente a una dirección
+    // local; con la comodía IPv4 el resultado es que las direcciones IPv6 del
+    // sitio ni se intentan. gallery-dl no tiene un `-4` como yt-dlp, y esta es
+    // la vía que su documentación deja.
+    if ipv4 {
+        cmd.args(["-o", "source-address=0.0.0.0"]);
+    }
 
     // SESIÓN DEL NAVEGADOR, solo para los sitios que la necesitan.
     if !cookies.is_empty() {
@@ -4043,7 +5112,17 @@ async fn booru_search(
             v.push(format!("{k} {mostrado}"));
         }
         if !ua.trim().is_empty() {
-            v.push("--user-agent <el tuyo>".into());
+            // EL NUESTRO SE ENSEÑA ENTERO. Ocultar el User-Agent del navegador
+            // tiene sentido —identifica al usuario—, pero el de la aplicación
+            // es público a propósito: está para que un administrador sepa
+            // quién llama. Taparlo dejó un diagnóstico en el que no se podía
+            // ver cuál de los dos se estaba mandando, que era justo el dato
+            // que hacía falta para entender un plazo agotado sin respuesta.
+            if ua.starts_with("TodoDownloader/") {
+                v.push(format!("--user-agent \"{}\"", ua.trim()));
+            } else {
+                v.push("--user-agent <el tuyo>".into());
+            }
         }
         v.push(format!("\"{url}\""));
         v.join(" ")
@@ -4077,7 +5156,30 @@ async fn booru_search(
                 let err = stderr.as_str();
                 let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("sin resultados");
                 let msg: String = last.chars().take(300).collect();
-                let _ = tx.send(Ev::BooruError(format!("{msg}\n\n$ {cmd_visible}"), epoch));
+                // UN PLAZO AGOTADO NO ES UN RECHAZO. Si el sistema está
+                // imponiendo un proxy, decirlo aquí ahorra buscar el fallo en
+                // las credenciales, que es donde no está.
+                let px = proxy_del_sistema();
+                let extra = if px.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\n{}\n  {}",
+                        msg_lang(
+                            "OJO: el sistema le está imponiendo un proxy a gallery-dl. Un proxy \
+                             muerto o con excepciones explica que unos sitios vayan y otros no, \
+                             y que en Linux funcione y en Windows no —solo Windows tiene registro.",
+                            "NOTE: the system is forcing a proxy on gallery-dl. A dead proxy, or \
+                             one with exceptions, explains why some sites work and others do not, \
+                             and why Linux works and Windows does not \u{2014} only Windows has a registry.",
+                        ),
+                        px.join("\n  ")
+                    )
+                };
+                let _ = tx.send(Ev::BooruError(
+                    format!("{msg}{extra}\n\n$ {cmd_visible}"),
+                    epoch,
+                ));
                 return;
             }
             match booru::parse(stdout) {
@@ -4118,58 +5220,402 @@ fn hash_url(u: &str) -> u64 {
 /// El ritmo entre páginas no es cortesía opcional: es un sitio público que no
 /// nos debe nada y al que se le piden trescientos posts de golpe.
 #[allow(clippy::too_many_arguments)]
+/// Sesión y User-Agent para hablar con un booru desde `reqwest`.
+///
+/// POR QUÉ HACE FALTA, y es la causa de que la cosecha de Danbooru volviera
+/// vacía mientras la pestaña Booru sí entraba: aquella habla por gallery-dl,
+/// que recibe las cookies y el User-Agent; la cosecha usaba `reqwest` pelado,
+/// sin ninguna de las dos cosas. Danbooru y AIBooru están detrás de Cloudflare
+/// y sin `cf_clearance` —que va atada al User-Agent que la ganó— devuelven el
+/// desafío en vez de datos.
+///
+/// El `cookies.txt` manda sobre el navegador, igual que en el resto de la
+/// aplicación, y se filtra POR DOMINIO: un `cookies.txt` exportado lleva la
+/// sesión de todos los sitios visitados, y mandarle a Danbooru la de Instagram
+/// no es un descuido menor.
+struct SesionBooru {
+    ua: String,
+    /// Credenciales de API por dominio, para Basic Auth.
+    ///
+    /// La cosecha pega a `posts.json` de Danbooru y de AIBooru, que son
+    /// exactamente los dos sitios que ofrecen clave. Con ella desaparece el
+    /// tope de paginación del anónimo —que es el que corta la cosecha a
+    /// medias— y deja de hacer falta pelearse con la `cf_clearance`.
+    api: std::collections::HashMap<String, (String, String)>,
+    /// Cabecera `Cookie` por dominio. Vacía si no hay nada que mandar.
+    cookies: std::collections::HashMap<String, String>,
+    /// Por qué NO se manda sesión, cuando no se manda. Sin esto, un
+    /// `cookies.txt` ilegible o un navegador que no se puede leer dejaban a la
+    /// cosecha saliendo a pelo sin que nadie se enterara.
+    traza: Vec<String>,
+}
+
+/// Resuelve la sesión. **Bloquea**: lee un archivo y, si toca, la base de
+/// datos de cookies de Firefox, que hay que copiar antes de abrir porque el
+/// navegador la tiene bloqueada mientras corre. Por eso se llama desde
+/// `spawn_blocking` y no desde el hilo de la interfaz, que se quedaría
+/// congelado el tiempo que tarde el disco.
+fn sesion_booru(
+    cookies_file: String,
+    navegador: String,
+    ua: String,
+    api: std::collections::HashMap<String, (String, String)>,
+) -> SesionBooru {
+    let mut cookies = std::collections::HashMap::new();
+    let mut traza: Vec<String> = Vec::new();
+
+    // LOS DOMINIOS SALEN DE `booru::SITES`, no de una lista aparte.
+    //
+    // La versión anterior traía dos escritos a mano —Danbooru y AIBooru— y esa
+    // clase de lista se queda desfasada en silencio: el día que se añada un
+    // booru, la cosecha dejaría de mandarle sesión y nadie sabría por qué.
+    // yande.re y Konachan no la piden hoy, pero mandársela no cuesta nada y no
+    // sale de su dominio.
+    let dominios: Vec<String> = booru::SITES.iter().map(|s| s.dominio().to_string()).collect();
+
+    let ruta = cookies_file.trim();
+    if !ruta.is_empty() {
+        match std::fs::read_to_string(ruta) {
+            Ok(txt) => {
+                for d in &dominios {
+                    if let Some(h) = v2ph::cookie_header_de(&txt, d) {
+                        cookies.insert(d.clone(), h);
+                    }
+                }
+            }
+            // Un cookies.txt configurado que no se puede leer es un fallo del
+            // usuario que merece decirse, no tragarse.
+            // `msg_lang` toma `&'static str` y aquí el texto lleva el error
+            // dentro, así que se compone a mano.
+            Err(e) => traza.push(if i18n::lang() == i18n::Lang::Es {
+                format!("no se pudo leer el cookies.txt ({e})")
+            } else {
+                format!("could not read the cookies.txt ({e})")
+            }),
+        }
+    }
+
+    // Solo si el archivo no dio nada para ese dominio: el mismo orden de
+    // prioridad que ya usa el resto de la aplicación.
+    let nav = navegador.trim().to_ascii_lowercase();
+    if !nav.is_empty() {
+        if nav == "firefox" {
+            for d in &dominios {
+                if cookies.contains_key(d) {
+                    continue;
+                }
+                if let Some(h) = cookies::firefox_cookie_header_diag(d).cookie {
+                    cookies.insert(d.clone(), h);
+                }
+            }
+        } else if cookies.is_empty() {
+            // LEER EL NAVEGADOR SOLO CUBRE FIREFOX, y callarse aquí era el
+            // fallo: con Chrome seleccionado la cosecha no mandaba nada y el
+            // usuario veía «Danbooru no respondió» creyendo que su sesión iba
+            // dentro. Chromium cifra sus cookies y ninguna herramienta externa
+            // las lee en Windows.
+            traza.push(if i18n::lang() == i18n::Lang::Es {
+                format!(
+                    "tienes «{nav}» seleccionado, pero leer cookies del navegador solo \
+                     funciona con Firefox: usa un cookies.txt"
+                )
+            } else {
+                format!(
+                    "you have «{nav}» selected, but reading browser cookies only works with \
+                     Firefox: use a cookies.txt instead"
+                )
+            });
+        }
+    }
+
+    // Solo se descartan las cookies de quien pide identificación: ahí una
+    // cookie de navegador junto a un Basic Auth de API es la incoherencia que
+    // hay que evitar. AIBooru quiere las dos cosas y se las queda.
+    cookies.retain(|d, _| {
+        !booru::SITES
+            .iter()
+            .any(|s| s.dominio() == d && s.se_identifica())
+    });
+
+    SesionBooru { ua, api, cookies, traza }
+}
+
+impl SesionBooru {
+    /// Aplica User-Agent y, si la hay, la cookie de ESE dominio.
+    fn aplicar(&self, req: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        let host = host_of(url).unwrap_or_default();
+        // CREDENCIALES ANTES QUE COOKIES, y excluyentes.
+        //
+        // Con clave de API no hace falta la sesión del navegador, y mandar las
+        // dos cosas es la incoherencia que este ADR viene a quitar: una cookie
+        // de sesión de navegador junto a un Basic Auth de API no se parece a
+        // nada que haga un cliente de verdad.
+        if let Some((u, k)) = self.api.get(&host) {
+            // El User-Agent depende de si ESE sitio pide identificación, no de
+            // si hay clave: son cosas independientes. AIBooru lleva clave y
+            // aun así quiere que se le hable como a un navegador.
+            let ua = match booru::SITES.iter().find(|s| s.dominio() == host) {
+                Some(s) if s.se_identifica() => ua_identificado(u),
+                _ => self.ua.clone(),
+            };
+            return req
+                .header(reqwest::header::USER_AGENT, ua)
+                .basic_auth(u, Some(k));
+        }
+        let mut req = req.header(reqwest::header::USER_AGENT, &self.ua);
+        if let Some(h) = self.cookies.get(&host).cloned() {
+            req = req.header(reqwest::header::COOKIE, h);
+        }
+        req
+    }
+}
+
+/// Lo que ha dado un booru con el motor de Danbooru.
+struct CosechaBooru {
+    posts: Vec<artistas::PostBooru>,
+    nombres: Vec<String>,
+    /// Al menos una página con contenido.
+    ///
+    /// NO es lo mismo que «no falló»: una etiqueta que ese booru no tiene
+    /// devuelve `[]` con un 200 perfectamente correcto. Se distinguen porque
+    /// al usuario le importan cosas distintas — «ahí no hay nada de este
+    /// personaje» y «ahí no me dejan entrar» piden respuestas distintas.
+    ok: bool,
+    fallo: Option<String>,
+    cancelado: bool,
+}
+
+/// Cosecha en un booru que corre el motor de Danbooru.
+///
+/// Danbooru y AIBooru sirven el mismo `posts.json` con los mismos campos, así
+/// que el bucle es uno solo. Tener dos copias de esto era la forma segura de
+/// arreglar un fallo en una y dejarlo vivo en la otra.
+async fn cosechar_como_danbooru(
+    client: &reqwest::Client,
+    sesion: &SesionBooru,
+    url_de: impl Fn(u32) -> String,
+    paginas: u32,
+    cancelar: &Arc<AtomicBool>,
+) -> CosechaBooru {
+    let mut r = CosechaBooru {
+        posts: Vec::new(),
+        nombres: Vec::new(),
+        ok: false,
+        fallo: None,
+        cancelado: false,
+    };
+    for p in 1..=paginas.max(1) {
+        if cancelar.load(Ordering::Relaxed) {
+            r.cancelado = true;
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        if cancelar.load(Ordering::Relaxed) {
+            r.cancelado = true;
+            return r;
+        }
+        let url = url_de(p);
+        let resp = match sesion.aplicar(client.get(&url), &url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                r.fallo = Some(e.to_string());
+                break;
+            }
+        };
+        if !resp.status().is_success() {
+            r.fallo = Some(format!("HTTP {}", resp.status().as_u16()));
+            break;
+        }
+        let Ok(txt) = resp.text().await else {
+            r.fallo = Some(msg_lang("respuesta ilegible", "unreadable response").to_string());
+            break;
+        };
+        let lote = artistas::parse_posts_danbooru(&txt);
+        if lote.is_empty() {
+            break;
+        }
+        r.ok = true;
+        for q in &lote {
+            if !q.artista.is_empty() && !r.nombres.contains(&q.artista) {
+                r.nombres.push(q.artista.clone());
+            }
+        }
+        r.posts.extend(lote);
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn cosechar_artistas(
     client: reqwest::Client,
     tag: String,
     paginas: u32,
+    cookies_file: String,
+    navegador: String,
+    ua: String,
+    api: std::collections::HashMap<String, (String, String)>,
     tx: UnboundedSender<Ev>,
     epoch: u64,
     cancelar: Arc<AtomicBool>,
 ) {
+    // Fuera del hilo de la interfaz: leer la base de Firefox toca disco.
+    let sesion =
+        tokio::task::spawn_blocking(move || sesion_booru(cookies_file, navegador, ua, api))
+        .await
+        .unwrap_or_else(|_| SesionBooru {
+            ua: UA.to_string(),
+            api: std::collections::HashMap::new(),
+            cookies: std::collections::HashMap::new(),
+            traza: Vec::new(),
+        });
+    // Cómo se llama en chino. Una petición, al principio, para que el nombre
+    // esté disponible mientras el resto de la cosecha sigue trabajando.
+    let url_wiki = artistas::url_wiki(&tag);
+    if let Ok(r) = sesion.aplicar(client.get(&url_wiki), &url_wiki).send().await {
+        if r.status().is_success() {
+            if let Ok(txt) = r.text().await {
+                let alias = artistas::alias_chinos(&txt);
+                if !alias.is_empty() {
+                    let _ = tx.send(Ev::ArtistasAlias(alias, epoch));
+                }
+            }
+        }
+    }
+
     let mut posts: Vec<artistas::PostBooru> = Vec::new();
     let mut fallo: Option<String> = None;
+    let mut hechas: Vec<&str> = Vec::new();
+    let mut fallidas: Vec<String> = Vec::new();
 
-    for p in 1..=paginas.max(1) {
-        // Parada pedida por el usuario. Se comprueba ANTES de dormir y antes
-        // de pedir: tres páginas con pausa son varios segundos, y con un booru
-        // lento bastante más. Sin esto no había forma de cambiar de personaje
-        // sin esperar a que terminara.
-        if cancelar.load(Ordering::Relaxed) {
-            return;
-        }
-        if p > 1 {
-            tokio::time::sleep(Duration::from_millis(900)).await;
+    // ---- Primera cosecha: los boorus de MOEBOORU ----
+    //
+    // ERA UN BLOQUE ESCRITO A MANO PARA yande.re. Ahora es una tabla, y por el
+    // mismo motivo que `booru::SITES`: añadir una fuente tiene que ser una
+    // línea, no copiar cuarenta. Konachan entró así, sin tocar el parseo.
+    //
+    // Aportan los artistas ORIGINALES: su campo `source` apunta a la
+    // publicación de la que salió cada imagen.
+    let paginas_por_fuente = paginas.max(1);
+    let total_pasos = (artistas::BOORUS_MOEBOORU.len() as u32) * paginas_por_fuente;
+    let mut paso = 0u32;
+
+    for host in artistas::BOORUS_MOEBOORU {
+        let mut dio_algo = false;
+        let mut suyo: Option<String> = None;
+        for p in 1..=paginas_por_fuente {
+            // Parada pedida por el usuario. Se comprueba ANTES de dormir y
+            // antes de pedir: varias fuentes con pausa son muchos segundos, y
+            // sin esto no había forma de cambiar de personaje sin esperar.
             if cancelar.load(Ordering::Relaxed) {
                 return;
             }
-        }
-        let _ = tx.send(Ev::ArtistasProgreso(p, paginas.max(1), epoch));
-        let url = artistas::url_cosecha(&tag, p);
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => match r.text().await {
-                Ok(txt) => {
-                    let lote = artistas::parse_posts(&txt);
-                    // Una página vacía significa que la etiqueta se acabó: no
-                    // tiene sentido pedir las siguientes.
-                    if lote.is_empty() {
+            if paso > 0 {
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                if cancelar.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            paso += 1;
+            let _ = tx.send(Ev::ArtistasProgreso(paso, total_pasos, epoch));
+            let url = artistas::url_cosecha_moebooru(host, &tag, p);
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => match r.text().await {
+                    Ok(txt) => {
+                        let lote = artistas::parse_posts(&txt);
+                        // Una página vacía significa que la etiqueta se acabó
+                        // en ESTE booru: se pasa al siguiente, no se corta todo.
+                        if lote.is_empty() {
+                            break;
+                        }
+                        dio_algo = true;
+                        posts.extend(lote);
+                    }
+                    Err(e) => {
+                        suyo = Some(e.to_string());
                         break;
                     }
-                    posts.extend(lote);
-                }
-                Err(e) => {
-                    fallo = Some(e.to_string());
+                },
+                Ok(r) => {
+                    suyo = Some(format!("HTTP {}", r.status().as_u16()));
                     break;
                 }
-            },
-            Ok(r) => {
-                fallo = Some(format!("HTTP {}", r.status().as_u16()));
-                break;
-            }
-            Err(e) => {
-                fallo = Some(e.to_string());
-                break;
+                Err(e) => {
+                    suyo = Some(e.to_string());
+                    break;
+                }
             }
         }
+        if dio_algo {
+            hechas.push(host);
+        } else if let Some(e) = suyo {
+            fallidas.push(format!("{host} ({e})"));
+            // Se conserva por si NINGUNA fuente da nada: el mensaje de error
+            // final necesita algo concreto que enseñar.
+            fallo = Some(e);
+        }
+    }
+    // ---- Segunda cosecha: los boorus del motor de DANBOORU ----
+    //
+    // También una tabla. Son ESTRICTAMENTE ADICIONALES: contestan a veces con
+    // un desafío de Cloudflare que no hay forma de resolver desde aquí, y su
+    // fallo no puede vaciar lo que los Moebooru ya han dado. Pero tampoco se
+    // traga: cada una dice si respondió y por qué no.
+    //
+    // Danbooru trae el NOMBRE del artista en `tag_string_artist`, que es la
+    // llave de su base de fichas —donde están las redes chinas—. AIBooru trae
+    // a quien todos los demás rechazan por norma: los que generan con IA.
+    let mut nombres: Vec<String> = Vec::new();
+
+    for (nombre, host) in artistas::BOORUS_DANBOORU {
+        let c = cosechar_como_danbooru(
+            &client,
+            &sesion,
+            |p| artistas::url_cosecha_danbooru_en(host, &tag, p),
+            paginas,
+            &cancelar,
+        )
+        .await;
+        if c.cancelado {
+            return;
+        }
+        if c.ok {
+            hechas.push(nombre);
+        } else if let Some(e) = c.fallo {
+            // Un «HTTP 403» a secas manda a buscar en el sitio equivocado. Lo
+            // que Cloudflare pide es UNA cookie concreta, y aquí se sabe si
+            // iba dentro de lo que se mandó: decirlo convierte «no respondió»
+            // en algo que el usuario puede arreglar en dos minutos.
+            // Con clave de API, culpar a Cloudflare sería mandar al usuario a
+            // buscar donde no está: ahí un 403 significa credenciales o
+            // permisos, no desafío. Cada camino tiene su propia explicación.
+            // `*host`: recorrer `&[(&str, &str)]` da `&&str`, y con un
+            // `HashMap<String, _>` el genérico se infiere ANTES de que pueda
+            // saltar la coerción, así que pide `String: Borrow<&str>` —que no
+            // existe—. En `push` y en `format!` sí coacciona sola; aquí no.
+            let nota = if sesion.api.contains_key(*host) {
+                msg_lang(
+                    ", con tu clave de API: revisa que sea correcta",
+                    ", with your API key: check that it is correct",
+                )
+            } else if !sesion
+                .cookies
+                .get(*host)
+                .is_some_and(|h| v2ph::header_tiene_clearance(h))
+            {
+                msg_lang(", sin cf_clearance", ", no cf_clearance")
+            } else {
+                ""
+            };
+            fallidas.push(format!("{nombre} ({e}{nota})"));
+        }
+        // Un 200 con la lista vacía no es un fallo: esa etiqueta no está en
+        // ese booru y punto. No se anuncia como avería lo que no lo es.
+        for n in c.nombres {
+            if !nombres.contains(&n) {
+                nombres.push(n);
+            }
+        }
+        posts.extend(c.posts);
     }
 
     // Un fallo a mitad no tira lo ya cosechado: es mejor una lista corta que
@@ -4181,7 +5627,194 @@ async fn cosechar_artistas(
         let _ = tx.send(Ev::ArtistasError(msg, epoch));
         return;
     }
-    let _ = tx.send(Ev::ArtistasListos(artistas::agrupar(&posts), epoch));
+
+    // Qué aportó cada fuente. La versión anterior de esto se callaba cuando
+    // Danbooru fallaba, y el resultado era una lista sin un solo artista chino
+    // y ninguna pista de por qué: exactamente el fallo mudo que este proyecto
+    // lleva persiguiendo desde la v1.5.
+    // Lo que la sesión NO pudo aportar va delante: un `cookies.txt` ilegible o
+    // un navegador que no se puede leer explican el 403 mucho mejor que el
+    // propio 403.
+    let prefijo_sesion = if sesion.traza.is_empty() {
+        String::new()
+    } else {
+        format!("{}  ", sesion.traza.join("  "))
+    };
+    // Se nombra CADA fuente, la que dio y la que no, con su motivo. Un aviso
+    // que solo dijera «incompleto» obligaría a adivinar cuál de las tres se
+    // cayó, y cada ausencia cuesta gente distinta: sin Danbooru faltan las
+    // redes chinas, sin AIBooru faltan los que generan con IA.
+    let mut aviso = if hechas.is_empty() {
+        msg_lang("Ninguna fuente respondió.", "No source answered.").to_string()
+    } else {
+        format!(
+            "{} {}.",
+            msg_lang("Cosechado de:", "Harvested from:"),
+            hechas.join(", ")
+        )
+    };
+    if !fallidas.is_empty() {
+        aviso.push(' ');
+        aviso.push_str(msg_lang("No respondieron:", "No answer from:"));
+        aviso.push(' ');
+        aviso.push_str(&fallidas.join(", "));
+        aviso.push_str(msg_lang(
+            ". Danbooru y AIBooru dan una clave de API gratuita en tu perfil: con ella se \
+             acabaron el desafío de Cloudflare y el tope de páginas del anónimo. Se pone \
+             una vez, en Ajustes.",
+            ". Danbooru and AIBooru give you a free API key on your profile page: with one, \
+             Cloudflare's challenge and the anonymous page cap both go away. You set it \
+             once, in Settings.",
+        ));
+        if !hechas.contains(&"Danbooru") {
+            aviso.push(' ');
+            aviso.push_str(msg_lang(
+                "Sin Danbooru faltan los artistas que solo están ahí, que son la mayoría \
+                 de los que publican en Weibo o Lofter.",
+                "Without Danbooru the artists that exist only there are missing, and those \
+                 are most of the ones who publish on Weibo or Lofter.",
+            ));
+        }
+        if !hechas.contains(&"AIBooru") {
+            aviso.push(' ');
+            aviso.push_str(msg_lang(
+                "Sin AIBooru faltan los artistas de IA: ni Danbooru ni yande.re catalogan \
+                 esa obra, así que no los cubre ninguna otra fuente.",
+                "Without AIBooru the AI artists are missing: neither Danbooru nor yande.re \
+                 catalogue that work, so no other source covers them.",
+            ));
+        }
+    }
+    // Completo = las TRES cosechas Y sin nada que reprocharle a la sesión.
+    let completo = fallidas.is_empty() && sesion.traza.is_empty();
+    let _ = tx.send(Ev::ArtistasAviso(
+        format!("{prefijo_sesion}{aviso}"),
+        completo,
+        epoch,
+    ));
+
+    let mut lista = artistas::agrupar(&posts);
+    enriquecer_artistas(&client, &sesion, &mut lista, &nombres, &posts, &tx, epoch, &cancelar).await;
+    let _ = tx.send(Ev::ArtistasListos(lista, epoch));
+}
+
+/// Cuántos artistas se enriquecen con su ficha de Danbooru.
+///
+/// Cada uno cuesta una petición. Veinticinco cubre de sobra lo que se mira de
+/// verdad —la lista se ordena por posts del personaje, y de la mitad para
+/// abajo casi todos tienen uno o dos— sin convertir una búsqueda en cien
+/// peticiones.
+const ARTISTAS_ENRIQUECIDOS: usize = 25;
+
+/// Le pregunta a la base de artistas de Danbooru por las demás casas de cada
+/// artista, y las fusiona.
+///
+/// AQUÍ ES DONDE APARECEN LAS REDES CHINAS. El campo `source` de un post da
+/// UNA dirección: la de esa imagen. La ficha del artista las da todas, y ahí
+/// están Weibo y Lofter, que en el `source` de yande.re no salen nunca —
+/// medido: 135 fuentes de tres etiquetas de gacha, cero.
+#[allow(clippy::too_many_arguments)]
+async fn enriquecer_artistas(
+    client: &reqwest::Client,
+    sesion: &SesionBooru,
+    lista: &mut Vec<artistas::Artista>,
+    nombres: &[String],
+    posts: &[artistas::PostBooru],
+    tx: &UnboundedSender<Ev>,
+    epoch: u64,
+    cancelar: &Arc<AtomicBool>,
+) {
+    let mut consultas = 0usize;
+    let total = lista.len().min(ARTISTAS_ENRIQUECIDOS);
+
+    for (i, a) in lista.iter_mut().take(ARTISTAS_ENRIQUECIDOS).enumerate() {
+        if cancelar.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = tx.send(Ev::ArtistasProgreso(i as u32 + 1, total as u32, epoch));
+        let id = a.principal().id.clone();
+        if let Some(nuevos) = ficha_artista(client, sesion, &id).await {
+            a.fusionar(nuevos);
+        }
+        consultas += 1;
+        if consultas < total {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    }
+
+    // Nombres que Danbooru atribuyó pero cuyo `source` no nombraba a nadie —una
+    // URL de obra de Pixiv, por ejemplo—. Son justo los que más interesan: un
+    // artista que solo publica en chino no deja rastro en el `source`, pero sí
+    // tiene ficha. Solo entran si la ficha da alguna dirección; ofrecer una
+    // fila sin ninguna sería un hueco, no un resultado.
+    for nombre in nombres.iter().take(ARTISTAS_ENRIQUECIDOS) {
+        if cancelar.load(Ordering::Relaxed) {
+            return;
+        }
+        let clave = nombre.to_ascii_lowercase();
+        if lista
+            .iter()
+            .any(|a| a.perfiles().iter().any(|p| p.id.to_ascii_lowercase() == clave))
+        {
+            continue;
+        }
+        let Some(perfiles) = ficha_artista(client, sesion, nombre).await else { continue };
+        let suyos: Vec<&artistas::PostBooru> =
+            posts.iter().filter(|p| &p.artista == nombre).collect();
+        let muestras: Vec<String> = suyos
+            .iter()
+            .filter(|p| !p.preview.is_empty())
+            .take(artistas::MUESTRAS)
+            .map(|p| p.preview.clone())
+            .collect();
+        if let Some(a) = artistas::Artista::desde_perfiles(perfiles, suyos.len() as u32, muestras) {
+            lista.push(a);
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    // El orden se rehace: los añadidos traen sus propios recuentos.
+    lista.sort_by(|a, b| {
+        b.posts
+            .cmp(&a.posts)
+            .then_with(|| a.principal().id.cmp(&b.principal().id))
+    });
+}
+
+/// Una consulta a la ficha. `None` si no responde o no aporta nada.
+/// Las demás direcciones de un artista, buscándolas en cada booru por turno.
+///
+/// SE PREGUNTA EN LOS DOS, y hasta ahora solo en Danbooru. Un artista que
+/// genera con IA está en AIBooru y **no puede estar en Danbooru**, que rechaza
+/// esa obra por norma: la cosecha lo encontraba y el enriquecimiento lo dejaba
+/// sin un solo perfil, o sea una fila con un nombre y nada donde pulsar.
+///
+/// En orden y con corte en el primero que responde: al artista corriente, que
+/// está en Danbooru, esto no le cuesta ni una petición de más.
+async fn ficha_artista(
+    client: &reqwest::Client,
+    sesion: &SesionBooru,
+    id: &str,
+) -> Option<Vec<artistas::Perfil>> {
+    for (n, host) in artistas::BOORUS_FICHA.iter().enumerate() {
+        // Espaciado solo ENTRE boorus, no antes del primero.
+        if n > 0 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let url = artistas::url_ficha_artista_en(host, id);
+        let Ok(r) = sesion.aplicar(client.get(&url), &url).send().await else {
+            continue;
+        };
+        if !r.status().is_success() {
+            continue;
+        }
+        let Ok(txt) = r.text().await else { continue };
+        let perfiles = artistas::perfiles_de_ficha(&txt);
+        if !perfiles.is_empty() {
+            return Some(perfiles);
+        }
+    }
+    None
 }
 
 /// Descarga la miniatura de un post de booru para la rejilla.
@@ -4189,6 +5822,39 @@ async fn cosechar_artistas(
 /// rejilla de boorus y para las muestras del descubridor de artistas. Duplicar
 /// esta función solo para cambiar el evento habría duplicado también la cola
 /// global, el Referer y el reintento — y con ellos, la próxima corrección.
+/// User-Agent para el CDN de un booru.
+///
+/// `None` = el del cliente, que imita a un navegador.
+///
+/// EL CDN APLICA LA MISMA REGLA QUE LA API. `cdn.donmai.us` devolvía 403 a las
+/// cuarenta miniaturas —en Windows y en Linux— con el Referer correcto puesto.
+/// Lo que iba mal era el User-Agent: la ayuda de Danbooru pide, con estas
+/// palabras, «don't impersonate browsers», y su cortafuegos lo cumple también
+/// delante de las imágenes. AIBooru, mismo motor y fork sin esa regla, servía
+/// sus miniaturas sin problema — la misma asimetría que ya se vio en la API.
+fn ua_cdn_booru(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    booru::SITES
+        .iter()
+        .find(|s| {
+            let d = s.dominio().trim_start_matches("www.");
+            // Por sufijo: la imagen vive en `cdn.donmai.us` y el sitio se
+            // llama `danbooru.donmai.us`. Comparar el host entero fallaría.
+            host == d || host.ends_with(&format!(".{}", raiz(d))) && raiz(&host) == raiz(d)
+        })
+        .filter(|s| s.se_identifica())
+        .map(|_| ua_identificado(""))
+}
+
+/// Los dos últimos trozos de un dominio: `cdn.donmai.us` → `donmai.us`.
+fn raiz(host: &str) -> String {
+    let p: Vec<&str> = host.rsplitn(3, '.').collect();
+    match p.len() {
+        0 | 1 => host.to_string(),
+        _ => format!("{}.{}", p[1], p[0]),
+    }
+}
+
 async fn fetch_booru_thumb(
     client: reqwest::Client,
     id: u64,
@@ -4209,29 +5875,62 @@ async fn fetch_booru_thumb(
 
     // Un reintento: los bloqueos por ritmo son transitorios y se van solos
     let mut bytes = None;
+    // POR QUÉ FALLÓ, no solo que falló. Cuarenta recuadros en blanco sin una
+    // sola pista es el mismo fallo mudo que este proyecto lleva persiguiendo
+    // desde la v1.5: la rejilla de Danbooru salió vacía y no había forma de
+    // saber si era el CDN, el Referer o que no se llegaba a conectar.
+    let mut motivo = String::new();
     for attempt in 0..2u32 {
         let mut req = client.get(&url);
         if !referer.is_empty() {
             req = req.header(reqwest::header::REFERER, referer);
         }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
+        // Sustituye al del cliente, que imita a un navegador.
+        if let Some(ua) = ua_cdn_booru(&url) {
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        // Plazo propio y corto. Sin él, un destino que no contesta se lleva
+        // los quince segundos del cliente por intento, y con la cola de
+        // miniaturas en serie eso deja la rejilla entera en blanco.
+        match tokio::time::timeout(Duration::from_secs(8), req.send()).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {
                 if let Ok(b) = resp.bytes().await {
                     // Un CDN que responde HTML es una página de bloqueo, no
                     // una imagen: se descarta y se reintenta.
-                    if !b.is_empty() && b.len() <= MAX && !b.starts_with(b"<") {
+                    if b.is_empty() {
+                        motivo = "respuesta vacía".into();
+                    } else if b.len() > MAX {
+                        motivo = format!("demasiado grande ({} KB)", b.len() / 1024);
+                    } else if b.starts_with(b"<") {
+                        motivo = "el CDN devolvió una página, no una imagen".into();
+                    } else {
                         bytes = Some(b);
                         break;
                     }
                 }
             }
-            _ => {}
+            Ok(Ok(resp)) => motivo = format!("HTTP {}", resp.status().as_u16()),
+            Ok(Err(e)) => motivo = e.to_string(),
+            Err(_) => motivo = msg_lang(
+                "sin respuesta en 8 s (¿IPv6 sin salida? prueba «Forzar IPv4»)",
+                "no answer in 8 s (no IPv6 route? try «Force IPv4»)",
+            )
+            .to_string(),
         }
         if attempt == 0 {
             tokio::time::sleep(Duration::from_millis(700)).await;
         }
     }
-    let Some(bytes) = bytes else { return };
+    let Some(bytes) = bytes else {
+        if motivo.is_empty() {
+            motivo = msg_lang("motivo desconocido", "unknown reason").to_string();
+        }
+        // El host, no la URL entera: identifica al culpable sin llenar la
+        // pantalla con una ruta de CDN de doscientos caracteres.
+        let host = host_of(&url).unwrap_or_default();
+        let _ = tx.send(Ev::BooruThumbFallo(format!("{host}: {motivo}")));
+        return;
+    };
 
     let img = tokio::task::spawn_blocking(move || {
         let im = image::load_from_memory(&bytes).ok()?;
@@ -4316,6 +6015,12 @@ async fn fetch_thumb(client: reqwest::Client, id: u64, url: String, tx: Unbounde
 //     → 302 a us.aws.cdn.hf.co (URL firmada)
 //     → accept-ranges: bytes ; el CDN responde 206 Partial Content
 //     → x-linked-size: 334643276
+//
+// CONFIRMADO EN USO: durante una descarga de Hugging Face aparece un fichero
+// `.tdseg` junto al `.part`. Ese fichero SOLO lo escribe esta ruta, así que es
+// la prueba de que el troceado se aplica de verdad y no está cayendo en
+// silencio a una sola conexión — que era el modo de fallo silencioso que más
+// preocupaba aquí.
 //
 // Nada de esto se aplica a ciegas, y las tres restricciones son deliberadas:
 //
@@ -5467,8 +7172,9 @@ async fn fetch_gallery_thumb(
     idx: usize,
     url: String,
     tx: UnboundedSender<Ev>,
+    epoch: u64,
 ) {
-    fetch_preview_thumb(client, idx, url, tx, false).await
+    fetch_preview_thumb(client, idx, url, tx, false, epoch).await
 }
 
 /// Descarga la portada de una entrada del análisis de perfil.
@@ -5478,7 +7184,9 @@ async fn fetch_profile_thumb(
     url: String,
     tx: UnboundedSender<Ev>,
 ) {
-    fetch_preview_thumb(client, idx, url, tx, true).await
+    // El análisis de perfil no encadena listados, así que no hay época que
+    // confundir: se le pasa 0 y las guardas lo dejan pasar.
+    fetch_preview_thumb(client, idx, url, tx, true, 0).await
 }
 
 /// Cuerpo común de ambas: sólo cambia el evento con el que se responde.
@@ -5488,6 +7196,7 @@ async fn fetch_preview_thumb(
     url: String,
     tx: UnboundedSender<Ev>,
     es_perfil: bool,
+    epoch: u64,
 ) {
     const MAX: usize = 8 * 1024 * 1024;
     let _permit = thumb_gate().acquire().await.ok();
@@ -5550,8 +7259,8 @@ async fn fetch_preview_thumb(
                 // archivo final puede pesar otra cosa. Las dimensiones sí
                 // valen: describen la imagen, y las variantes de ByteDance
                 // cambian la compresión, no el número de píxeles.
-                let _ = tx.send(Ev::GalleryDims(idx, rw, rh));
-                let _ = tx.send(Ev::GalleryThumb(idx, img));
+                let _ = tx.send(Ev::GalleryDims(idx, rw, rh, epoch));
+                let _ = tx.send(Ev::GalleryThumb(idx, img, epoch));
             }
         }
         None => fallo(),
@@ -5598,10 +7307,25 @@ async fn browse_gallery_hop(
     epoch: u64,
     cancelar: Arc<AtomicBool>,
 ) {
-    let first = (page - 1) * per_page + 1;
-    let last = page * per_page;
+    // `page` y `per_page` ya no paginan nada: el listado va en FLUJO, de una
+    // sola pasada. Se conservan en la firma porque el evento de resultados los
+    // lleva y porque V2PH —que no usa esta función— sí pagina de verdad.
+    let _ = (page, per_page);
 
-    let mut args = gallery::list_args(&url, first, last);
+    // UNA COLECCIÓN DE PATREON SE PIDE POR LA VÍA DEL CREADOR.
+    //
+    // Su extractor de colecciones saca el identificador de campaña de la URL
+    // de la miniatura, y cuando esa URL no lo lleva, el filtro va vacío y
+    // Patreon contesta 400. Medido con `-v`:
+    //
+    //     &filter%5Bcampaign_id%5D=&filter…  HTTP/1.1" 400 314
+    //
+    // El de creadores no tiene ese problema, y acepta el filtro de colección
+    // por la URL. Si no se puede averiguar la campaña, se sigue con la
+    // original y el aviso explica lo que pasó.
+    let url = patreon_resolver_coleccion(url, &cookies).await;
+
+    let mut args = gallery::list_args_flujo(&url);
     // Se clonan porque el salto de extractor vuelve a necesitarlas
     let cookies_next = cookies.clone();
     // Las cookies van ANTES del `--`, que cierra la lista de opciones
@@ -5626,7 +7350,58 @@ async fn browse_gallery_hop(
         cmd.creation_flags(0x0800_0000);
     }
 
-    let (estado, stdout, stderr) = match run_capture_timeout(cmd, GALLERY_TIMEOUT, Some(cancelar.clone())).await {
+    // Las líneas se acumulan y se sueltan por tandas.
+    //
+    // POR QUÉ SE RETIENE LA ÚLTIMA. En X, la portada de un vídeo llega como
+    // una entrada propia justo DETRÁS de su vídeo, y `parse_listing` las
+    // empareja mirando el elemento anterior. Si el corte de una tanda cayera
+    // entre los dos, esa portada se perdería. Retener una línea cuesta nada y
+    // garantiza que el par nunca se parte.
+    const TANDA: usize = 24;
+    let mut crudas: Vec<String> = Vec::new();
+    let mut pendientes: Vec<String> = Vec::new();
+    let mut enviados = 0usize;
+    let mut cola: Vec<String> = Vec::new();
+    let mut tanda_n: u32 = 0;
+
+    let suelta = |pend: &mut Vec<String>, cola: &mut Vec<String>, enviados: &mut usize,
+                      tanda_n: &mut u32, forzar: bool| {
+        if pend.is_empty() || (!forzar && pend.len() <= TANDA) {
+            return;
+        }
+        // Con `forzar` se va todo; si no, se deja la última para el par.
+        let corte = if forzar { pend.len() } else { pend.len() - 1 };
+        let trozo: Vec<String> = pend.drain(..corte).collect();
+        // Una tanda ilegible se descarta y se sigue: no puede tumbar el
+        // listado entero. Si al final no salió NADA, el diagnóstico completo
+        // —con el comando, el código de salida y el stderr— va en el error.
+        if let Ok(l) = gallery::parse_listing(&format!("[{}]", trozo.join(","))) {
+            for q in l.queued {
+                if !cola.contains(&q) {
+                    cola.push(q);
+                }
+            }
+            if !l.items.is_empty() {
+                *enviados += l.items.len();
+                *tanda_n += 1;
+                let _ = tx.send(Ev::GalleryResults(l.items, *tanda_n, epoch));
+            }
+        }
+    };
+
+    let resultado = run_lineas_timeout(cmd, GALLERY_TIMEOUT, Some(cancelar.clone()), |linea| {
+        let l = linea.trim();
+        if l.is_empty() {
+            return;
+        }
+        crudas.push(l.to_string());
+        pendientes.push(l.to_string());
+        suelta(&mut pendientes, &mut cola, &mut enviados, &mut tanda_n, false);
+    })
+    .await;
+    suelta(&mut pendientes, &mut cola, &mut enviados, &mut tanda_n, true);
+
+    let (estado, stderr) = match resultado {
         Ok(o) => o,
         Err(e) => {
             // Una parada pedida por el usuario no es un fallo y no viaja como
@@ -5639,7 +7414,14 @@ async fn browse_gallery_hop(
             return;
         }
     };
-    let stdout = stdout.as_str();
+    // Lo que ya se entregó no se vuelve a entregar: a partir de aquí solo se
+    // decide qué hacer si NO salió nada.
+    if enviados > 0 {
+        let _ = tx.send(Ev::GalleryDone(epoch));
+        return;
+    }
+    let stdout_completo = format!("[{}]", crudas.join(","));
+    let stdout = stdout_completo.as_str();
     let stderr = stderr.as_str();
 
     // Comando ejecutado, con la ruta del cookies.txt REDACTADA. Sin esto no hay
@@ -5669,6 +7451,12 @@ async fn browse_gallery_hop(
     // Fuera del cierre: lo necesitan tanto el mensaje de 403 como el del
     // listado vacío, y son dos sitios distintos.
     let de_weibo = host_of(&url).is_some_and(|h| es_weibo(&h));
+    // El espaciado de X y Patreon se bajó a 0,5 s sin poder medir su límite
+    // real: no hay forma de hacerlo sin arriesgar la cuenta de quien lo use.
+    // Si la apuesta sale mal, el sitio contesta 429 — y un número suelto no le
+    // dice a nadie qué hacer con él.
+    let rapido = host_of(&url)
+        .is_some_and(|h| es_x(&h) || host_matches(&h, "patreon.com") || es_weibo(&h));
     let motivo = |extra: &str| -> String {
         let err: String = stderr
             .lines()
@@ -5682,7 +7470,22 @@ async fn browse_gallery_hop(
         let crudo: String = stdout.trim().chars().take(300).collect();
         // Pista específica del sitio. El texto genérico habla de Instagram, que
         // en un 403 de Weibo despista más de lo que ayuda.
-        let extra = if de_weibo && (err.contains("403") || stdout.contains("403")) {
+        let extra = if rapido && (err.contains("429") || stdout.contains("429")) {
+            format!(
+                "{extra}\n\n{}",
+                msg_lang(
+                    "El sitio ha respondido 429: demasiadas peticiones. La aplicación \
+                     espacia las peticiones a X, Patreon y Weibo medio segundo, que va bien \
+                     en general pero depende de la cuenta y del momento. Espera unos \
+                     minutos antes de reintentarlo; si se repite a menudo, hay que volver a \
+                     subir el espaciado.",
+                    "The site answered 429: too many requests. The application spaces X, \
+                     Patreon and Weibo requests half a second apart, which is fine in \
+                     general but depends on the account and the moment. Wait a few minutes \
+                     before retrying; if it keeps happening, the spacing should go back up.",
+                )
+            )
+        } else if de_weibo && (err.contains("403") || stdout.contains("403")) {
             format!(
                 "{extra}\n\n{}",
                 msg_lang(
@@ -5719,7 +7522,7 @@ async fn browse_gallery_hop(
         Fallo(String),
     }
 
-    let accion = if stdout.trim().is_empty() {
+    let accion = if crudas.is_empty() {
         Accion::Fallo(motivo(msg_lang("gallery-dl no devolvió JSON.", "gallery-dl returned no JSON.")))
     } else {
         match gallery::parse_listing(stdout) {
@@ -6701,11 +8504,38 @@ fn galdl_archive_path() -> PathBuf {
 /// Espaciado entre peticiones según el sitio. Instagram es el más agresivo
 /// cortando sesiones, así que se le da mucho más aire que al resto.
 fn galdl_pacing(url: &str) -> &'static str {
-    if url.to_ascii_lowercase().contains("instagram.com") {
-        "6.0-12.0" // gallery-dl acepta rangos: elige un valor aleatorio
-    } else {
-        "1.5"
+    let Some(host) = host_of(&url.to_ascii_lowercase()) else {
+        return "1.5";
+    };
+    if host_matches(&host, "instagram.com") {
+        // gallery-dl acepta rangos: elige un valor aleatorio dentro
+        return "6.0-12.0";
     }
+    // X, Patreon y Weibo van por API con respuestas por lotes, así que el
+    // número de peticiones es bajo y el espaciado pesa proporcionalmente más.
+    //
+    // ESTO EMPEZÓ SIENDO UNA APUESTA: no hay forma de medir el límite real de
+    // esos sitios sin arriesgar la cuenta de quien lo use, así que se bajó sin
+    // evidencia y con el 429 como red.
+    //
+    // PROBADO EN USO y sin un solo 429, sobre perfiles grandes de X y de
+    // Patreon. Queda anotado porque quien lea esto merece saber que el número
+    // no salió de ningún sitio y que DESPUÉS se comprobó, en vez de
+    // encontrarse una advertencia que ya no describe la realidad. La red del
+    // 429 se queda: otra cuenta o un mal día siguen siendo posibles.
+    //
+    // De Weibo, lo único que este proyecto tiene registrado es un 403 SIN
+    // SESIÓN, que es autenticación y no ritmo. Nada indica que limite por
+    // frecuencia, así que entra en el grupo rápido.
+    //
+    // BILIBILI NO ENTRA, y no por olvido. Su espaciado vive en `run_analyze`
+    // (yt-dlp) y está puesto por un síntoma observado: responde **412** si la
+    // paginación va demasiado seguida. Bajarlo sería deshacer un arreglo hecho
+    // sobre un fallo real para ganar unos segundos.
+    if es_x(&host) || host_matches(&host, "patreon.com") || es_weibo(&host) {
+        return "0.5";
+    }
+    "1.5"
 }
 
 /// Argumentos comunes de gallery-dl para una descarga
@@ -6856,6 +8686,22 @@ fn galdl_site_opts(url: &str) -> Vec<String> {
 
 /// Los cuatro dominios de Weibo, distinguidos por host y no por subcadena.
 /// `passport.weibo.com` contiene «weibo.com» y no es lo mismo.
+/// ¿Es la URL de una BÚSQUEDA en una red china, y no un perfil?
+///
+/// `s.weibo.com/weibo?q=…` y `search.bilibili.com/all?keyword=…` son justo lo
+/// que produce el desplegable «En chino…», así que es de esperar que alguien
+/// las pegue aquí. gallery-dl contesta `Unsupported URL`, que es verdad —tiene
+/// nueve extractores de Weibo y ninguno busca— pero no dice qué hacer con esa
+/// verdad. Reconocerlas permite contestar algo aprovechable.
+fn es_busqueda_china(url: &str) -> bool {
+    let Some(host) = host_of(&url.to_ascii_lowercase()) else {
+        return false;
+    };
+    (host == "s.weibo.com" && url.contains("/weibo?"))
+        || (host == "search.bilibili.com")
+        || (es_weibo(&host) && url.contains("/search"))
+}
+
 fn es_weibo(host: &str) -> bool {
     host_matches(host, "weibo.com") || host_matches(host, "weibo.cn")
 }
@@ -9064,6 +10910,10 @@ impl App {
                 let url = self.profile_url.trim().to_string();
                 if url.is_empty() || !url.starts_with("http") {
                     self.toast(t(lang, "profile.need_url"));
+                } else if es_busqueda_china(&url) {
+                    // Se responde ANTES de gastar una llamada a gallery-dl que
+                    // solo diría «Unsupported URL».
+                    self.toast(t(lang, "profile.busqueda_china"));
                 } else if es_huggingface(&url) {
                     // Un modelo no es un archivo: son shards, configuración y
                     // tokenizador. Se listan y el usuario elige, igual que una
@@ -9169,8 +11019,12 @@ impl App {
                         self.gallery_aviso.clear();
                         self.gallery_loading = true;
                         self.gallery_page = 1;
-                        self.gallery_prefetch_left = paginas_encadenadas(&url);
-                        self.gallery_prefetching = false;
+                        // Sin cadena de páginas: el listado va en flujo y de
+                        // una sola pasada. `paginas_encadenadas` solo queda
+                        // para V2PH, que sí pagina de verdad.
+                        self.gallery_prefetch_left = 0;
+                        self.gallery_flujo = true;
+                        self.gallery_prefetching = true;
                         let tx = self.tx.clone();
                         let cookies = cookie_args(&self.settings);
                         self.gallery_epoch += 1;
@@ -9256,7 +11110,55 @@ impl App {
         if !self.gallery_loading && self.gallery_items.is_empty() && !self.gallery_url.is_empty() {
             ui.add_space(12.0);
             card_frame().show(ui, |ui| {
-                ui.label(RichText::new(t(lang, "gal.empty")).size(12.0).color(AMBER()));
+                // «Suele ser falta de sesión» es cierto EN GENERAL y falso
+                // para las colecciones de Patreon, que fallan por otra cosa.
+                // Mandar a revisar las cookies a quien las tiene bien es
+                // gastarle el tiempo, que es lo que este proyecto persigue.
+                let clave = if es_patreon(&self.profile_url) {
+                    "gal.empty_patreon_col"
+                } else {
+                    "gal.empty"
+                };
+                ui.label(RichText::new(t(lang, clave)).size(12.0).color(AMBER()));
+                // MISMO BOTÓN QUE EN EL BUSCADOR DE BOORUS, y por el mismo
+                // motivo: `PatreonPostExtractor` hace `self.log.debug(bootstrap)`
+                // y luego `return ()` cuando la página no trae la clave que
+                // espera. Ese `debug` SOLO se ve con `-v`. Sin él, el fallo es
+                // una lista vacía y nada más.
+                ui.horizontal(|ui| {
+                    if self.galdl_verbose_corriendo {
+                        ui.label(
+                            RichText::new(t(lang, "booru.verbose_corriendo")).size(11.5).color(MUTED()),
+                        );
+                    } else if soft_button(ui, t(lang, "booru.verbose")).clicked() {
+                        if let Some(prog) = self.galdl_cmd.clone() {
+                            let ck = cookie_args(&self.settings);
+                            let ua = ua_efectivo(&self.settings);
+                            let url = self.profile_url.trim().to_string();
+                            self.galdl_verbose.clear();
+                            self.galdl_verbose_corriendo = true;
+                            self.rt.spawn(galdl_verbose(
+                                prog,
+                                url,
+                                None,
+                                ck,
+                                ua,
+                                self.settings.forzar_ipv4,
+                                self.tx.clone(),
+                            ));
+                        }
+                    }
+                });
+                if !self.galdl_verbose.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(t(lang, "booru.verbose_hint")).size(11.0).color(MUTED()));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.galdl_verbose.as_str())
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(14)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                }
                 if !self.gallery_error.is_empty() {
                     ui.add_space(6.0);
                     ui.label(RichText::new(t(lang, "gal.reason")).size(11.0).color(MUTED()));
@@ -9406,6 +11308,7 @@ impl App {
                                     i,
                                     thumb_url.clone(),
                                     self.tx.clone(),
+                                    self.gallery_epoch,
                                 ));
                             }
 
@@ -9564,7 +11467,13 @@ impl App {
                             self.view = View::Downloads;
                         }
                     }
-                    if !self.gallery_loading && soft_button(ui, t(lang, "gal.more")).clicked() {
+                    // «Cargar más» solo donde de verdad queda algo: V2PH
+                    // pagina álbum a álbum. Los demás se recorren enteros de
+                    // una pasada, así que el botón solo podía repetir trabajo.
+                    if v2ph::is_v2ph(&self.gallery_url)
+                        && !self.gallery_loading
+                        && soft_button(ui, t(lang, "gal.more")).clicked()
+                    {
                         let next = self.gallery_page + 1;
                         let url = self.gallery_url.clone();
                         // Pedirlo a mano rearma la carga automática, salvo en
@@ -10271,15 +12180,31 @@ impl App {
                 }
             });
 
+            let cred = self.settings.cred(site.key);
             if site.needs_auth {
-                let u = self.settings.booru_user.trim();
-                if self.settings.booru_key.trim().is_empty() || u.is_empty() {
+                if !cred.completo() {
                     ui.label(RichText::new(t(lang, "booru.needs_auth")).size(11.5).color(AMBER()));
-                } else if !u.chars().all(|c| c.is_ascii_digit()) {
+                } else if !cred.user.trim().chars().all(|c| c.is_ascii_digit()) {
                     // Rellenado pero mal. Sin esto, Gelbooru contesta que
                     // faltan las credenciales que sí están puestas, y no hay
                     // forma de saber que el problema es el formato.
                     ui.label(RichText::new(t(lang, "set.booru_user_nan")).size(11.5).color(RED()));
+                }
+            } else if let Some(url_clave) = site.api_key_url {
+                // NO es un error: el sitio funciona sin clave. Pero es la
+                // diferencia entre pelearse con Cloudflare cada media hora y
+                // no volver a pensar en ello, así que se dice antes de
+                // buscar y no después del 403. Fuente: danbooru.donmai.us/wiki_pages/help:api.
+                if cred.completo() {
+                    ui.label(RichText::new(t(lang, "booru.api_ok")).size(11.5).color(GREEN()));
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(RichText::new(t(lang, "booru.api_sugerida")).size(11.5).color(AMBER()));
+                        if ui.link(RichText::new(t(lang, "booru.api_generar")).size(11.5)).clicked() {
+                            let _ = open::that(url_clave);
+                        }
+                    });
                 }
             }
             if self.galdl_cmd.is_none() {
@@ -10290,7 +12215,10 @@ impl App {
             // Estos cuatro sitios están tras Cloudflare y sin sesión la
             // búsqueda se va en el desafío hasta agotar el plazo.
             let url_prev = booru::search_url(site, &self.booru_tags);
-            if booru_needs_cookies(&url_prev) {
+            // Solo para quien SÍ usa cookies. A Danbooru y e621 no se les
+            // manda ninguna, así que enseñar ahí el estado de una sesión que
+            // no se usa sería describir algo que no ocurre.
+            if !site.se_identifica() && !cred.completo() && booru_needs_cookies(&url_prev) {
                 let ck = cookie_args(&self.settings);
                 let con_ua = !self.settings.user_agent.trim().is_empty();
                 if ck.is_empty() {
@@ -10312,10 +12240,90 @@ impl App {
                     } else {
                         ck.get(1).cloned().unwrap_or_default()
                     };
+                    // «Se manda tu sesión» era verdad y aun así el aviso
+                    // mentía: el archivo puede traer treinta cookies del sitio
+                    // y ninguna ser la `cf_clearance` que el 403 pide, o
+                    // traerla caducada. Un VERDE junto a un 403 es el peor
+                    // aviso posible, así que aquí se mira lo que hay dentro.
+                    let es_archivo = ck.first().map(|a| a == "--cookies").unwrap_or(false);
+                    let ruta = if es_archivo {
+                        ck.get(1).cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let dominio = site.dominio().to_string();
+                    let fresco = self
+                        .booru_cf
+                        .as_ref()
+                        .is_some_and(|(r, d, _, t)| {
+                            *r == ruta && *d == dominio && t.elapsed().as_secs() < 3
+                        });
+                    if !fresco {
+                        let est: Option<v2ph::Clearance> = if es_archivo {
+                            let ahora = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            // Un archivo ilegible no se puede juzgar, y decir
+                            // «ausente» sería inventarse el motivo: `None`.
+                            std::fs::read_to_string(&ruta)
+                                .ok()
+                                .map(|txt| v2ph::clearance_de(&txt, &dominio, ahora))
+                        } else if ck.get(1).is_some_and(|n| n.eq_ignore_ascii_case("firefox")) {
+                            // Del navegador solo llega la cabecera ya montada:
+                            // se sabe si está, no cuándo caduca. Y leerlo solo
+                            // funciona con Firefox; con cualquier otro no se
+                            // sabe nada, y eso NO es lo mismo que «no está».
+                            match cookies::firefox_cookie_header_diag(&dominio).cookie {
+                                Some(h) if v2ph::header_tiene_clearance(&h) => {
+                                    Some(v2ph::Clearance::Presente)
+                                }
+                                Some(_) => Some(v2ph::Clearance::Ausente),
+                                None => None,
+                            }
+                        } else {
+                            None
+                        };
+                        self.booru_cf =
+                            Some((ruta.clone(), dominio.clone(), est, std::time::Instant::now()));
+                    }
+                    let est = self.booru_cf.as_ref().and_then(|(_, _, e, _)| *e);
+                    // El caso por defecto —`None` y `Presente`— vuelve al aviso
+                    // de siempre: dice lo que se sabe seguro, que la sesión y
+                    // el User-Agent salen, sin prometer que sirvan.
+                    let (txt_cf, color_cf) = match est {
+                        Some(v2ph::Clearance::Vigente { queda }) => (
+                            format!(
+                                "{}  ({} {})",
+                                t(lang, "booru.cf_viva"),
+                                queda / 60,
+                                t(lang, "booru.cf_min")
+                            ),
+                            GREEN(),
+                        ),
+                        Some(v2ph::Clearance::Caducada { hace }) => (
+                            format!(
+                                "{}  ({} {})",
+                                t(lang, "booru.cf_caducada"),
+                                hace / 60,
+                                t(lang, "booru.cf_min")
+                            ),
+                            AMBER(),
+                        ),
+                        // `SinDominio` va aquí y no al caso por defecto: un
+                        // archivo sin NI UNA cookie de este sitio es todavía
+                        // menos válido que uno al que solo le falta la
+                        // `cf_clearance`, y dejarlo caer en el verde repetiría
+                        // exactamente el fallo que este bloque viene a quitar.
+                        Some(v2ph::Clearance::Ausente) | Some(v2ph::Clearance::SinDominio) => {
+                            (t(lang, "booru.cf_falta").to_string(), AMBER())
+                        }
+                        _ => (t(lang, "booru.cf_ok").to_string(), GREEN()),
+                    };
                     ui.label(
-                        RichText::new(format!("{}  ({fuente})", t(lang, "booru.cf_ok")))
+                        RichText::new(format!("{txt_cf}  ({fuente})"))
                             .size(11.5)
-                            .color(GREEN()),
+                            .color(color_cf),
                     );
                     if ck.first().map(|a| a == "--cookies").unwrap_or(false)
                         && self.settings.use_browser_cookies
@@ -10337,10 +12345,68 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(RichText::new(&self.booru_error).size(11.5).color(AMBER()).monospace());
                 ui.add_space(6.0);
-                if soft_button(ui, t(lang, "booru.copy_diag")).clicked() {
-                    let d = self.booru_error.clone();
-                    ui.output_mut(|o| o.copied_text = d);
-                    self.toast(t(lang, "cap.post_copied"));
+                ui.horizontal(|ui| {
+                    if soft_button(ui, t(lang, "booru.copy_diag")).clicked() {
+                        let d = self.booru_error.clone();
+                        ui.output_mut(|o| o.copied_text = d);
+                        self.toast(t(lang, "cap.post_copied"));
+                    }
+                    // REPETIR CON DETALLE. Un «no respondió en 45 s» no
+                    // distingue un sitio caído de una credencial mal puesta ni
+                    // de un cortafuegos que retiene la petición. `-v` sí.
+                    // Es a petición, y con `--range 1-1`: lo más suave que se
+                    // le puede pedir a un sitio que acaba de fallar.
+                    if self.galdl_verbose_corriendo {
+                        ui.label(RichText::new(t(lang, "booru.verbose_corriendo")).size(11.5).color(MUTED()));
+                    } else if soft_button(ui, t(lang, "booru.probar")).clicked() {
+                        // LA PRUEBA DE RED VA PRIMERO. Separa DNS, TCP y TLS,
+                        // que es lo que distingue «no llego» de «no me dejan»
+                        // — y no lo hace gallery-dl, sino el cliente nativo:
+                        // si uno llega y el otro no, el sospechoso cambia.
+                        let host = site.dominio().to_string();
+                        let cl = self.client.clone();
+                        let tx = self.tx.clone();
+                        self.galdl_verbose.clear();
+                        self.galdl_verbose_corriendo = true;
+                        self.rt.spawn(async move {
+                            let pasos = probar_conexion(&cl, &host).await;
+                            let mut t = format!("--- {host} ---\n");
+                            t.push_str(&pasos.join("\n"));
+                            for p in proxy_del_sistema() {
+                                t.push_str(&format!("\nproxy del sistema: {p}"));
+                            }
+                            let _ = tx.send(Ev::GaldlVerbose(t));
+                        });
+                    } else if soft_button(ui, t(lang, "booru.verbose")).clicked() {
+                        if let Some(prog) = self.galdl_cmd.clone() {
+                            let c = self.settings.cred(site.key);
+                            let auth = booru::auth_config(site, &c.user, &c.key);
+                            let (ck, ua) = sesion_para_booru(site, &self.settings, &c);
+                            let url = booru::search_url(site, &self.booru_tags);
+                            self.galdl_verbose.clear();
+                            self.galdl_verbose_corriendo = true;
+                            self.rt.spawn(galdl_verbose(
+                                prog, url, auth, ck, ua, self.settings.forzar_ipv4, self.tx.clone(),
+                            ));
+                        }
+                    }
+                });
+                if !self.galdl_verbose.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(t(lang, "booru.verbose_hint")).size(11.0).color(MUTED()));
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .id_source("galdl_verbose")
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&self.galdl_verbose).size(10.5).monospace().color(MUTED()),
+                            );
+                        });
+                    if soft_button(ui, t(lang, "booru.copy_diag")).clicked() {
+                        let d = self.galdl_verbose.clone();
+                        ui.output_mut(|o| o.copied_text = d);
+                        self.toast(t(lang, "cap.post_copied"));
+                    }
                 }
                 ui.add_space(4.0);
                 // Ayuda específica cuando el motor ya ha dicho QUÉ pasa. La
@@ -10349,6 +12415,15 @@ impl App {
                     || self.booru_error.contains("403")
                 {
                     ui.label(RichText::new(t(lang, "booru.cf_403")).size(11.5).color(AMBER()));
+                    // El dominio del sitio ACTIVO, no uno fijo. La cookie va
+                    // atada a quien la emitió, así que nombrar otro manda al
+                    // usuario a por algo que no le sirve.
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(t(lang, "booru.cf_visita")).size(11.5).color(AMBER()));
+                        if soft_button(ui, site.dominio()).clicked() {
+                            let _ = open::that(format!("https://{}/", site.dominio()));
+                        }
+                    });
                     ui.add_space(4.0);
                 }
                 ui.label(RichText::new(t(lang, "booru.failed_help")).size(11.0).color(MUTED()));
@@ -10361,7 +12436,8 @@ impl App {
                 self.booru_posts.clear();
                 self.booru_error.clear();
                 let url = booru::search_url(site, &self.booru_tags);
-                let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
+                let c = self.settings.cred(site.key);
+                let auth = booru::auth_config(site, &c.user, &c.key);
                 let tx = self.tx.clone();
                 let page = self.booru_page;
                 self.booru_epoch += 1;
@@ -10370,13 +12446,10 @@ impl App {
                 // cancelación dejaría el buscador inservible para siempre.
                 self.booru_cancel.store(false, Ordering::Relaxed);
                 let cancel = self.booru_cancel.clone();
-                let ck = if booru_needs_cookies(&url) {
-                    cookie_args(&self.settings)
-                } else {
-                    Vec::new()
-                };
-                let ua = self.settings.user_agent.clone();
-                self.rt.spawn(booru_search(prog, url, page, 40, auth, tx, ep, cancel, ck, ua));
+                let (ck, ua) = sesion_para_booru(site, &self.settings, &c);
+                self.rt.spawn(booru_search(
+                    prog, url, page, 40, auth, tx, ep, cancel, ck, ua, self.settings.forzar_ipv4,
+                ));
             } else {
                 self.toast(t(lang, "profile.need_galdl"));
             }
@@ -10410,6 +12483,19 @@ impl App {
                 ui.label(
                     RichText::new(i18n::booru_summary(lang, visible.len(), sel_count)).strong(),
                 );
+                // Cuarenta recuadros en blanco tienen que decir por qué.
+                if self.booru_thumb_fallos.0 > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "  ⚠ {} {} — {}",
+                            self.booru_thumb_fallos.0,
+                            t(lang, "booru.thumb_fallos"),
+                            self.booru_thumb_fallos.1
+                        ))
+                        .size(11.0)
+                        .color(AMBER()),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if soft_button(ui, "▶").on_hover_text(t(lang, "booru.next")).clicked() {
                         page_delta = 1;
@@ -10553,19 +12639,25 @@ impl App {
             if let Some(prog) = self.galdl_cmd.clone() {
                 self.booru_searching = true;
                 let url = booru::search_url(site, &self.booru_tags);
-                let auth = booru::auth_config(site, &self.settings.booru_user, &self.settings.booru_key);
+                let c = self.settings.cred(site.key);
+                let auth = booru::auth_config(site, &c.user, &c.key);
                 self.booru_epoch += 1;
                 let ep = self.booru_epoch;
                 self.booru_cancel.store(false, Ordering::Relaxed);
                 let cancel = self.booru_cancel.clone();
-                let ck = if booru_needs_cookies(&url) {
-                    cookie_args(&self.settings)
-                } else {
-                    Vec::new()
-                };
-                let ua = self.settings.user_agent.clone();
+                let (ck, ua) = sesion_para_booru(site, &self.settings, &c);
                 self.rt.spawn(booru_search(
-                    prog, url, self.booru_page, 40, auth, self.tx.clone(), ep, cancel, ck, ua,
+                    prog,
+                    url,
+                    self.booru_page,
+                    40,
+                    auth,
+                    self.tx.clone(),
+                    ep,
+                    cancel,
+                    ck,
+                    ua,
+                    self.settings.forzar_ipv4,
                 ));
             }
         }
@@ -11374,32 +13466,84 @@ impl App {
         });
         ui.add_space(12.0);
 
+        // ---- Red ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new(t(lang, "set.red")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            if ui
+                .checkbox(&mut self.settings.forzar_ipv4, t(lang, "set.ipv4"))
+                .changed()
+            {
+                // El cliente nativo se construye una vez al arrancar, así que
+                // cambiarlo aquí no basta. Decirlo es mejor que dejar al
+                // usuario preguntándose por qué no cambió nada.
+                self.toast(t(lang, "set.ipv4_reinicio"));
+            }
+            ui.label(RichText::new(t(lang, "set.ipv4_note")).size(11.5).color(MUTED()));
+        });
+        ui.add_space(12.0);
+
         // ---- Credenciales de boorus ----
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width().min(640.0));
             ui.label(RichText::new(t(lang, "set.booru")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "set.booru_user")).size(12.0).color(MUTED()));
-                ui.add_sized([200.0, 26.0], egui::TextEdit::singleline(&mut self.settings.booru_user));
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "set.booru_key")).size(12.0).color(MUTED()));
-                // password(true): la clave no queda a la vista de nadie que
-                // mire la pantalla ni en una captura.
-                ui.add_sized(
-                    [200.0, 26.0],
-                    egui::TextEdit::singleline(&mut self.settings.booru_key).password(true),
-                );
-            });
-            // Aviso in situ, no en la documentación. El campo aceptaba
-            // cualquier cosa y Gelbooru respondía «needed to access the API»
-            // aunque estuviera relleno, lo cual no señala a ninguna parte.
-            let u = self.settings.booru_user.trim();
-            if !u.is_empty() && !u.chars().all(|c| c.is_ascii_digit()) {
-                ui.label(RichText::new(t(lang, "set.booru_user_nan")).size(11.5).color(RED()));
+            // UNA FILA POR SITIO. Antes era un par global porque solo
+            // Gelbooru pedía credenciales; ahora también las usan
+            // Danbooru, AIBooru y e621, y cada uno tiene su propia cuenta.
+            // Compartirlas habría mandado el usuario de un sitio a otro.
+            for site in booru::SITES.iter().filter(|s| s.needs_auth || s.admite_clave()) {
+                // Gelbooru es el único que pide un identificador numérico;
+                // los demás, el nombre de usuario. La pista tiene que decir
+                // cuál, porque escribir el nombre donde va el número es
+                // exactamente el error que el sitio no sabe explicar.
+                let pista = if site.key == "gelbooru" {
+                    t(lang, "set.booru_hint_id")
+                } else {
+                    t(lang, "set.booru_hint_user")
+                };
+                let c = self.settings.booru_creds.entry(site.key.to_string()).or_default();
+                ui.horizontal(|ui| {
+                    // Ancho fijo para que las cuatro casillas queden en
+                    // columna y no escalonadas según lo largo del nombre.
+                    ui.add_sized(
+                        [72.0, 24.0],
+                        egui::Label::new(RichText::new(site.name).size(12.0).color(MUTED()).strong())
+                            .selectable(false),
+                    );
+                    ui.add_sized(
+                        [140.0, 24.0],
+                        egui::TextEdit::singleline(&mut c.user).hint_text(pista),
+                    );
+                    // password(true): la clave no queda a la vista de nadie
+                    // que mire la pantalla ni en una captura — que es
+                    // justamente como se filtran.
+                    ui.add_sized(
+                        [200.0, 24.0],
+                        egui::TextEdit::singleline(&mut c.key)
+                            .password(true)
+                            .hint_text(t(lang, "set.booru_hint_key")),
+                    );
+                    if let Some(u) = site.api_key_url {
+                        if ui.small_button(t(lang, "set.booru_get_key")).clicked() {
+                            let _ = open::that(u);
+                        }
+                    }
+                });
+                // Aviso in situ, no en la documentación. El campo aceptaba
+                // cualquier cosa y Gelbooru respondía «needed to access the
+                // API» aunque estuviera relleno, lo cual no señala a ninguna
+                // parte. Solo Gelbooru usa un identificador numérico; los
+                // demás usan el nombre de usuario.
+                let u = c.user.trim();
+                if site.key == "gelbooru" && !u.is_empty() && !u.chars().all(|ch| ch.is_ascii_digit())
+                {
+                    ui.label(RichText::new(t(lang, "set.booru_user_nan")).size(11.5).color(RED()));
+                }
             }
-            ui.label(RichText::new(t(lang, "set.booru_note")).size(11.5).color(MUTED()));
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(lang, "set.booru_api_note")).size(11.5).color(MUTED()));
             ui.add_space(4.0);
             ui.label(RichText::new(t(lang, "set.booru_where")).size(11.5).color(MUTED()));
             ui.add_space(4.0);
@@ -11937,6 +14081,213 @@ mod tests {
         // Weibo, e Instagram no tiene ninguno.
         assert!(!galdl_site_opts("https://x.com/alguien").iter().any(|a| a.contains("weibo")));
         assert!(galdl_opts_listado("https://www.instagram.com/alguien").is_empty());
+    }
+
+    /// El espaciado no es el mismo para todos, y la diferencia está medida o
+    /// razonada, no elegida a ojo.
+    #[test]
+    fn el_espaciado_va_por_sitio() {
+        assert_eq!(galdl_pacing("https://www.instagram.com/alguien"), "6.0-12.0");
+        // X y Patreon van por API con respuestas por lotes: pocas peticiones,
+        // así que el espaciado pesa proporcionalmente más.
+        for u in [
+            "https://x.com/alguien",
+            "https://twitter.com/alguien",
+            "https://www.patreon.com/c/alguien/posts",
+        ] {
+            assert_eq!(galdl_pacing(u), "0.5", "{u}");
+        }
+        // Todo lo demás se queda como estaba.
+        // Weibo también: su extractor va por API y lo único registrado aquí es
+        // un 403 sin sesión, que es autenticación y no ritmo.
+        assert_eq!(galdl_pacing("https://weibo.com/u/1"), "0.5");
+        assert_eq!(galdl_pacing("https://m.weibo.cn/status/1"), "0.5");
+        // Bilibili NO baja: su espaciado está en `run_analyze` y responde 412
+        // si la paginación va demasiado seguida. Aquí ni siquiera se le
+        // pregunta, pero que conste que no cae en el grupo rápido.
+        assert_eq!(galdl_pacing("https://space.bilibili.com/1"), "1.5");
+        for u in ["https://danbooru.donmai.us/posts", "no-soy-una-url"] {
+            assert_eq!(galdl_pacing(u), "1.5", "{u}");
+        }
+        assert_eq!(galdl_pacing("https://weibo.com.atacante.example/u/1"), "1.5");
+        // Por host, no por subcadena: un impostor no hereda el ritmo rápido.
+        assert_eq!(galdl_pacing("https://x.com.atacante.example/a"), "1.5");
+        assert_eq!(galdl_pacing("https://instagram.com.atacante.example/a"), "1.5");
+    }
+
+    /// Un perfil se LISTA con gallery-dl, que recibe las cookies, pero cada
+    /// archivo se DESCARGA con el motor nativo, que no las recibía. Para casi
+    /// todos los sitios da igual —el CDN de X es público, los de Facebook e
+    /// Instagram van firmados— pero los archivos de Fanbox viven en rutas SIN
+    /// firma, así que el control de acceso tiene que estar en la sesión.
+    #[test]
+    fn la_sesion_de_descarga_va_solo_donde_hace_falta() {
+        let mut s = Settings::default();
+        // Sin `cookies.txt` no hay nada que mandar, ni siquiera a Fanbox.
+        assert_eq!(cookie_descarga(&s, "https://downloads.fanbox.cc/images/post/1/a.jpeg"), "");
+
+        s.cookies_file = "no-existe-este-archivo.txt".into();
+        assert_eq!(cookie_descarga(&s, "https://downloads.fanbox.cc/images/post/1/a.jpeg"), "");
+
+        // Y a los CDN que no la necesitan no se les manda NUNCA, haya archivo
+        // o no. Mandar la sesión a quien no la pidió es el fallo que ya rompió
+        // YouTube en la v1.6.0 y los boorus en la v1.7.0.
+        for u in [
+            "https://pbs.twimg.com/media/abc?format=jpg",
+            "https://cdn.bsky.app/img/feed_fullsize/abc.jpg",
+            "https://scontent.cdninstagram.com/v/abc.jpg",
+            "https://i.pximg.net/img-original/abc.png",
+            "https://c10.patreonusercontent.com/4/patreon-media/p/post/1/a.png",
+            // Y un impostor que contiene el dominio bueno.
+            "https://fanbox.cc.atacante.example/images/post/1/a.jpeg",
+        ] {
+            assert_eq!(cookie_descarga(&s, u), "", "no debería llevar sesión: {u}");
+        }
+    }
+
+    /// El desplegable «En chino…» produce URLs de búsqueda, así que es de
+    /// esperar que alguien las pegue en Perfil. gallery-dl solo diría
+    /// «Unsupported URL»: cierto, pero sin nada que hacer con ello.
+    #[test]
+    fn una_busqueda_china_no_se_confunde_con_un_perfil() {
+        for u in [
+            "https://s.weibo.com/weibo?q=%23远坂凛%23",
+            "https://search.bilibili.com/all?keyword=远坂凛",
+            "https://weibo.com/search?q=algo",
+        ] {
+            assert!(es_busqueda_china(u), "es una búsqueda: {u}");
+        }
+        // Un PERFIL sí se lista, y no debe caer en esta rama.
+        for u in [
+            "https://weibo.com/u/5366453585",
+            "https://weibo.com/n/DarkAnglicanQpQ",
+            "https://space.bilibili.com/12345",
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://x.com/alguien",
+        ] {
+            assert!(!es_busqueda_china(u), "no es una búsqueda: {u}");
+        }
+        // Por host, como todo lo demás.
+        assert!(!es_busqueda_china("https://s.weibo.com.atacante.example/weibo?q=1"));
+    }
+
+    /// Fuente: danbooru.donmai.us/wiki_pages/help:api. Danbooru pide por escrito que los clientes NO imiten
+    /// navegadores; hasta la v1.8.5 se le mandaba un User-Agent de Chrome.
+    #[test]
+    fn a_quien_pide_identificacion_se_le_dice_el_nombre() {
+        let anon = ua_identificado("");
+        assert!(anon.starts_with("TodoDownloader/"), "{anon}");
+        assert!(anon.contains(env!("CARGO_PKG_VERSION")), "{anon}");
+        assert!(anon.contains("github.com/AcidClawX41"), "{anon}");
+        // Lo que NO puede parecer, bajo ningún concepto, es un navegador.
+        for palabra in ["Mozilla", "Chrome", "Firefox", "Safari", "AppleWebKit", "Gecko"] {
+            assert!(!anon.contains(palabra), "{anon} contiene «{palabra}»");
+        }
+
+        // Con usuario, va dentro: es lo más parecido al `user #id` que piden,
+        // y es lo que permite avisar a alguien antes de banearlo.
+        let con = ua_identificado("eric");
+        assert!(con.contains("user eric"), "{con}");
+        // Espacios sobrantes no crean un «(user )» vacío.
+        assert_eq!(ua_identificado("   "), anon);
+    }
+
+    /// Un secreto que se imprime deja de serlo, y `{:?}` se cuela en cualquier
+    /// mensaje de error sin que nadie lo decida.
+    #[test]
+    fn una_clave_de_api_no_se_imprime_nunca() {
+        let c = BooruCred { user: "eric".into(), key: "SECRETO123".into() };
+        let d = format!("{c:?}");
+        assert!(!d.contains("SECRETO123"), "la clave se ha escapado: {d}");
+        assert!(d.contains("eric"), "el usuario sí puede verse: {d}");
+        assert!(d.contains("oculta"), "{d}");
+        // Una vacía se distingue de una puesta, sin decir cuál es.
+        let v = BooruCred { user: "eric".into(), key: String::new() };
+        assert!(format!("{v:?}").contains("vacía"));
+
+        assert!(c.completo());
+        assert!(!v.completo());
+        assert!(!BooruCred { user: "  ".into(), key: "K".into() }.completo());
+    }
+
+    /// `-v` vuelca las cabeceras ENTERAS, y ahí van la cookie de sesión y la
+    /// autorización básica —que es usuario y clave en base64—. Un registro
+    /// hecho para pegarse en un informe de fallo no puede llevarlas.
+    #[test]
+    fn el_registro_detallado_no_lleva_secretos() {
+        // La versión de dentro es parte del EJEMPLO, no un dato: lo que se
+        // prueba es que la línea del User-Agent sobreviva a la redacción.
+        let crudo = "\
+GET /posts.json HTTP/1.1
+User-Agent: TodoDownloader/1.8.5
+Cookie: cf_clearance=SECRETO_UNO; user_id=42
+Authorization: Basic ZXJpYzpTRUNSRVRPX0RPUw==
+api_key=SECRETO_TRES
+[urllib3][debug] https://danbooru.donmai.us:443 \"GET /posts.json?api_key=SECRETO_CINCO\"
+< HTTP/1.1 200 OK
+Set-Cookie: sesion=SECRETO_CUATRO; Path=/";
+        let r = redactar_verbose(crudo);
+        for secreto in [
+            "SECRETO_UNO",
+            "ZXJpYzpTRUNSRVRPX0RPUw",
+            "SECRETO_TRES",
+            "SECRETO_CUATRO",
+            "SECRETO_CINCO",
+            "user_id=42",
+        ] {
+            assert!(!r.contains(secreto), "se ha escapado «{secreto}»:\n{r}");
+        }
+        // Lo que SÍ tiene que sobrevivir: saber que iban, y todo lo demás.
+        assert!(r.contains("Cookie: <redactado>"), "{r}");
+        assert!(r.contains("Authorization: <redactado>"), "{r}");
+        // Sin forma de cabecera no se salva nada: `api_key=X` no tiene dos
+        // puntos, y cortar por ahí dejaba el secreto dentro del «nombre».
+        assert!(r.contains("<línea redactada>"), "{r}");
+        assert!(r.contains("GET /posts.json"), "{r}");
+        assert!(r.contains("200 OK"), "{r}");
+        assert!(r.contains("TodoDownloader/1.8.5"), "el nuestro es público: {r}");
+
+        // Un volcado largo se recorta por el FINAL, que es donde está el fallo.
+        let largo: String = (0..200).map(|i| format!("linea {i}\n")).collect();
+        let r = redactar_verbose(&largo);
+        assert!(r.lines().count() <= 60, "{}", r.lines().count());
+        assert!(r.contains("linea 199"), "se queda el final, no el principio");
+        assert!(!r.contains("linea 0\n"), "el principio se descarta");
+    }
+
+    /// El registro con `-v` lo dejó por escrito: `filter[campaign_id]=` vacío
+    /// y `400 Bad Request`. gallery-dl saca ese identificador de la URL de la
+    /// miniatura de la colección y solo de ahí; cuando no está, se rinde.
+    #[test]
+    fn una_coleccion_de_patreon_se_pide_por_la_via_del_creador() {
+        assert_eq!(
+            patreon_coleccion_id("https://www.patreon.com/collection/1696097?view=expanded"),
+            Some("1696097".into())
+        );
+        assert_eq!(patreon_coleccion_id("https://patreon.com/collection/123"), Some("123".into()));
+        assert_eq!(patreon_coleccion_id("https://www.patreon.com/c/SeibaArts"), None);
+        // Nunca por subcadena del host.
+        assert_eq!(patreon_coleccion_id("https://patreon.com.falso.example/collection/9"), None);
+
+        // La campaña, por la relación del JSON:API — donde le toca estar.
+        let j = r#"{"data":{"relationships":{"campaign":{"data":{"id":"98765"}}}}}"#;
+        assert_eq!(patreon_campaign_de_json(j), Some("98765".into()));
+        // O por la miniatura, que es la única vía que usa gallery-dl.
+        let j = r#"{"data":{"attributes":{"thumbnail":{"url":
+            "https://c10.patreonusercontent.com/4/patreon-media/campaign/4242/x.jpg"}}}}"#;
+        assert_eq!(patreon_campaign_de_json(j), Some("4242".into()));
+        // Sin ninguna de las dos se rinde: inventarse un número daría un 400
+        // igual, pero sin saber por qué.
+        assert_eq!(patreon_campaign_de_json(r#"{"data":{"attributes":{}}}"#), None);
+        assert_eq!(patreon_campaign_de_json("no soy json"), None);
+
+        // Y la URL resultante, que es la que sí lleva `filter[campaign_id]`.
+        let u = patreon_url_por_creador("98765", "1696097");
+        assert_eq!(u, "https://www.patreon.com/id:98765?filters[collection_id]=1696097");
+        // `id:` es lo que hace que el extractor de creadores no tenga que
+        // deducir nada, y `filters[...]` lo que convierte en filtro de la API.
+        assert!(u.contains("/id:"), "{u}");
+        assert!(u.contains("filters[collection_id]"), "{u}");
     }
 
     /// Un `.safetensors` de 300 MB no se parece a un vídeo, pero sin estar en

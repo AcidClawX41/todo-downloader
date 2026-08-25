@@ -273,6 +273,22 @@ pub fn requiere_sesion(html: &str) -> bool {
 /// Las líneas que empiezan por `#` son comentarios, salvo `#HttpOnly_`, que
 /// Chrome antepone al dominio y hay que quitar en vez de descartar la línea.
 pub fn cookie_header(cookies_txt: &str) -> Option<String> {
+    cookie_header_de(cookies_txt, "v2ph.com")
+}
+
+/// Cabecera `Cookie` con las cookies de UN dominio de un `cookies.txt`.
+///
+/// Se filtra por dominio y no se manda el archivo entero: un `cookies.txt`
+/// exportado de un navegador lleva la sesión de todos los sitios que se hayan
+/// visitado, y enviar la de Instagram a Danbooru no es un descuido menor, es
+/// entregarle a un tercero una credencial que no le corresponde.
+///
+/// El formato es el de Netscape: siete campos separados por tabulador, con el
+/// dominio en el primero y el nombre y el valor en los dos últimos. Las líneas
+/// `#HttpOnly_` llevan ese prefijo delante del dominio y también cuentan.
+pub fn cookie_header_de(cookies_txt: &str, dominio: &str) -> Option<String> {
+    let dominio = dominio.trim_start_matches('.').to_ascii_lowercase();
+    let sufijo = format!(".{dominio}");
     let mut pares: Vec<String> = Vec::new();
     for linea in cookies_txt.lines() {
         let linea = linea.strip_prefix("#HttpOnly_").unwrap_or(linea);
@@ -283,9 +299,11 @@ pub fn cookie_header(cookies_txt: &str) -> Option<String> {
         if campos.len() < 7 {
             continue;
         }
-        let dominio = campos[0].trim_start_matches('.').to_ascii_lowercase();
-        // Solo cookies de V2PH: no se filtra la sesión de otros sitios
-        if dominio != "v2ph.com" && !dominio.ends_with(".v2ph.com") {
+        let d = campos[0].trim_start_matches('.').to_ascii_lowercase();
+        // Coincidencia por dominio ENTERO o por subdominio suyo. Nunca por
+        // subcadena: `danbooru.donmai.us.atacante.example` contiene el dominio
+        // y no es él, y ese descuido ya costó un fallo en el enrutado.
+        if d != dominio && !d.ends_with(&sufijo) {
             continue;
         }
         let (nombre, valor) = (campos[5].trim(), campos[6].trim());
@@ -299,6 +317,100 @@ pub fn cookie_header(cookies_txt: &str) -> Option<String> {
     } else {
         Some(pares.join("; "))
     }
+}
+
+// ========================= La cookie de Cloudflare =========================
+//
+// «Se manda tu sesión» y «la sesión sirve» no son lo mismo, y confundirlos
+// producía el peor aviso posible: un mensaje EN VERDE diciendo que todo está
+// en orden, junto a un 403 del sitio. Un cookies.txt puede traer treinta
+// cookies de aibooru.online y ninguna ser `cf_clearance`, o traerla caducada
+// —dura del orden de media hora—, y en los dos casos el resultado es el mismo
+// 403 sin ninguna pista.
+//
+// Esto se puede comprobar sin pedir nada a nadie: el nombre está en el
+// archivo y la caducidad también, en el quinto campo del formato Netscape.
+
+/// Qué hay en un `cookies.txt` sobre la cookie de Cloudflare de un dominio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clearance {
+    /// Está y le queda vida. `queda` son los segundos que faltan.
+    Vigente { queda: i64 },
+    /// Está pero venció. `hace` son los segundos que lleva caducada.
+    Caducada { hace: i64 },
+    /// Está, y no se sabe hasta cuándo.
+    ///
+    /// Es lo único que se puede decir de la sesión del navegador: de ahí llega
+    /// una cabecera `Cookie` ya montada, sin las fechas del archivo. Es una
+    /// variante propia y no un `Vigente` con la fecha a -1, porque un
+    /// centinela así se acaba comparando con `<` en algún sitio.
+    Presente,
+    /// Hay cookies de ese dominio, pero ninguna se llama `cf_clearance`.
+    Ausente,
+    /// El archivo no trae ni una cookie de ese dominio.
+    SinDominio,
+}
+
+/// Busca `cf_clearance` para un dominio dentro de un `cookies.txt`.
+///
+/// `ahora` es la hora en segundos desde 1970. Se pasa como argumento a
+/// propósito: así la función es pura y su prueba no depende de cuándo se
+/// ejecute.
+///
+/// El emparejado de dominios es el mismo que el de `cookie_header_de`, por la
+/// misma razón: nunca por subcadena.
+pub fn clearance_de(cookies_txt: &str, dominio: &str, ahora: i64) -> Clearance {
+    let dominio = dominio.trim_start_matches('.').to_ascii_lowercase();
+    let sufijo = format!(".{dominio}");
+    let mut habia_dominio = false;
+    // Si el archivo trae varias —pasa al exportar tras revisitar el sitio— se
+    // queda la que más tarde caduca: es la que el navegador usaría.
+    let mut mejor: Option<i64> = None;
+    for linea in cookies_txt.lines() {
+        let linea = linea.strip_prefix("#HttpOnly_").unwrap_or(linea);
+        if linea.starts_with('#') || linea.trim().is_empty() {
+            continue;
+        }
+        let campos: Vec<&str> = linea.split('\t').collect();
+        if campos.len() < 7 {
+            continue;
+        }
+        let d = campos[0].trim_start_matches('.').to_ascii_lowercase();
+        if d != dominio && !d.ends_with(&sufijo) {
+            continue;
+        }
+        habia_dominio = true;
+        if !campos[5].trim().eq_ignore_ascii_case("cf_clearance") {
+            continue;
+        }
+        // Una caducidad de 0 significa «de sesión»: el navegador la borra al
+        // cerrarse, pero mientras exista vale. No se puede fechar, así que se
+        // le da el beneficio de la duda.
+        let exp: i64 = campos[4].trim().parse().unwrap_or(0);
+        let exp = if exp == 0 { i64::MAX } else { exp };
+        mejor = Some(mejor.map_or(exp, |m: i64| m.max(exp)));
+    }
+    match (mejor, habia_dominio) {
+        (Some(exp), _) if exp > ahora => Clearance::Vigente {
+            queda: exp.saturating_sub(ahora),
+        },
+        (Some(exp), _) => Clearance::Caducada {
+            hace: ahora.saturating_sub(exp),
+        },
+        (None, true) => Clearance::Ausente,
+        (None, false) => Clearance::SinDominio,
+    }
+}
+
+/// ¿Lleva `cf_clearance` una cabecera `Cookie` ya montada?
+///
+/// Para el camino del navegador, donde no hay archivo que leer y por tanto no
+/// hay caducidad que mirar: solo se puede decir si está o no está.
+pub fn header_tiene_clearance(header: &str) -> bool {
+    header
+        .split(';')
+        .filter_map(|p| p.split_once('='))
+        .any(|(n, _)| n.trim().eq_ignore_ascii_case("cf_clearance"))
 }
 
 // ============================ Formulario de acceso ============================
@@ -705,6 +817,118 @@ mod tests {
         assert_eq!(v[0].cover, "https://cdn.v2ph.com/album/aaa.jpg");
         assert_eq!(v[1].id, "A-2");
         assert_eq!(last_page(html), 703);
+    }
+
+
+    /// Un `cookies.txt` de navegador lleva la sesión de TODOS los sitios que
+    /// se hayan visitado. Filtrar por dominio no es higiene: es no entregarle
+    /// a Danbooru la sesión de Instagram.
+    #[test]
+    fn el_cookies_txt_se_filtra_por_dominio() {
+        let txt = concat!(
+            "# Netscape HTTP Cookie File\n",
+            ".v2ph.com\tTRUE\t/\tFALSE\t0\tfrontend-rmt\tabc\n",
+            "#HttpOnly_.danbooru.donmai.us\tTRUE\t/\tTRUE\t0\tcf_clearance\tXYZ\n",
+            "danbooru.donmai.us\tTRUE\t/\tFALSE\t0\t_danbooru_session\tSSS\n",
+            ".instagram.com\tTRUE\t/\tFALSE\t0\tsessionid\tNO_DEBE_SALIR\n",
+            "danbooru.donmai.us.atacante.example\tTRUE\t/\tFALSE\t0\tfalso\tNO\n",
+            "basura sin tabuladores\n",
+        );
+
+        let d = cookie_header_de(txt, "danbooru.donmai.us").unwrap();
+        assert!(d.contains("cf_clearance=XYZ"), "{d}");
+        assert!(d.contains("_danbooru_session=SSS"), "{d}");
+        // La sesión de otro sitio NO viaja.
+        assert!(!d.contains("sessionid"), "{d}");
+        // Y un impostor que CONTIENE el dominio tampoco cuela.
+        assert!(!d.contains("falso"), "{d}");
+
+        // El envoltorio de V2PH sigue dando lo suyo y solo lo suyo.
+        let v = cookie_header(txt).unwrap();
+        assert_eq!(v, "frontend-rmt=abc");
+
+        // Sin cookies de ese dominio, nada que mandar.
+        assert!(cookie_header_de(txt, "aibooru.online").is_none());
+        assert!(cookie_header_de("", "danbooru.donmai.us").is_none());
+    }
+
+    /// Un verde que miente es peor que un ámbar que avisa.
+    ///
+    /// El caso real: AIBooru abre en el navegador, la aplicación recibe 403, y
+    /// el panel decía «se manda tu sesión y tu User-Agent» en verde. Las dos
+    /// cosas eran ciertas y aun así el aviso era falso, porque dentro de esa
+    /// sesión no iba la única cookie que el 403 pedía.
+    #[test]
+    fn se_sabe_si_la_cookie_de_cloudflare_esta_y_si_sigue_viva() {
+        let ahora = 1_000_000i64;
+        let linea = |dom: &str, exp: i64, n: &str, v: &str| {
+            format!("{dom}@TRUE@/@TRUE@{exp}@{n}@{v}").replace('@', "\t")
+        };
+
+        // Vigente: media hora por delante.
+        let txt = linea(".aibooru.online", ahora + 1800, "cf_clearance", "abc");
+        assert_eq!(
+            clearance_de(&txt, "aibooru.online", ahora),
+            Clearance::Vigente { queda: 1800 }
+        );
+
+        // Caducada hace diez minutos: es EXACTAMENTE lo que produce el 403 con
+        // el archivo lleno de cookies.
+        let txt = linea(".aibooru.online", ahora - 600, "cf_clearance", "abc");
+        assert_eq!(
+            clearance_de(&txt, "aibooru.online", ahora),
+            Clearance::Caducada { hace: 600 }
+        );
+
+        // Hay cookies del sitio, pero ninguna es la que hace falta.
+        let txt = format!(
+            "{}\n{}",
+            linea(".aibooru.online", ahora + 9999, "user_id", "42"),
+            linea(".aibooru.online", ahora + 9999, "pass_hash", "x")
+        );
+        assert_eq!(clearance_de(&txt, "aibooru.online", ahora), Clearance::Ausente);
+
+        // Ni una cookie de ese dominio: el archivo es de otro sitio.
+        let txt = linea(".danbooru.donmai.us", ahora + 9999, "cf_clearance", "abc");
+        assert_eq!(clearance_de(&txt, "aibooru.online", ahora), Clearance::SinDominio);
+        // Y no se cruzan: la de Danbooru sí vale para Danbooru.
+        assert!(matches!(
+            clearance_de(&txt, "danbooru.donmai.us", ahora),
+            Clearance::Vigente { .. }
+        ));
+
+        // Un impostor que CONTIENE el dominio no cuenta, igual que en el resto
+        // del módulo.
+        let txt = linea("aibooru.online.atacante.example", ahora + 9999, "cf_clearance", "x");
+        assert_eq!(clearance_de(&txt, "aibooru.online", ahora), Clearance::SinDominio);
+
+        // Duplicadas: manda la que más tarde caduca, que es la que usaría el
+        // navegador. Con la otra regla, revisitar el sitio y reexportar habría
+        // seguido dando «caducada».
+        let txt = format!(
+            "{}\n{}",
+            linea(".aibooru.online", ahora - 600, "cf_clearance", "vieja"),
+            linea(".aibooru.online", ahora + 1200, "cf_clearance", "nueva")
+        );
+        assert!(matches!(
+            clearance_de(&txt, "aibooru.online", ahora),
+            Clearance::Vigente { queda: 1200 }
+        ));
+
+        // Caducidad 0 = cookie de sesión. No se puede fechar, así que vale.
+        let txt = linea(".aibooru.online", 0, "cf_clearance", "abc");
+        assert!(matches!(
+            clearance_de(&txt, "aibooru.online", ahora),
+            Clearance::Vigente { .. }
+        ));
+
+        // Y sobre una cabecera ya montada, que es lo único que da el navegador.
+        assert!(header_tiene_clearance("a=1; cf_clearance=xyz; b=2"));
+        assert!(header_tiene_clearance("CF_Clearance=xyz"));
+        assert!(!header_tiene_clearance("user_id=42; pass_hash=x"));
+        assert!(!header_tiene_clearance(""));
+        // `no_cf_clearance` NO es `cf_clearance`.
+        assert!(!header_tiene_clearance("no_cf_clearance=x"));
     }
 
     #[test]

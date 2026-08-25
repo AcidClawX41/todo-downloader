@@ -32,7 +32,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 
 **Also in v1.8.0:**
 
-- **Discover artists** — type a character and the app answers with the *profiles that draw them*, ranked by how often, with sample thumbnails and one click to the queue. It builds no index: it reads the `source` field of booru posts, which points back at the artist's original post on X, Pixiv, Patreon or Fanbox. Measured on 300 posts, 299 carry one.
+- **Discover artists** — type a character and the app answers with the *profiles that draw them*, ranked by how often, with sample thumbnails and one click to the queue. It builds no index: it queries **four boorus** live and merges what they know. The Moebooru pair (yande.re, Konachan) supply the `source` field, which points back at the artist's original post on X, Pixiv, Patreon or Fanbox — measured on 300 posts, 299 carry one. The Danbooru pair supply the artist's *name*, which unlocks their artist database and with it the Chinese networks; **AIBooru is the only one of the four that catalogues AI-generated work**, so without it those artists cannot appear at all.
 - **One artist, all their houses** — `siino13` on Fanbox and `Siino_13` on X are merged into a single entry with both addresses. When a Fanbox needs a plan you do not have, their X is right underneath.
 - **Patreon, Fanbox and Pixiv** — creators, single posts, collections, and `patreon.com/home` for every subscription at once. Fanbox is browsed with previews; Pixiv is downloaded whole, because its extractor needs an OAuth token rather than cookies.
 - **X videos have thumbnails again** in the profile grid, paired with their poster instead of shown as a separate file.
@@ -59,6 +59,118 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Preview grids for Instagram, Weibo, TikTok, Bilibili and V2PH** — analyze a profile, see the actual photos and video covers, and queue only the ones you want.
 - **Native V2PH extractor** — full albums and whole model profiles, in original quality, with no external engine, plus a browser-side script for when the site pushes back.
 - **Sign-in from Settings, native Firefox cookie reading and a User-Agent field** — three ways to give the application a session, and honest documentation of what each one cannot do.
+
+## What's new in v1.8.8
+
+A release about **telling the truth when something fails**. Every fix below started
+as a silent symptom — a blank grid, an empty list, a green "all good" next to a 403
+— and the work was as much about making the failure legible as about repairing it.
+
+### Booru sites: identify, don't impersonate
+
+Danbooru's API help asks clients to send an identifying `User-Agent` and says, in
+as many words, *don't impersonate browsers*. Until now they were sent a Chrome
+`User-Agent` over Python's TLS fingerprint — not a convincing disguise but a
+contradiction. Danbooru, AIBooru and e621 now receive
+`TodoDownloader/<version> (user <name>)` and **no browser cookies at all**.
+
+That last part was the actual bug. A stale `cf_clearance` in a `cookies.txt` is
+worse than no cookie: it presents an invalid credential and earns a rejection,
+where a clean request walks in. The Linux build listed both sites fine *because*
+no cookies were configured there.
+
+The same rule applies to their CDNs. `cdn.donmai.us` was returning **403 on every
+thumbnail** — on Windows and Linux alike — for exactly this reason.
+
+### Per-site API keys
+
+*Settings → Booru accounts* now holds one credential pair **per site** instead of
+one global pair, with a direct link to each site's key page. Danbooru, AIBooru and
+e621 give one away free; it lifts the anonymous pagination and tags-per-search
+caps. Existing Gelbooru credentials migrate automatically on first run.
+
+Keys go to a temporary config file that gallery-dl reads and that is deleted
+afterwards — never to the command line, where any process listing would expose
+them. `BooruCred`'s `Debug` prints `<hidden>` in place of the value, and a unit
+test asserts it.
+
+### Layered diagnostics
+
+Two buttons that turn "it didn't work" into evidence:
+
+- **📡 Test the connection** resolves the host, then tries **IPv4 and IPv6
+  separately**, then TLS, then HTTP — so DNS filtering, a dropped port, a
+  certificate problem and an HTTP rejection stop looking identical.
+- **🔍 Retry with details** re-runs the same request with `gallery-dl -v` and
+  shows its HTTP log. Cookies and `Authorization` are redacted to their header
+  name: you can see *that* they were sent, never their value. Safe to paste into
+  a bug report.
+
+Both read the subprocess **as it writes**. An earlier attempt used `output()`,
+which waits for the process to exit — and so discarded the very log it existed to
+collect whenever the thing hung.
+
+### Force IPv4
+
+*Settings → Network*, off by default. Cloudflare-fronted sites publish IPv6 and
+Windows tries it first; with no IPv6 route the connection times out **without ever
+reaching the site**, which is why the failure carried no error at all. Browsers
+hide this by racing both families (RFC 8305); `requests` and `reqwest` do not.
+
+### Patreon collections
+
+`patreon.com/collection/<id>` returned an empty list with exit code 0. gallery-dl
+derives the campaign id from the collection's *thumbnail URL* and sends
+`filter[campaign_id]=` empty when that fails, which Patreon answers with `400`.
+
+Collections are now resolved through the **creator route** instead: the campaign id
+is read from `/api/collection/<id>` — from the JSON:API relationship first, falling
+back to any `/campaign/<n>/` in the body — and the request is reissued as
+`patreon.com/id:<campaign>?filters[collection_id]=<id>`, which carries the filter
+gallery-dl left blank.
+
+### Thumbnails
+
+- **Previews no longer download the original.** `thumbnail_url` was missing from
+  the candidate keys, and Patreon nests its cover inside a `thumbnail` object — so
+  a multi-megabyte PNG was fetched to paint a 180 px cell. With 127 items that is
+  the difference between seconds and minutes.
+- **Thumbnail events now carry the listing epoch.** They only carried an index, and
+  an index means nothing on its own: a preview arriving late from a previous
+  listing was painted over item 7 of the new one. The result was a grid with one
+  creator's dates and another's images.
+- A failed thumbnail **says why** — host and reason — instead of leaving a blank
+  cell. Each request has its own 8 s deadline.
+
+### Artist discovery now reads four boorus
+
+The artist base was two hard-written blocks — one for yande.re, one for the
+Danbooru pair. It is now **two tables**, `BOORUS_MOEBOORU` and `BOORUS_DANBOORU`,
+for the same reason `booru::SITES` is one: adding a source has to be one line, not
+forty. Konachan came in that way, without touching the parser.
+
+The artist *profile* lookup was also pinned to `danbooru.donmai.us`. It now asks
+Danbooru first and **AIBooru second**, stopping at the first that answers — which
+matters because an AI artist *cannot* be in Danbooru's database, so those rows
+came back with a name and no links at all. Ordinary artists cost no extra request.
+The Moebooru pair are deliberately not queried for profiles: they expose a
+`source` per image, not a record per artist.
+
+### Smaller things
+
+- A Weibo or Bilibili **search** URL pasted into *Profile* now explains that a
+  search is not a profile, instead of `Unsupported URL`. No extractor can
+  enumerate one.
+- Examples grew to **70 booru tags** and **57 Chinese names** for Weibo and
+  Bilibili searches, sourced from Danbooru's wiki and 萌娘百科 rather than from
+  memory. Two ordering rules are documented in the code: Danbooru writes Japanese
+  names surname-first and Western names as written, which is why
+  `alisa_mikhailovna_kujou` is not `kujou_alisa_mikhailovna`. A name that is
+  *correct* is not necessarily the one people type — Alya's full transliterated
+  name returns nothing on Weibo, and that measurement is recorded next to the
+  entry so nobody re-adds it from an encyclopedia.
+
+---
 
 ## Features
 
@@ -87,7 +199,11 @@ A dedicated **Booru** tab for Danbooru, Safebooru, AIBooru, yande.re, Konachan, 
 
 Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danbooru, Gelbooru and Moebooru all expose different, shifting APIs; gallery-dl already maintains an extractor per site, so reimplementing them in Rust would be permanent maintenance for no gain. Parsing is deliberately tolerant — field names differ per site (`image_width` vs `width`, some booru APIs return integers **as strings**, e621 nests them under `file`).
 
-> **Gelbooru requires API credentials** (`AuthRequired` without them). Add them in *Settings → Booru accounts*; the key field is masked. Everything else works anonymously.
+> **Gelbooru requires API credentials** (`AuthRequired` without them). Add them in *Settings → Booru accounts*; the key field is masked.
+
+**Danbooru, AIBooru and e621 are asked to their faces, not impersonated.** Danbooru's own API help asks clients to identify themselves and says, in as many words, *don't impersonate browsers*. Until v1.8.5 the app sent them a Chrome User-Agent over Python's TLS fingerprint — not a convincing disguise but a contradiction, and plausibly the reason Cloudflare answered 403 to a request that worked fine in a browser. It now sends `TodoDownloader/<version>` with your username, and no browser cookies at all.
+
+Those three give out a **free API key** on your profile page. It is optional, but with one the anonymous page cap and tags-per-search cap disappear, and there is no `cf_clearance` cookie to re-export every half hour. Keys go to a temporary config file, never to the command line, and never appear in diagnostics.
 
 ### Hugging Face model repositories
 
