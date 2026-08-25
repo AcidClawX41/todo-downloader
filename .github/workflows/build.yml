@@ -196,6 +196,18 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $V"
             exit 1
           fi
+          # The licence text shown by the installer carries the version on its
+          # third line, and nothing regenerates it, so it goes stale silently.
+          # It already did once: an installer went out whose terms still said
+          # 1.8.5. Same treatment as the tag — fail here rather than build an
+          # installer that contradicts its own title bar.
+          for T in installer/terms-en.txt installer/terms-es.txt; do
+            if ! grep -qE "^Versi(o|ó)n? $V " "$T"; then
+              echo "::error::$T does not state version $V on its version line"
+              head -3 "$T"
+              exit 1
+            fi
+          done
 
       # NON-BLOCKING on purpose. The portable executable is the primary
       # artifact and must ship even if the installer cannot be built: a

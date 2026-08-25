@@ -11995,7 +11995,7 @@ impl App {
             ui.set_width(ui.available_width().min(720.0));
             ui.label(RichText::new(t(lang, "support.title")).size(11.0).color(MUTED()).strong());
             ui.add_space(4.0);
-            ui.label(RichText::new(t(lang, "tip.help")).size(13.0).color(TEXT()));
+            ui.label(RichText::new(t(lang, "support.body")).size(13.0).color(TEXT()));
             ui.add_space(10.0);
             if links.is_empty() {
                 // Ningún enlace configurado todavía: se explica en vez de
@@ -12764,6 +12764,10 @@ impl App {
                     }
                 });
                 ui.add_space(8.0);
+                ui.label(
+                    RichText::new(t(lang, "torrent.limits_label")).size(11.0).color(MUTED()).strong(),
+                );
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("↓ {}", t(lang, "torrent.down_limit"))).size(12.0).color(MUTED()));
                     ui.add(egui::DragValue::new(&mut self.settings.torrent_down_kbps).suffix(" KiB/s").range(0..=1_000_000));

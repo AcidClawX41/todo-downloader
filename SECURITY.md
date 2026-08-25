@@ -1,6 +1,6 @@
 # Security — Todo Downloader
 
-Summary of the security audit and the application's threat model. Last reviewed for v1.7.0.
+Summary of the security audit and the application's threat model. Last reviewed for v1.8.8.
 
 ## Communication channels
 
@@ -41,7 +41,7 @@ unit test asserts exactly that.
 
 Where a site publishes a client policy, the application follows it rather than
 working around it. Danbooru asks clients not to impersonate browsers; since
-v1.8.6 it is sent an identifying `TodoDownloader/<version>` User-Agent and no
+v1.8.8 it is sent an identifying `TodoDownloader/<version>` User-Agent and no
 browser cookies. See ADR-007.
 
 **Reading browser cookies**: the native engines can read Firefox's

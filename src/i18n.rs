@@ -260,10 +260,6 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "status.done" => entry!("Completado", "Completed"),
         "status.error" => entry!("Error", "Error"),
         "label.gallery" => entry!("(galería completa)", "(full gallery)"),
-        "tip.error_hint" => entry!(
-            "Pasa el ratón para ver el mensaje completo",
-            "Hover to see the full message"
-        ),
 
         // ---------- Tarjetas de estadísticas ----------
         "stat.total" => entry!("EN TOTAL", "TOTAL"),
@@ -752,10 +748,6 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Support is completely optional, and no features are locked behind donations."
         ),
         "tip.thanks" => entry!("¡Gracias! ;)", "Thank you! ;)"),
-        "tip.help" => entry!(
-            "Ayuda a mantener mis proyectos de código abierto.",
-            "Help maintain my open-source projects."
-        ),
         "tip.no_links" => entry!(
             "Aún no hay enlaces configurados: edita KOFI_URL, PAYPAL_URL y SPONSORS_URL al principio de src/main.rs.",
             "No links configured yet: edit KOFI_URL, PAYPAL_URL and SPONSORS_URL at the top of src/main.rs."
