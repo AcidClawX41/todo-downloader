@@ -280,3 +280,42 @@ jobs:
         with:
           files: artifacts/*
           draft: false
+
+      # VirusTotal report for every published binary.
+      #
+      # WHY. The binaries are not code-signed, so SmartScreen and some
+      # antivirus products warn about them. That warning is reputation-based,
+      # not a detection, but "trust me" is not an answer — a public scan link
+      # next to the download is. Together with the .sha256 files already
+      # published, anyone can verify that what they downloaded is what the CI
+      # built and what VirusTotal looked at.
+      #
+      # `update_release_body: true` appends the analysis links to the release
+      # notes on its own, so this needs no manual step per release.
+      #
+      # NON-BLOCKING, like the installer step above: VirusTotal being slow or
+      # rate-limited must never fail a release whose binaries are already
+      # built and attached.
+      #
+      # `request_rate: 4` is what the free public API allows.
+      # The .sha256 files are deliberately NOT sent: scanning a text file with
+      # a hash in it wastes a slot in that rate limit and tells nobody
+      # anything.
+      - name: Scan the published binaries with VirusTotal
+        if: startsWith(github.ref, 'refs/tags/v')
+        # Sin secreto configurado, el paso falla y `continue-on-error` se lo
+        # traga: la release sale igual. Comprobar `env.VT_API_KEY` en el `if`
+        # NO funciona — el `env` de un paso no está disponible en su propia
+        # condición.
+        continue-on-error: true
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          update_release_body: true
+          request_rate: 4
+          files: |
+            artifacts/todo-downloader-windows-x86_64.exe
+            artifacts/todo-downloader-linux-x86_64
+            artifacts/todo-downloader-macos-aarch64
+            artifacts/todo-downloader-macos-x86_64
+            artifacts/todo-downloader-setup-*.exe

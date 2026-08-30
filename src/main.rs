@@ -6815,7 +6815,13 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "video".into());
-    let tmpl = dir.join(format!("{stem}.%(ext)s"));
+    // `%` ESCAPADO. `-o` no recibe un nombre: recibe una PLANTILLA, y en ella
+    // `%(campo)s` es una sustitución. Un título con un porcentaje —«50% OFF»,
+    // «100%»— hace que yt-dlp intente interpretar lo que venga detrás como un
+    // campo suyo. `sanitize` no lo quita, y con razón: no es un carácter
+    // prohibido por Windows, es un carácter con significado para el motor. Son
+    // dos problemas distintos y se arreglan en sitios distintos.
+    let tmpl = dir.join(format!("{}.%(ext)s", stem.replace('%', "%%")));
 
     // Argumentos base, con plantilla de progreso legible por la app
     // Calidad adaptativa: con ffmpeg se puede fusionar vídeo y audio por
@@ -6828,6 +6834,25 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         "--no-playlist".into(),
         "-o".into(), tmpl.to_string_lossy().into_owned(),
         // Progreso en streaming, una línea por actualización
+        // SILENCIO EN stdout, PROGRESO APARTE.
+        //
+        // Sin `--quiet`, yt-dlp escribe «[download] Destination: <ruta>» por
+        // la salida estándar. Si esa ruta lleva caracteres que la página de
+        // códigos heredada no sabe representar —chino, kanji, emoji— el
+        // `TextIOWrapper` revienta con `OSError: [Errno 22] Invalid argument`
+        // y el vídeo falla por su TÍTULO, no por el vídeo.
+        //
+        // `utf8_env` ya fija `PYTHONIOENCODING`, pero un yt-dlp empaquetado
+        // con PyInstaller no siempre lo respeta —el error observado seguía
+        // diciendo `encoding='cp1252'` con esas variables puestas—. Callar la
+        // salida quita el problema de raíz en vez de confiar en que el otro
+        // lado obedezca.
+        //
+        // `--progress` está documentado como «muestra el progreso INCLUSO en
+        // modo silencioso», así que la plantilla `TDPROG|` sigue llegando. Y
+        // los errores van por stderr, que no se toca: el diagnóstico se
+        // conserva entero.
+        "--quiet".into(),
         "--newline".into(),
         "--progress".into(),
         "--progress-template".into(),
@@ -6926,7 +6951,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
             Ok(r) if r.ok => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Done));
             }
-            Ok(r) => report_ytdlp_error(spec.id, &err, r.stderr, tx),
+            Ok(r) => report_ytdlp_error(spec.id, &err, r.stderr, &tmpl.to_string_lossy(), tx),
             Err(e) => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
             }
@@ -6934,7 +6959,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         return;
     }
 
-    report_ytdlp_error(spec.id, "", err, tx);
+    report_ytdlp_error(spec.id, "", err, &tmpl.to_string_lossy(), tx);
 }
 
 /// Reporta un fallo de yt-dlp conservando la salida completa.
@@ -6945,7 +6970,20 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
 ///
 /// `first` es la salida del primer intento cuando hubo dos: sin ella se
 /// perdería la razón por la que se decidió reintentar.
-fn report_ytdlp_error(id: u64, first: &str, last_out: String, tx: &UnboundedSender<Ev>) {
+/// El fallo, con el NOMBRE DE SALIDA que se intentó.
+///
+/// Sin él, un `[Errno 22] Invalid argument` no dice si el problema es la
+/// longitud de la ruta, un carácter que el sistema no admite o la codificación
+/// de la consola: los tres dan el mismo error y ninguno menciona el archivo.
+/// Costó una tarde entera de suposiciones averiguar cuál era. No es un secreto
+/// —es una ruta de descarga del propio usuario— así que se enseña entera.
+fn report_ytdlp_error(
+    id: u64,
+    first: &str,
+    last_out: String,
+    salida: &str,
+    tx: &UnboundedSender<Ev>,
+) {
     let brief = last_out
         .lines()
         .rev()
@@ -6959,6 +6997,11 @@ fn report_ytdlp_error(id: u64, first: &str, last_out: String, tx: &UnboundedSend
     } else {
         format!("--- intento 1 ---\n{first}\n--- intento 2 ---\n{last_out}")
     };
+    let full = format!(
+        "{full}\n\n{}\n  {salida}\n  ({} caracteres)",
+        msg_lang("Nombre de salida que se intentó:", "Output name it tried:"),
+        salida.chars().count()
+    );
     let _ = tx.send(Ev::ErrorDetail(id, full));
     let _ = tx.send(Ev::Status(id, Status::Error(short)));
 }
