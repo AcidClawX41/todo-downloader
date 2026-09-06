@@ -159,6 +159,43 @@ fn anidado(meta: &Value, rutas: &[(&str, &str)]) -> String {
     String::new()
 }
 
+/// Un texto a DOS niveles de profundidad: `file.image_urls.thumbnail`.
+///
+/// Patreon lo necesita. Su extractor mete en `file` el archivo concreto que se
+/// está emitiendo, y ahí dentro `image_urls` trae diez variantes de tamaño.
+/// El campo `image` del post, en cambio, es la PORTADA: la misma para los
+/// treinta y cinco archivos de la publicación. Leer esa portada es lo que
+/// hacía que la rejilla enseñara la misma imagen repetida.
+fn anidado2(meta: &Value, raiz: &str, medio: &str, hojas: &[&str]) -> String {
+    let Some(obj) = meta.get(raiz).and_then(|r| r.get(medio)) else {
+        return String::new();
+    };
+    for h in hojas {
+        if let Some(x) = obj.get(*h).and_then(|x| x.as_str()) {
+            if !x.trim().is_empty() {
+                return x.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Número a tres niveles: `file.metadata.dimensions.w`.
+///
+/// Es la resolución REAL del archivo. Sin esto, Patreon mostraba 620×749 en
+/// todas las fichas —el tamaño de la portada— cuando los originales son de
+/// varios miles de píxeles.
+fn num3(meta: &Value, ruta: [&str; 3], hoja: &str) -> u64 {
+    let mut cur = meta;
+    for paso in ruta {
+        match cur.get(paso) {
+            Some(v) => cur = v,
+            None => return 0,
+        }
+    }
+    num(cur, &[hoja])
+}
+
 /// Primera cadena no vacía de entre varias claves posibles.
 fn text(meta: &Value, keys: &[&str]) -> String {
     for k in keys {
@@ -178,6 +215,12 @@ fn text(meta: &Value, keys: &[&str]) -> String {
 }
 
 const VIDEO_EXTS: &[&str] = &["mp4", "mov", "webm", "mkv", "m4v", "avi"];
+
+/// ¿Esa extensión es de vídeo? Lo usa el resolutor nativo de Patreon, que
+/// construye sus fichas sin pasar por `parse_listing`.
+pub fn es_extension_de_video(ext: &str) -> bool {
+    VIDEO_EXTS.contains(&ext)
+}
 
 /// Comando de listado: metadatos, sin descargar, paginado.
 ///
@@ -319,8 +362,17 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
             url: url.to_string(),
             filename: text(meta, &["filename", "name"]),
             ext,
-            width: num(meta, &["width", "image_width"]) as u32,
-            height: num(meta, &["height", "image_height"]) as u32,
+            // La resolución del ARCHIVO, no la de la portada del post.
+            // Patreon la publica en `file.metadata.dimensions`; el resto de
+            // extractores la dan plana y siguen entrando por la segunda vía.
+            width: {
+                let w = num3(meta, ["file", "metadata", "dimensions"], "w");
+                if w > 0 { w as u32 } else { num(meta, &["width", "image_width"]) as u32 }
+            },
+            height: {
+                let h = num3(meta, ["file", "metadata", "dimensions"], "h");
+                if h > 0 { h as u32 } else { num(meta, &["height", "image_height"]) as u32 }
+            },
             filesize: num(meta, &["filesize", "size", "file_size"]),
             is_video,
             post_id: text(
@@ -347,18 +399,39 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
                 // bajando el PNG original, de varios megas, para un recuadro
                 // de 180 píxeles. Con ciento veintisiete elementos, eso es la
                 // diferencia entre segundos y minutos.
-                let t = text(
+                // PRIMERO, la miniatura DEL ARCHIVO.
+                //
+                // En Patreon esto es lo único que distingue una ficha de otra:
+                // `image` (el campo de más abajo) es la portada del post y sale
+                // idéntica en los treinta y cinco archivos que contiene, así
+                // que la rejilla enseñaba la misma imagen repetida mientras las
+                // descargas —que usan otro campo— sí eran las correctas.
+                //
+                // Se pide de menor a mayor: 180 px basta para el recuadro y
+                // `original` sería bajarse el PNG entero para previsualizar.
+                let del_archivo = anidado2(
                     meta,
-                    &[
-                        "display_url",
-                        "thumbnail_url",
-                        "thumbnail",
-                        "preview_url",
-                        "thumb",
-                        "cover",
-                        "image",
-                    ],
+                    "file",
+                    "image_urls",
+                    &["thumbnail", "thumbnail_small", "default_small", "thumbnail_large", "default"],
                 );
+
+                let t = if !del_archivo.is_empty() {
+                    del_archivo
+                } else {
+                    text(
+                        meta,
+                        &[
+                            "display_url",
+                            "thumbnail_url",
+                            "thumbnail",
+                            "preview_url",
+                            "thumb",
+                            "cover",
+                            "image",
+                        ],
+                    )
+                };
                 // Y si viene anidado, se entra a buscarlo.
                 let t = if t.is_empty() {
                     anidado(meta, &[("thumbnail", "url"), ("image", "thumb_url"), ("image", "url")])
@@ -755,5 +828,76 @@ mod tests {
         // Sin nada que rascar, cadena vacía y el que llama decide.
         let vacio: Value = serde_json::from_str(r#"{"thumbnail":{}}"#).unwrap();
         assert_eq!(anidado(&vacio, &[("thumbnail", "url")]), "");
+    }
+}
+
+#[cfg(test)]
+mod tests_patreon {
+    use super::*;
+
+    /// JSON con la forma REAL que emite gallery-dl para Patreon: el post trae
+    /// `image` (la portada, 620 px de ancho, la misma para todos los archivos)
+    /// y `file` con el archivo concreto. Comprobado contra la API el 2026-09-06.
+    fn entrada_patreon(media_id: &str, w: u64, h: u64) -> String {
+        format!(
+            r#"[[3, "https://c10.patreonusercontent.com/original/{media_id}.png", {{
+                "id": 166592250,
+                "title": "Sorry I was gone",
+                "extension": "png",
+                "image": {{
+                    "url": "https://c10.patreonusercontent.com/portada/eyJ3Ijo2MjB9/1.png",
+                    "thumb_url": "https://c10.patreonusercontent.com/portada/thumb/1.png",
+                    "width": 620,
+                    "height": 749
+                }},
+                "file": {{
+                    "file_name": "{media_id}.png",
+                    "download_url": "https://c10.patreonusercontent.com/original/{media_id}.png",
+                    "image_urls": {{
+                        "original": "https://c10.patreonusercontent.com/original/{media_id}.png",
+                        "thumbnail": "https://c10.patreonusercontent.com/thumb/{media_id}.png",
+                        "default_small": "https://c10.patreonusercontent.com/small/{media_id}.png"
+                    }},
+                    "metadata": {{ "dimensions": {{ "w": {w}, "h": {h} }} }}
+                }}
+            }}]]"#
+        )
+    }
+
+    #[test]
+    fn cada_archivo_de_patreon_trae_su_propia_miniatura() {
+        // El bug: se leía `image.thumb_url` —la portada del post— y las 35
+        // fichas de una publicación salían con la MISMA imagen, mientras que
+        // las descargas sí eran distintas.
+        let a = parse_listing(&entrada_patreon("111", 3584, 4800)).unwrap();
+        let b = parse_listing(&entrada_patreon("222", 2000, 3000)).unwrap();
+
+        assert_eq!(a.items[0].thumb_url, "https://c10.patreonusercontent.com/thumb/111.png");
+        assert_eq!(b.items[0].thumb_url, "https://c10.patreonusercontent.com/thumb/222.png");
+        assert_ne!(a.items[0].thumb_url, b.items[0].thumb_url);
+        // Y en ningún caso la portada
+        assert!(!a.items[0].thumb_url.contains("portada"));
+    }
+
+    #[test]
+    fn patreon_muestra_la_resolucion_del_archivo_no_la_de_la_portada() {
+        // Salían todas «620×749» porque ese es el tamaño de la portada.
+        let l = parse_listing(&entrada_patreon("111", 3584, 4800)).unwrap();
+        assert_eq!(l.items[0].width, 3584);
+        assert_eq!(l.items[0].height, 4800);
+        assert_eq!(l.items[0].resolution(), "3584×4800");
+    }
+
+    #[test]
+    fn los_extractores_sin_file_siguen_funcionando() {
+        // La corrección no debe romper a los demás: sin `file`, se usan las
+        // claves planas de siempre.
+        let json = r#"[[3, "https://ejemplo/foto.jpg", {
+            "extension": "jpg", "width": 1080, "height": 1350,
+            "display_url": "https://ejemplo/thumb.jpg"
+        }]]"#;
+        let l = parse_listing(json).unwrap();
+        assert_eq!(l.items[0].width, 1080);
+        assert_eq!(l.items[0].thumb_url, "https://ejemplo/thumb.jpg");
     }
 }

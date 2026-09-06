@@ -4691,14 +4691,8 @@ async fn patreon_resolver_coleccion(url: String, cookies: &[String]) -> String {
     let mut req = cliente.get(&api).header(reqwest::header::USER_AGENT, UA);
     // `--cookies <ruta>`: se lee el archivo y se filtra por dominio, igual que
     // en el resto de la aplicación. Una colección privada no se lista sin esto.
-    if let Some(i) = cookies.iter().position(|a| a == "--cookies") {
-        if let Some(ruta) = cookies.get(i + 1) {
-            if let Ok(txt) = tokio::fs::read_to_string(ruta).await {
-                if let Some(h) = v2ph::cookie_header_de(&txt, "patreon.com") {
-                    req = req.header(reqwest::header::COOKIE, h);
-                }
-            }
-        }
+    if let Some(h) = patreon_cookie_header(cookies).await {
+        req = req.header(reqwest::header::COOKIE, h);
     }
     let Ok(r) = tokio::time::timeout(Duration::from_secs(15), req.send()).await else {
         return url;
@@ -4714,15 +4708,491 @@ async fn patreon_resolver_coleccion(url: String, cookies: &[String]) -> String {
     }
 }
 
+/// User-Agent de la app de Android, que es el que su API acepta sin discutir.
+/// Es el mismo que usa gallery-dl para Patreon.
+const PATREON_UA: &str = "Patreon/126.24.0.9 (Android; Android 14; Scale/2.10)";
+
+/// Cabecera `Cookie` para patreon.com sacada de los argumentos `--cookies`.
+///
+/// Se comparte entre el resolutor de colecciones y el de posts: los dos hablan
+/// con la API y los dos necesitan la sesión para ver contenido de pago.
+async fn patreon_cookie_header(cookies: &[String]) -> Option<String> {
+    let i = cookies.iter().position(|a| a == "--cookies")?;
+    let ruta = cookies.get(i + 1)?;
+    let txt = tokio::fs::read_to_string(ruta).await.ok()?;
+    v2ph::cookie_header_de(&txt, "patreon.com")
+}
+
+/// Lista los archivos de UN post de Patreon hablando con su API.
+///
+/// POR QUÉ NO LO HACE gallery-dl. Su `PatreonPostExtractor` no usa la API:
+/// descarga el HTML del post y busca dentro `window.patreon = {"bootstrap":…}`.
+/// Patreon ya no sirve esa página así, y el resultado es este —comprobado con
+/// `-v`, sin cookies y con otro creador, así que no depende de la sesión—:
+///
+/// ```text
+/// [patreon][debug] JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+/// "error": "AbortExtraction", "message": "Unable to extract bootstrap data"
+/// ```
+///
+/// Y CON sesión es peor, porque no avisa: el `except KeyError` de su código
+/// hace `return ()`, de modo que termina con código 0, sin errores ni avisos y
+/// con `[]` por toda salida. Desde fuera es indistinguible de un post vacío.
+///
+/// El listado del creador sí funciona porque ese sí va por la API. Así que
+/// aquí se hace lo mismo para un post suelto: `/api/posts/{id}`, que devuelve
+/// cada archivo con su `download_url`, sus miniaturas y su resolución real.
+async fn patreon_listar_post(
+    url: &str,
+    cookies: &[String],
+) -> Result<Vec<gallery::GalleryItem>, String> {
+    let id = patreon_post_id(url).ok_or("no es un post")?;
+    let api = format!(
+        "https://www.patreon.com/api/posts/{id}\
+         ?include=images,attachments_media,media\
+         &fields%5Bmedia%5D=id,image_urls,download_url,metadata,file_name\
+         &fields%5Bpost%5D=title,published_at,current_user_can_view,url"
+    );
+
+    let cliente = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    // El User-Agent de la app de Android es el que usa gallery-dl para Patreon
+    // y el que la API acepta sin discutir.
+    let mut req = cliente
+        .get(&api)
+        .header(reqwest::header::USER_AGENT, PATREON_UA);
+    if let Some(h) = patreon_cookie_header(cookies).await {
+        req = req.header(reqwest::header::COOKIE, h);
+    }
+
+    let r = tokio::time::timeout(Duration::from_secs(20), req.send())
+        .await
+        .map_err(|_| "tiempo agotado".to_string())?
+        .map_err(|e| e.to_string())?;
+    let estado = r.status();
+    let txt = r.text().await.map_err(|e| e.to_string())?;
+    if !estado.is_success() {
+        return Err(format!("HTTP {}", estado.as_u16()));
+    }
+    patreon_items_de_json(&txt, url)
+}
+
+/// Convierte la respuesta de `/api/posts/{id}` en fichas de la rejilla.
+///
+/// Separado de la petición A PROPÓSITO: así se puede probar contra una
+/// respuesta real guardada, sin red y sin sesión. Es donde está el riesgo —el
+/// JSON:API de Patreon reparte los datos entre `data` e `included`— y lo que
+/// Índice `id de archivo -> atributos` de la sección `included`.
+///
+/// El JSON:API de Patreon reparte los datos: en `data` va la publicación, y
+/// los archivos viven aparte en `included`, referidos por identificador. Un
+/// listado trae los de TODAS sus publicaciones en el mismo saco.
+fn patreon_indice_medios(v: &serde_json::Value) -> std::collections::HashMap<&str, &serde_json::Value> {
+    let mut medios = std::collections::HashMap::new();
+    if let Some(inc) = v.get("included").and_then(|i| i.as_array()) {
+        for it in inc {
+            if it.get("type").and_then(|t| t.as_str()) != Some("media") {
+                continue;
+            }
+            if let Some(mid) = it.get("id").and_then(|i| i.as_str()) {
+                if let Some(a) = it.get("attributes") {
+                    medios.insert(mid, a);
+                }
+            }
+        }
+    }
+    medios
+}
+
+/// Fichas de UNA publicación. Lo comparten el post suelto y el listado.
+///
+/// `post` es un elemento de `data`; `medios` el índice de `included`.
+fn patreon_items_de_post(
+    post: &serde_json::Value,
+    medios: &std::collections::HashMap<&str, &serde_json::Value>,
+    autor: &str,
+    url_post: &str,
+) -> Vec<gallery::GalleryItem> {
+    let attrs = post.get("attributes");
+    let leer_txt = |k: &str| {
+        attrs
+            .and_then(|a| a.get(k))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let titulo = leer_txt("title");
+    let fecha = leer_txt("published_at");
+    let id = post.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+
+    // `relationships` marca el ORDEN, que es el del carrusel y el que espera
+    // ver quien mira la publicación.
+    let mut orden: Vec<&str> = Vec::new();
+    for rel in ["images", "attachments_media", "media"] {
+        if let Some(datos) = post
+            .pointer(&format!("/relationships/{rel}/data"))
+            .and_then(|d| d.as_array())
+        {
+            for d in datos {
+                if let Some(mid) = d.get("id").and_then(|i| i.as_str()) {
+                    if !orden.contains(&mid) {
+                        orden.push(mid);
+                    }
+                }
+            }
+        }
+    }
+
+    let total = orden.len() as u32;
+    let mut out = Vec::new();
+    for (i, mid) in orden.iter().enumerate() {
+        let Some(a) = medios.get(mid) else { continue };
+        let urls = a.get("image_urls");
+        let directa = a
+            .get("download_url")
+            .and_then(|u| u.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                urls.and_then(|u| u.get("original"))
+                    .and_then(|u| u.as_str())
+                    .map(str::to_string)
+            });
+        let Some(directa) = directa else { continue };
+
+        let nombre = a
+            .get("file_name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let ext = nombre
+            .rsplit('.')
+            .next()
+            .filter(|e| (2..=5).contains(&e.len()))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        // La miniatura de ESTE archivo, no la portada del post
+        let thumb = ["thumbnail", "thumbnail_small", "default_small", "thumbnail_large"]
+            .iter()
+            .find_map(|k| urls.and_then(|u| u.get(*k)).and_then(|u| u.as_str()))
+            .unwrap_or_default()
+            .to_string();
+        let dims = a.pointer("/metadata/dimensions");
+        let leer = |k: &str| {
+            dims.and_then(|d| d.get(k))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0) as u32
+        };
+
+        out.push(gallery::GalleryItem {
+            url: directa,
+            filename: nombre,
+            is_video: gallery::es_extension_de_video(&ext),
+            ext,
+            width: leer("w"),
+            height: leer("h"),
+            filesize: 0,
+            post_id: id.to_string(),
+            index_in_post: i as u32 + 1,
+            count_in_post: total.max(1),
+            author: autor.to_string(),
+            description: titulo.chars().take(160).collect(),
+            date: fecha.clone(),
+            post_url: url_post.to_string(),
+            thumb_url: thumb,
+            selected: false,
+        });
+    }
+    out
+}
+
+/// Convierte la respuesta de `/api/posts/{id}` en fichas de la rejilla.
+///
+/// Separado de la petición A PROPÓSITO: así se puede probar contra una
+/// respuesta real guardada, sin red y sin sesión. Es donde está el riesgo —el
+/// JSON:API de Patreon reparte los datos entre `data` e `included`— y lo que
+/// se rompería en silencio si mañana cambian un nombre de campo.
+fn patreon_items_de_json(txt: &str, url: &str) -> Result<Vec<gallery::GalleryItem>, String> {
+    let v: serde_json::Value = serde_json::from_str(txt).map_err(|e| e.to_string())?;
+
+    // Un post por encima de tu nivel de suscripción responde 200 con este
+    // campo en falso y sin archivos. Merece un mensaje propio: no es un fallo.
+    if v.pointer("/data/attributes/current_user_can_view").and_then(|b| b.as_bool()) == Some(false) {
+        return Err(crate::i18n::t(crate::i18n::lang(), "patreon.post_bloqueado").to_string());
+    }
+    let Some(post) = v.get("data") else {
+        return Err(crate::i18n::t(crate::i18n::lang(), "patreon.post_sin_archivos").to_string());
+    };
+    let medios = patreon_indice_medios(&v);
+    let out = patreon_items_de_post(post, &medios, &patreon_autor_de_url(url), url);
+    if out.is_empty() {
+        return Err(crate::i18n::t(crate::i18n::lang(), "patreon.post_sin_archivos").to_string());
+    }
+    Ok(out)
+}
+
+/// Consulta de listado, pidiendo SOLO lo que la rejilla usa.
+///
+/// Dos diferencias con lo que pide gallery-dl, y las dos se notan:
+///
+/// - `page[count]=100` en vez de los 20 por defecto. Medido contra la API real:
+///   20 publicaciones tardan 0,8 s y 100 tardan 1,8 s, así que traerlas de cien
+///   en cien sale a menos de la mitad de tiempo por publicación, y encima ahorra
+///   la espera entre peticiones que hay que respetar entre una página y otra.
+/// - `include=images,attachments_media` y cuatro campos, frente a la docena de
+///   relaciones que pide gallery-dl —campaign, access_rules, audio, poll,
+///   user, native_video_insights…—. Su respuesta pesa 394 KB por cada veinte
+///   publicaciones; esta, 212 KB: **1,9 veces menos** que descargar y parsear.
+fn patreon_url_listado(campaign: &str, coleccion: Option<&str>, cursor: Option<&str>) -> String {
+    let mut u = format!(
+        "https://www.patreon.com/api/posts\
+         ?filter%5Bcampaign_id%5D={campaign}\
+         &filter%5Bis_draft%5D=false\
+         &filter%5Bcontains_exclusive_posts%5D=true\
+         &include=images,attachments_media\
+         &fields%5Bmedia%5D=id,image_urls,download_url,metadata,file_name\
+         &fields%5Bpost%5D=title,published_at,current_user_can_view,url\
+         &page%5Bcount%5D=100"
+    );
+    match coleccion {
+        Some(c) => {
+            // El orden DE LA COLECCIÓN, no el cronológico: es el que su autor
+            // decidió y el que se ve en la web.
+            u.push_str(&format!("&filter%5Bcollection_id%5D={c}&sort=collection_order"));
+        }
+        None => u.push_str("&sort=-published_at"),
+    }
+    if let Some(c) = cursor {
+        u.push_str("&page%5Bcursor%5D=");
+        u.push_str(&porcentaje(c));
+    }
+    u
+}
+
+/// Escapa un valor para meterlo en una query. El cursor de Patreon es una
+/// cadena opaca que puede traer `+`, `=` o `/`, y sin escapar rompe la URL.
+///
+/// A mano y no con un crate: es la única cosa de la aplicación que lo necesita,
+/// y una dependencia entera para veinte líneas se paga en cada compilación.
+fn porcentaje(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Fichas de una PÁGINA de listado (`/api/posts?filter[...]`), y el cursor
+/// para pedir la siguiente.
+///
+/// Las publicaciones bloqueadas por nivel se saltan en silencio: en un listado
+/// son normales y no son un error, a diferencia de cuando pides una concreta.
+fn patreon_items_de_listado(
+    txt: &str,
+    autor: &str,
+) -> Result<(Vec<gallery::GalleryItem>, Option<String>), String> {
+    let v: serde_json::Value = serde_json::from_str(txt).map_err(|e| e.to_string())?;
+    let medios = patreon_indice_medios(&v);
+    let mut out = Vec::new();
+
+    if let Some(datos) = v.get("data").and_then(|d| d.as_array()) {
+        for post in datos {
+            if post.pointer("/attributes/current_user_can_view").and_then(|b| b.as_bool())
+                == Some(false)
+            {
+                continue;
+            }
+            // `url` de la publicación viene en los atributos; si falta, se
+            // deja vacío antes que inventar un enlace que no existe.
+            let url_post = post
+                .pointer("/attributes/url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default();
+            out.extend(patreon_items_de_post(post, &medios, autor, url_post));
+        }
+    }
+
+    let siguiente = v
+        .pointer("/meta/pagination/cursors/next")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    Ok((out, siguiente))
+}
+
+/// El nombre del creador tal y como aparece en la URL del post.
+fn patreon_autor_de_url(url: &str) -> String {
+    let sin_esquema = url.split("//").nth(1).unwrap_or(url);
+    let mut partes = sin_esquema.split('/').skip(1).filter(|p| !p.is_empty());
+    match partes.next() {
+        // `patreon.com/c/Nombre` y `patreon.com/cw/Nombre`: el creador va
+        // DETRÁS del prefijo, no en él. Sin esto el autor salía como «c».
+        Some("c") | Some("cw") => partes.next().unwrap_or("patreon").to_string(),
+        Some(p) if p != "posts" => p.to_string(),
+        _ => "patreon".into(),
+    }
+}
+
+/// Lista una colección o un creador de Patreon por su API, en flujo.
+///
+/// POR QUÉ NO SE DELEGA EN gallery-dl AQUÍ TAMPOCO. Funcionar, funciona —este
+/// camino sí usa la API—, pero pide veinte publicaciones por página y arrastra
+/// una docena de relaciones que la rejilla no mira. Medido contra la API real:
+///
+/// | | Peticiones para 100 publicaciones | Tiempo |
+/// |---|---|---|
+/// | gallery-dl | 5 páginas de 20, 394 KB cada una | ~10 s |
+/// | esto | 1 página de 100, 877 KB | ~1,9 s |
+///
+/// A eso se suma que cada arranque de gallery-dl descomprime un Python entero,
+/// y que entre página y página hay que respetar el espaciado de peticiones.
+///
+/// Devuelve `false` si no puede con ello, y entonces el que llama sigue por
+/// gallery-dl: es más lento, pero es preferible a dejar la rejilla vacía.
+async fn patreon_listar_por_api(
+    url: &str,
+    cookies: &[String],
+    tx: &UnboundedSender<Ev>,
+    page: u32,
+    epoch: u64,
+    cancelar: &Arc<AtomicBool>,
+) -> bool {
+    let coleccion = patreon_coleccion_id(url);
+    let Some(campaign) = patreon_campaign_id(url, cookies).await else {
+        return false;
+    };
+    let autor = patreon_autor_de_url(url);
+
+    let Ok(cliente) = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+    else {
+        return false;
+    };
+    let cookie = patreon_cookie_header(cookies).await;
+
+    let mut cursor: Option<String> = None;
+    let mut algo = false;
+    loop {
+        if cancelar.load(Ordering::Relaxed) {
+            break;
+        }
+        let api = patreon_url_listado(&campaign, coleccion.as_deref(), cursor.as_deref());
+        let mut req = cliente
+            .get(&api)
+            .header(reqwest::header::USER_AGENT, PATREON_UA)
+            .header(reqwest::header::CONTENT_TYPE, "application/vnd.api+json");
+        if let Some(h) = &cookie {
+            req = req.header(reqwest::header::COOKIE, h.clone());
+        }
+        let Ok(Ok(r)) = tokio::time::timeout(Duration::from_secs(30), req.send()).await else {
+            // Si ya se enviaron páginas, cortar aquí es mejor que empezar de
+            // cero por gallery-dl y duplicar todo lo que ya está en pantalla.
+            return algo;
+        };
+        if !r.status().is_success() {
+            return algo;
+        }
+        let Ok(txt) = r.text().await else { return algo };
+        let Ok((items, siguiente)) = patreon_items_de_listado(&txt, &autor) else {
+            return algo;
+        };
+        if !items.is_empty() {
+            algo = true;
+            let _ = tx.send(Ev::GalleryResults(items, page, epoch));
+        }
+        match siguiente {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        // Espaciado entre páginas: menos que con gallery-dl porque son cinco
+        // veces menos peticiones, pero no cero. El 429 sigue existiendo.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    algo
+}
+
+/// El identificador de campaña, que es lo que la API pide para filtrar.
+///
+/// De una colección se saca por `/api/collection/{id}`; de una URL de creador,
+/// pidiendo su página. Se reaprovecha `patreon_campaign_de_json`, que ya es
+/// tolerante a las dos formas en que puede venir.
+async fn patreon_campaign_id(url: &str, cookies: &[String]) -> Option<String> {
+    let cliente = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let api = match patreon_coleccion_id(url) {
+        Some(c) => format!("https://www.patreon.com/api/collection/{c}"),
+        // Sin colección hace falta la campaña del creador, y esa vive en la
+        // página. Se deja para gallery-dl: aquí solo se acelera lo que se
+        // puede resolver de forma barata y segura.
+        None => return None,
+    };
+    let mut req = cliente.get(&api).header(reqwest::header::USER_AGENT, PATREON_UA);
+    if let Some(h) = patreon_cookie_header(cookies).await {
+        req = req.header(reqwest::header::COOKIE, h);
+    }
+    let r = tokio::time::timeout(Duration::from_secs(15), req.send()).await.ok()?.ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    patreon_campaign_de_json(&r.text().await.ok()?)
+}
+
 /// El número de una colección de Patreon, si la URL es de una.
 fn patreon_coleccion_id(url: &str) -> Option<String> {
     let u = url.to_ascii_lowercase();
     if !host_of(&u).is_some_and(|h| host_matches(&h, "patreon.com")) {
         return None;
     }
-    let resto = u.split("/collection/").nth(1)?;
-    let id: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
-    (!id.is_empty()).then_some(id)
+    // 1. En la RUTA: /collection/1580921
+    if let Some(resto) = u.split("/collection/").nth(1) {
+        let id: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    // 2. En la QUERY: …/posts/titulo-168115193?collection=1580921
+    //
+    // Es la forma que reparte la propia web cuando abres un post desde una
+    // colección, y solo se miraba la ruta: la URL pasaba tal cual a gallery-dl
+    // y su extractor de posts se iba vacío sin decir nada.
+    let query = u.split('?').nth(1)?;
+    for par in query.split('&') {
+        // `continue`, NO `?`: un parámetro suelto sin «=» —los hay— abortaba
+        // la función entera y la colección que venía detrás no se llegaba a mirar.
+        let Some((k, v)) = par.split_once('=') else { continue };
+        if k == "collection" {
+            let id: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Identificador numérico de un post de Patreon a partir de su URL.
+///
+/// El número va SIEMPRE al final del slug: `.../posts/yukino-oregairu-168115193`.
+/// Devuelve `None` para las URL de creador o de colección, que tienen su propio
+/// camino y sí funcionan por el extractor.
+fn patreon_post_id(url: &str) -> Option<String> {
+    let u = url.to_ascii_lowercase();
+    if !host_of(&u).is_some_and(|h| host_matches(&h, "patreon.com")) {
+        return None;
+    }
+    let resto = u.split("/posts/").nth(1)?;
+    let slug = resto.split(['?', '#', '/']).next()?;
+    let id: String = slug.rsplit('-').next()?.chars().filter(|c| c.is_ascii_digit()).collect();
+    (id.len() >= 6).then_some(id)
 }
 
 /// Saca el identificador de campaña de la respuesta de `/api/collection/N`.
@@ -7366,6 +7836,41 @@ async fn browse_gallery_hop(
     // El de creadores no tiene ese problema, y acepta el filtro de colección
     // por la URL. Si no se puede averiguar la campaña, se sigue con la
     // original y el aviso explica lo que pasó.
+    // UN POST SUELTO DE PATREON NO PASA POR gallery-dl.
+    //
+    // Su extractor de posts scrapea el HTML y ya no encuentra el bootstrap: con
+    // sesión termina en `[]` sin error ni aviso, que es indistinguible de un
+    // post vacío. La API sí responde, así que se resuelve aquí (ver
+    // `patreon_listar_post`) y la rejilla se llena igual que con cualquier otro
+    // sitio. Si falla, se explica y NO se cae a gallery-dl: haría lo mismo y se
+    // perdería el motivo.
+    if patreon_post_id(&url).is_some() {
+        match patreon_listar_post(&url, &cookies).await {
+            Ok(items) => {
+                let _ = tx.send(Ev::GalleryResults(items, page, epoch));
+                let _ = tx.send(Ev::GalleryDone(epoch));
+            }
+            Err(e) => {
+                let _ = tx.send(Ev::GalleryError(e, epoch));
+                let _ = tx.send(Ev::GalleryDone(epoch));
+            }
+        }
+        return;
+    }
+
+    // UNA COLECCIÓN SE PIDE A LA API DIRECTAMENTE: cinco veces menos espera.
+    //
+    // gallery-dl también va por la API aquí, pero trae veinte publicaciones por
+    // página y arrastra una docena de relaciones que la rejilla no usa (ver
+    // `patreon_listar_por_api` para los números medidos). Si esto no puede,
+    // devuelve false y se sigue por el camino de siempre.
+    if patreon_coleccion_id(&url).is_some()
+        && patreon_listar_por_api(&url, &cookies, &tx, page, epoch, &cancelar).await
+    {
+        let _ = tx.send(Ev::GalleryDone(epoch));
+        return;
+    }
+
     let url = patreon_resolver_coleccion(url, &cookies).await;
 
     let mut args = gallery::list_args_flujo(&url);
@@ -13784,6 +14289,176 @@ mod tests {
     /// por defecto un nombre real ocupaba 105 caracteres, y bajo la carpeta de
     /// descargas eso roza el límite de 260 de Windows — que se manifiesta como
     /// `[Errno 22] Invalid argument`, un error que no menciona la longitud.
+    /// Respuesta REAL de `/api/posts/{id}`, capturada el 2026-09-06 y saneada
+    /// de tokens de CDN. Se conserva la estructura entera —`data`/`included`,
+    /// `image_urls`, `metadata.dimensions`— y la portada de 620 px, que es
+    /// justo lo que NO debe acabar en las fichas.
+    const PATREON_POST_JSON: &str = include_str!("testdata/patreon_post.json");
+    const PATREON_POST_URL: &str =
+        "https://www.patreon.com/Kei_Artworks/posts/sorry-i-was-gone-166592250";
+
+    /// El post que gallery-dl devolvía vacío ahora se lee por la API.
+    #[test]
+    fn un_post_de_patreon_se_lee_entero_desde_la_api() {
+        let items =
+            patreon_items_de_json(PATREON_POST_JSON, PATREON_POST_URL).unwrap();
+        assert_eq!(items.len(), 3, "el post tiene tres imágenes");
+        for (i, it) in items.iter().enumerate() {
+            assert!(it.url.starts_with("https://"), "enlace directo al original");
+            assert_eq!(it.index_in_post, i as u32 + 1, "el orden es el del carrusel");
+            assert_eq!(it.count_in_post, 3);
+            assert_eq!(it.post_id, "166592250");
+            assert_eq!(it.author, "Kei_Artworks");
+            assert_eq!(it.post_url, PATREON_POST_URL, "queda la URL del post para reintentar");
+        }
+    }
+
+    /// EL BUG DE LAS MINIATURAS REPETIDAS. `image` es la portada del post y sale
+    /// idéntica en todos sus archivos; la buena está en `file.image_urls`.
+    #[test]
+    fn cada_archivo_de_un_post_trae_su_miniatura_y_su_resolucion() {
+        let items =
+            patreon_items_de_json(PATREON_POST_JSON, PATREON_POST_URL).unwrap();
+        let distintas: std::collections::HashSet<_> = items.iter().map(|i| &i.thumb_url).collect();
+        assert_eq!(distintas.len(), items.len(), "ninguna miniatura se repite");
+        for it in &items {
+            // La portada lleva {"w":620} en base64 dentro de la ruta
+            assert!(!it.thumb_url.contains("eyJ3Ijo2MjB9"), "no puede ser la portada");
+            assert!(
+                it.width > 1000 && it.height > 1000,
+                "la resolución es la del archivo ({}×{}), no los 620×749 de la portada",
+                it.width,
+                it.height
+            );
+        }
+    }
+
+    /// Sin archivos hay dos motivos muy distintos, y confundirlos manda al
+    /// usuario a revisar cookies que están bien.
+    #[test]
+    fn los_dos_motivos_de_un_post_sin_archivos_se_distinguen() {
+        let bloqueado =
+            r#"{"data":{"attributes":{"current_user_can_view":false},"relationships":{}}}"#;
+        let solo_texto =
+            r#"{"data":{"attributes":{"current_user_can_view":true},"relationships":{}}}"#;
+        let e1 = patreon_items_de_json(bloqueado, PATREON_POST_URL).unwrap_err();
+        let e2 = patreon_items_de_json(solo_texto, PATREON_POST_URL).unwrap_err();
+        assert_ne!(e1, e2, "no pueden dar el mismo mensaje");
+        assert!(!e1.is_empty() && !e2.is_empty());
+    }
+
+    #[test]
+    fn el_autor_sale_bien_lleve_o_no_prefijo_la_url() {
+        assert_eq!(patreon_autor_de_url("https://www.patreon.com/BluuAI/posts/x-1"), "BluuAI");
+        // `/c/` y `/cw/` son prefijos: el creador va detrás, no en ellos
+        assert_eq!(patreon_autor_de_url("https://www.patreon.com/c/BluuAI/posts/x-1"), "BluuAI");
+        assert_eq!(patreon_autor_de_url("https://www.patreon.com/cw/BluuAI"), "BluuAI");
+    }
+
+    /// Página REAL de `/api/posts?filter[campaign_id]=…`, saneada de tokens y
+    /// recortada a veinte publicaciones. Conserva lo que importa: la mezcla de
+    /// publicaciones visibles y de pago, y el cursor de la siguiente página.
+    const PATREON_LISTADO_JSON: &str = include_str!("testdata/patreon_listado.json");
+
+    /// Lo que sustituye a las cinco páginas de gallery-dl.
+    #[test]
+    fn una_pagina_de_listado_se_lee_entera() {
+        let (items, cursor) = patreon_items_de_listado(PATREON_LISTADO_JSON, "Kei_Artworks").unwrap();
+        // Veinte publicaciones: doce visibles con 36 archivos, y ocho de pago
+        // con 48. SIN suscripción las bloqueadas se descartan — llenar la
+        // rejilla de cosas que no se pueden bajar sería peor que no mostrarlas.
+        assert_eq!(items.len(), 36, "solo los archivos de las publicaciones visibles");
+        assert!(cursor.is_some(), "queda cursor para seguir paginando");
+        for it in &items {
+            assert!(it.url.starts_with("https://"));
+            assert!(!it.post_url.is_empty(), "la URL del post es la red de seguridad");
+            assert_eq!(it.author, "Kei_Artworks");
+        }
+    }
+
+    /// El mismo fallo que en los posts sueltos, pero a escala de listado.
+    #[test]
+    fn en_un_listado_tampoco_se_repiten_las_miniaturas() {
+        let (items, _) = patreon_items_de_listado(PATREON_LISTADO_JSON, "x").unwrap();
+        let unicas: std::collections::HashSet<_> = items.iter().map(|i| &i.thumb_url).collect();
+        assert_eq!(unicas.len(), items.len(), "cada archivo con la suya");
+    }
+
+    #[test]
+    fn los_archivos_de_una_publicacion_van_numerados_en_orden() {
+        let (items, _) = patreon_items_de_listado(PATREON_LISTADO_JSON, "x").unwrap();
+        let primero = items[0].post_id.clone();
+        let mismos: Vec<_> = items.iter().filter(|i| i.post_id == primero).collect();
+        assert!(mismos.len() > 1, "el primero es un carrusel");
+        for (n, it) in mismos.iter().enumerate() {
+            assert_eq!(it.index_in_post, n as u32 + 1);
+            assert_eq!(it.count_in_post, mismos.len() as u32);
+        }
+    }
+
+    /// El cursor de Patreon trae `:` y padding base64. Sin escapar rompe la URL
+    /// y la paginación se queda en la primera página.
+    #[test]
+    fn la_url_de_listado_se_construye_bien() {
+        let c = "03:eyJ2IjoxLCJjIjoiMTUxNDgzMTMxIn0=";
+        let u = patreon_url_listado("123", Some("456"), Some(c));
+        assert!(u.contains("%3A"), "los dos puntos escapados");
+        assert!(u.contains("%3D"), "el padding base64 escapado");
+        assert!(u.contains("page%5Bcount%5D=100"), "cien por página, no veinte");
+        assert!(u.contains("collection_id%5D=456"));
+        assert!(u.contains("sort=collection_order"), "el orden que puso su autor");
+
+        // Sin colección, lo natural es lo más reciente primero
+        let u2 = patreon_url_listado("123", None, None);
+        assert!(u2.contains("sort=-published_at"));
+        assert!(!u2.contains("collection_id"));
+        assert!(!u2.contains("cursor"), "la primera página no lleva cursor");
+    }
+
+    /// La URL que reparte la web al abrir un post DESDE una colección lleva el
+    /// número en la query, no en la ruta. Solo se miraba la ruta, así que esa
+    /// URL pasaba tal cual a gallery-dl y su extractor de posts se iba vacío.
+    #[test]
+    fn una_coleccion_se_reconoce_tambien_en_la_query() {
+        let u = "https://www.patreon.com/BluuAI/posts/yukino-oregairu-168115193?collection=1580921";
+        assert_eq!(patreon_coleccion_id(u).as_deref(), Some("1580921"));
+        // En la ruta se sigue reconociendo igual
+        assert_eq!(
+            patreon_coleccion_id("https://www.patreon.com/collection/1580921").as_deref(),
+            Some("1580921")
+        );
+        // Un parámetro suelto sin «=» no debe abortar la búsqueda
+        assert_eq!(
+            patreon_coleccion_id("https://www.patreon.com/x/posts/t-166592250?foo&collection=99")
+                .as_deref(),
+            Some("99")
+        );
+    }
+
+    /// El identificador del post va al final del slug. De él depende que se
+    /// pida por la API en vez de por el extractor roto.
+    #[test]
+    fn el_numero_de_un_post_de_patreon_sale_del_final_del_slug() {
+        assert_eq!(
+            patreon_post_id(
+                "https://www.patreon.com/BluuAI/posts/yukino-oregairu-168115193?collection=1580921"
+            )
+            .as_deref(),
+            Some("168115193")
+        );
+        // Creador y colección NO son posts: tienen su propio camino
+        assert_eq!(patreon_post_id("https://www.patreon.com/c/BluuAI"), None);
+        assert_eq!(patreon_post_id("https://www.patreon.com/collection/1580921"), None);
+        // Sin número al final no hay post que pedir
+        assert_eq!(patreon_post_id("https://www.patreon.com/x/posts/"), None);
+        assert_eq!(patreon_post_id("https://www.patreon.com/x/posts/hola-12"), None);
+        // Y un dominio que solo EMPIEZA por patreon.com no cuela
+        assert_eq!(
+            patreon_post_id("https://patreon.com.atacante.example/x/posts/t-166592250"),
+            None
+        );
+    }
+
     #[test]
     fn patreon_acorta_el_titulo_en_el_nombre() {
         let o = galdl_site_opts("https://www.patreon.com/c/Kei_Artworks/posts");

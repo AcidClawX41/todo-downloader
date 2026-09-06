@@ -1,0 +1,131 @@
+{
+ "data": {
+  "id": "166592250",
+  "type": "post",
+  "attributes": {
+   "title": "Post de prueba",
+   "published_at": "2026-08-13T16:56:04.000+00:00",
+   "current_user_can_view": true
+  },
+  "relationships": {
+   "attachments_media": {
+    "data": []
+   },
+   "images": {
+    "data": [
+     {
+      "id": "717270105",
+      "type": "media"
+     },
+     {
+      "id": "717270107",
+      "type": "media"
+     },
+     {
+      "id": "717270110",
+      "type": "media"
+     }
+    ]
+   },
+   "media": {
+    "data": [
+     {
+      "id": "717270105",
+      "type": "media"
+     },
+     {
+      "id": "717270107",
+      "type": "media"
+     },
+     {
+      "id": "717270110",
+      "type": "media"
+     }
+    ]
+   }
+  }
+ },
+ "included": [
+  {
+   "id": "717270105",
+   "type": "media",
+   "attributes": {
+    "download_url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJhIjoxLCJwIjoxfQ%3D%3D/1.png?token-hash=X&token-time=0",
+    "file_name": "10501.png",
+    "image_urls": {
+     "url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "original": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJxIjoxMDAsIndlYnAiOjB9/1.png?token-hash=X&token-time=0",
+     "default": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_blurred": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "default_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "default_blurred_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "thumbnail": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJoIjozNjAsInciOjM2MH0%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJoIjoxMDgwLCJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJoIjoxMDAsInciOjEwMH0%3D/1.png?token-hash=X&token-time=0"
+    },
+    "metadata": {
+     "dimensions": {
+      "h": 4800,
+      "w": 3584
+     }
+    }
+   }
+  },
+  {
+   "id": "717270107",
+   "type": "media",
+   "attributes": {
+    "download_url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJhIjoxLCJwIjoxfQ%3D%3D/1.png?token-hash=X&token-time=0",
+    "file_name": "10502.png",
+    "image_urls": {
+     "url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "original": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJxIjoxMDAsIndlYnAiOjB9/1.png?token-hash=X&token-time=0",
+     "default": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_blurred": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "default_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "default_blurred_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "thumbnail": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJoIjozNjAsInciOjM2MH0%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJoIjoxMDgwLCJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/515a6e22a784458cb6e86e103fa18beb/eyJoIjoxMDAsInciOjEwMH0%3D/1.png?token-hash=X&token-time=0"
+    },
+    "metadata": {
+     "dimensions": {
+      "h": 4800,
+      "w": 3584
+     }
+    }
+   }
+  },
+  {
+   "id": "717270110",
+   "type": "media",
+   "attributes": {
+    "download_url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJhIjoxLCJwIjoxfQ%3D%3D/1.png?token-hash=X&token-time=0",
+    "file_name": "10503.png",
+    "image_urls": {
+     "url": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "original": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJxIjoxMDAsIndlYnAiOjB9/1.png?token-hash=X&token-time=0",
+     "default": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_blurred": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3Ijo2MjB9/1.png?token-hash=X&token-time=0",
+     "default_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "default_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "default_blurred_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJ3IjozNjB9/1.png?token-hash=X&token-time=0",
+     "thumbnail": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJoIjozNjAsInciOjM2MH0%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_large": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJoIjoxMDgwLCJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=X&token-time=0",
+     "thumbnail_small": "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/8d64995663c0487aac20c0c9cff069c7/eyJoIjoxMDAsInciOjEwMH0%3D/1.png?token-hash=X&token-time=0"
+    },
+    "metadata": {
+     "dimensions": {
+      "h": 4800,
+      "w": 3584
+     }
+    }
+   }
+  }
+ ],
+ "links": {
+  "self": "https://www.patreon.com/api/posts/166592250"
+ }
+}

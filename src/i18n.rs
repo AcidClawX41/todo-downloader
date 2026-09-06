@@ -609,8 +609,16 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "A model is many files. It has been opened in Profile so you can pick which ones."
         ),
         "gal.empty_patreon_col" => entry!(
-            "Tu sesión funciona: el motor terminó sin error y sin avisos. Devolvió cero publicaciones, y NO es cosa de las cookies. Afecta a creadores concretos —una publicación suelta del mismo creador falla igual, y eso ya es OTRO extractor—, así que apunta a cómo sirve Patreon esas páginas, no a la colección. Pulsa «Repetir con detalle»: ahí sale lo que gallery-dl encontró en la página, que es lo único que lo aclara.",
-            "Your session works: the engine finished with no error and no warnings. It returned zero posts, and this is NOT about cookies. It hits particular creators —a single post from the same creator fails too, and that is a DIFFERENT extractor— so it points at how Patreon serves those pages, not at the collection. Press «Retry with details»: that shows what gallery-dl found on the page, which is the only thing that settles it."
+            "Tu sesión funciona: el motor terminó sin error y sin avisos, pero devolvió cero publicaciones. No son las cookies. El extractor de Patreon lee la página en HTML y busca dentro un bloque de datos que Patreon ya no sirve así, de modo que se va vacío en silencio. Las publicaciones sueltas ya no pasan por ahí —se piden a la API—, así que prueba a abrir una directamente. Si esto te ocurre en una colección o en un creador, «Repetir con detalle» enseña lo que encontró.",
+            "Your session works: the engine finished with no error and no warnings, but returned zero posts. It is not the cookies. Patreon's extractor reads the page as HTML and looks for a data block Patreon no longer serves that way, so it comes back empty without saying so. Single posts no longer go through it —they are fetched from the API— so try opening one directly. If this happens on a collection or a creator, «Retry with details» shows what it found."
+        ),
+        "patreon.post_bloqueado" => entry!(
+            "Esa publicación está por encima de tu nivel de suscripción: Patreon la reconoce pero no entrega los archivos. Con otra cuenta o subiendo de nivel aparecería aquí.",
+            "That post is above your membership tier: Patreon acknowledges it but does not hand over the files. With another account, or a higher tier, it would show up here."
+        ),
+        "patreon.post_sin_archivos" => entry!(
+            "La publicación existe y tu sesión la ve, pero no lleva ningún archivo adjunto: puede ser solo texto, o un enlace externo a MEGA o Drive que Patreon no aloja.",
+            "The post exists and your session can see it, but it carries no files: it may be text only, or an external MEGA/Drive link that Patreon does not host."
         ),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
