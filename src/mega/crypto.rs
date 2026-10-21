@@ -190,7 +190,9 @@ fn aes128_cbc_decrypt_zero_iv(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let mut prev = [0u8; 16];
     let mut out = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(16) {
+    // `as_chunks` da bloques de tamaño fijo y deja fuera el resto incompleto,
+    // igual que hacía `chunks_exact(16)`: el comportamiento no cambia.
+    for chunk in data.as_chunks::<16>().0 {
         let mut block = GenericArray::clone_from_slice(chunk);
         cipher.decrypt_block(&mut block);
         for i in 0..16 {
@@ -207,7 +209,7 @@ pub fn aes128_ecb_decrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
     use aes::cipher::BlockDecrypt;
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let mut out = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(16) {
+    for chunk in data.as_chunks::<16>().0 {
         let mut block = GenericArray::clone_from_slice(chunk);
         cipher.decrypt_block(&mut block);
         out.extend_from_slice(&block);
@@ -384,10 +386,8 @@ impl MacHasher {
                 }
             }
             let full = src.len() - src.len() % 16;
-            for blk in src[..full].chunks_exact(16) {
-                let mut b = [0u8; 16];
-                b.copy_from_slice(blk);
-                self.absorb_block(&b);
+            for blk in src[..full].as_chunks::<16>().0 {
+                self.absorb_block(blk);
             }
             let rest = &src[full..];
             if !rest.is_empty() {
