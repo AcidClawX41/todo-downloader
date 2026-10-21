@@ -1604,10 +1604,10 @@ fn spec_navegador_galdl(nav: &str, dominio: &str) -> String {
 /// yt-dlp es la forma documentada de exportar un tarro. Si falla, el
 /// listador cae a «sin sesión» como antes, nunca a un error nuevo.
 async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
-    use std::collections::HashMap;
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (Instant, Option<String>)>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    /// Por clave `navegador|dominio`: cuándo se obtuvo y qué (o nada).
+    type Cache = std::collections::HashMap<String, (Instant, Option<String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Cache::new()));
     let clave = format!("{nav}|{dominio}");
     if let Some((cuando, valor)) = cache.lock().ok().and_then(|c| c.get(&clave).cloned()) {
         let vigente = if valor.is_some() { 30 * 60 } else { 2 * 60 };
@@ -15579,9 +15579,7 @@ mod tests {
         // Quien ya acotó, manda.
         assert_eq!(spec_navegador_galdl("chrome/.otro.com", "v2ph.com"), "chrome/.otro.com");
         // La casilla apagada no manda navegador alguno.
-        let mut s = Settings::default();
-        s.use_browser_cookies = false;
-        s.cookies_browser = "chrome".into();
+        let mut s = Settings { use_browser_cookies: false, cookies_browser: "chrome".into(), ..Default::default() };
         assert_eq!(navegador_cookies(&s), "");
         s.use_browser_cookies = true;
         assert_eq!(navegador_cookies(&s), "chrome");
