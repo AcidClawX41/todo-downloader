@@ -22,6 +22,7 @@ mod gallery;
 mod hf;
 mod hosters;
 mod i18n;
+mod kemono;
 mod mega;
 mod receiver;
 mod scripts;
@@ -442,6 +443,13 @@ fn paginas_encadenadas(url: &str) -> u32 {
     if v2ph::is_v2ph(url) {
         return 0;
     }
+    // Kemono: una «página» son CINCUENTA publicaciones, que en un creador de
+    // ilustraciones son del orden de mil archivos. Encadenar páginas solas
+    // llenaría la rejilla con decenas de miles de fichas; aquí se trae una y
+    // «Cargar más» pide la siguiente.
+    if kemono::es_kemono(url) {
+        return 0;
+    }
     match host_of(&url.to_ascii_lowercase()) {
         Some(h) if host_matches(&h, "facebook.com") => 3,
         _ => GALLERY_AUTO_PAGES,
@@ -664,6 +672,11 @@ enum Ev {
     FondosEncontrados(Vec<PathBuf>, u64),
     /// Miniatura de un post de booru ya decodificada
     BooruThumb(u64, egui::ColorImage),
+    /// La lista pública de creadores de Kemono o de Coomer, ya parseada.
+    /// Son cien mil entradas: va en `Arc` para que el hilo de la interfaz no
+    /// la copie, y se guarda por sitio para no volver a pedirla en la sesión.
+    KemonoCreadores(kemono::Sitio, Arc<Vec<kemono::Creador>>, u64),
+    KemonoError(String, u64),
 }
 
 /// Motor de descarga por tarea
@@ -774,6 +787,17 @@ const GALLERY_HOSTS: &[&str] = &[
     "fb.watch",
     // Bluesky
     "bsky.app",
+    // Kemono y Coomer: gallery-dl trae extractor de creador, post, búsqueda
+    // y servidores de Discord. Un creador o un post se LISTAN desde aquí por
+    // su API (ver `kemono.rs`); lo demás, y la descarga entera desde
+    // Descargas, van por gallery-dl. Se incluyen los dominios antiguos: los
+    // enlaces guardados hace un año siguen funcionando en el sitio.
+    "kemono.cr",
+    "kemono.su",
+    "kemono.party",
+    "coomer.st",
+    "coomer.su",
+    "coomer.party",
 ];
 
 /// Boorus cuyo nombre no es el dominio entero: `danbooru.donmai.us`,
@@ -1016,6 +1040,12 @@ fn engine_for_url(url: &str) -> Engine {
     if is_cyberdrop_site(url) {
         return Engine::Cyberdrop;
     }
+    // Un archivo de Kemono/Coomer ANTES de los hosts de galería: comparte
+    // dominio con las páginas, pero es un enlace directo (el hash del
+    // contenido) y lo baja el motor nativo, con reanudación.
+    if kemono::es_archivo(url) {
+        return Engine::Http;
+    }
     if is_gallery_site(url) {
         return Engine::GalleryDl;
     }
@@ -1108,6 +1138,13 @@ fn referer_for(url: &str) -> &'static str {
         "https://www.fanbox.cc/"
     } else if u.contains("v2ph.com") {
         "https://www.v2ph.com/"
+    // Kemono y Coomer: `kemono.cr/data/…` redirige al servidor de ficheros
+    // (`n2.kemono.cr`) y `img.kemono.cr` sirve las miniaturas. Hoy no exigen
+    // Referer, pero es lo que manda el navegador y cuesta nada.
+    } else if u.contains("kemono.") {
+        "https://kemono.cr/"
+    } else if u.contains("coomer.") {
+        "https://coomer.st/"
     } else {
         ""
     }
@@ -1205,6 +1242,7 @@ enum View {
     Profile,
     Capture,
     Booru,
+    Kemono,
     Torrents,
     Support,
     Done,
@@ -1499,6 +1537,187 @@ fn cookie_descarga(s: &Settings, url: &str) -> String {
                 .and_then(|d| v2ph::cookie_header_de(&txt, d))
         })
         .unwrap_or_default()
+}
+
+/// Rutas de gallery-dl y yt-dlp tal como se detectaron, para quien no tiene
+/// los ajustes a mano: los resolutores nativos reciben solo los argumentos de
+/// cookies, y la exportación de cookies de Chromium (ver `cookies_por_motor`)
+/// necesita saber a qué binario llamar. Mismo razonamiento que `i18n::lang`:
+/// hay UN gallery-dl detectado por aplicación, y un global lo describe sin
+/// arrastrar dos campos por una docena de firmas.
+static MOTORES: std::sync::Mutex<(Option<String>, Option<String>)> = std::sync::Mutex::new((None, None));
+
+/// El navegador del que leer cookies, o vacío si la casilla está apagada.
+fn navegador_cookies(s: &Settings) -> String {
+    if s.use_browser_cookies {
+        s.cookies_browser.trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Especificación de navegador para gallery-dl, ACOTADA A UN DOMINIO.
+///
+/// Su sintaxis es `BROWSER[/DOMAIN][+KEYRING][:PROFILE][::CONTAINER]`, con el
+/// dominio justo detrás del nombre. Acotar importa: lo que se exporta a
+/// disco un momento son las cookies de ESE sitio, no la sesión entera del
+/// navegador. Un punto delante hace que entren también los subdominios
+/// (`www.patreon.com`), que es como el navegador las guarda.
+fn spec_navegador_galdl(nav: &str, dominio: &str) -> String {
+    let dom = format!("/.{}", dominio.trim_start_matches('.'));
+    match nav.find(['+', ':', '/']) {
+        // Ya trae dominio: se respeta lo que puso el usuario.
+        Some(i) if nav.as_bytes()[i] == b'/' => nav.to_string(),
+        Some(i) => format!("{}{dom}{}", &nav[..i], &nav[i..]),
+        None => format!("{nav}{dom}"),
+    }
+}
+
+/// Cookies de un navegador CHROMIUM para un dominio, sacadas a través de los
+/// motores, que sí saben descifrarlas en Linux y macOS.
+///
+/// EL PROBLEMA QUE RESUELVE. Los motores nativos —Patreon por su API, V2PH—
+/// hacen sus propias peticiones y hasta ahora solo sabían leer Firefox, cuya
+/// base no está cifrada. Chromium cifra el valor de cada cookie con una clave
+/// que en Linux guarda GNOME Keyring o KWallet y en macOS el Llavero. Eso ya
+/// lo hacen gallery-dl y yt-dlp (`cookies.py` en los dos, el uno portado del
+/// otro), y reimplementarlo aquí serían tres almacenes de claves y D-Bus por
+/// ahorrar un proceso. Así que se les pide a ellos.
+///
+/// CÓMO. gallery-dl tiene `--cookies-export FILE`, que al terminar un trabajo
+/// vuelca el tarro de la sesión en formato Netscape, y `--cookies-from-browser
+/// chrome/.dominio`, que carga del navegador SOLO ese dominio. El «trabajo» es
+/// un enlace directo a una imagen que no existe, con `--no-download`: su
+/// extractor `directlink` no toca la red, y lo único que ocurre es cargar las
+/// cookies y escribirlas. Si eso no da nada, yt-dlp con `--cookies-from-browser
+/// --cookies FILE --simulate` hace lo mismo, sin filtro de dominio; se filtra
+/// aquí al leer.
+///
+/// El archivo vive lo que dura la lectura y luego se borra; lo que se guarda
+/// es la cabecera `Cookie` en memoria, media hora, para que en macOS el
+/// permiso del Llavero —que `security` pide por cada proceso— no salte en
+/// cada página. Un fallo se recuerda dos minutos por el mismo motivo.
+///
+/// NO SE HA PODIDO PROBAR DE PUNTA A PUNTA: donde se escribió esto no hay
+/// navegador ni llavero. Las dos opciones de gallery-dl están leídas en su
+/// código (`option.py`, `job.py:handle_finalize` → `cookies_store`), y la de
+/// yt-dlp es la forma documentada de exportar un tarro. Si falla, el
+/// listador cae a «sin sesión» como antes, nunca a un error nuevo.
+async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
+    use std::collections::HashMap;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (Instant, Option<String>)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let clave = format!("{nav}|{dominio}");
+    if let Some((cuando, valor)) = cache.lock().ok().and_then(|c| c.get(&clave).cloned()) {
+        let vigente = if valor.is_some() { 30 * 60 } else { 2 * 60 };
+        if cuando.elapsed().as_secs() < vigente {
+            return valor;
+        }
+    }
+
+    let (galdl, ytdlp) = MOTORES.lock().map(|m| m.clone()).unwrap_or((None, None));
+    let dir = ytdlp_dir().join("sesion-tmp");
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let tmp = dir.join(format!("{}-{}.txt", dominio.trim_start_matches('.'), std::process::id()));
+    let tmp_s = tmp.to_string_lossy().into_owned();
+    let dir_s = dir.to_string_lossy().into_owned();
+
+    async fn ejecutar(programa: &str, args: &[String]) {
+        let mut cmd = tokio::process::Command::new(programa);
+        utf8_env(&mut cmd);
+        cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000);
+        }
+        if let Ok(hijo) = cmd.spawn() {
+            // Dos minutos: en macOS el Llavero puede estar esperando a que el
+            // usuario pulse «Permitir».
+            let _ = tokio::time::timeout(Duration::from_secs(120), hijo.wait_with_output()).await;
+        }
+    }
+    async fn leer(tmp: &PathBuf, dominio: &str) -> Option<String> {
+        let txt = tokio::fs::read_to_string(tmp).await.ok()?;
+        let _ = tokio::fs::remove_file(tmp).await;
+        v2ph::cookie_header_de(&txt, dominio).filter(|h| !h.trim().is_empty())
+    }
+
+    let mut resultado = None;
+    if let Some(g) = &galdl {
+        let args = vec![
+            "--cookies-from-browser".to_string(),
+            spec_navegador_galdl(nav, dominio),
+            "--cookies-export".into(),
+            tmp_s.clone(),
+            "--no-download".into(),
+            "-q".into(),
+            "-D".into(),
+            dir_s.clone(),
+            "--".into(),
+            format!("https://{}/todo-downloader-sesion.png", dominio.trim_start_matches('.')),
+        ];
+        ejecutar(g, &args).await;
+        resultado = leer(&tmp, dominio).await;
+    }
+    if resultado.is_none() {
+        if let Some(y) = &ytdlp {
+            let args = vec![
+                "--cookies-from-browser".to_string(),
+                nav.to_string(),
+                "--cookies".into(),
+                tmp_s.clone(),
+                "--simulate".into(),
+                "--quiet".into(),
+                "--no-warnings".into(),
+                "--ignore-errors".into(),
+                "--".into(),
+                format!("https://{}/", dominio.trim_start_matches('.')),
+            ];
+            ejecutar(y, &args).await;
+            resultado = leer(&tmp, dominio).await;
+        }
+    }
+    let _ = tokio::fs::remove_file(&tmp).await;
+    if let Ok(mut c) = cache.lock() {
+        c.insert(clave, (Instant::now(), resultado.clone()));
+    }
+    resultado
+}
+
+/// Cabecera `Cookie` de un dominio para un motor NATIVO, por el camino que el
+/// usuario tenga configurado, en este orden:
+///
+/// 1. `--cookies <archivo>`: el cookies.txt, que es una elección explícita.
+/// 2. `--cookies-from-browser firefox`: la base de Firefox, leída aquí mismo.
+/// 3. `--cookies-from-browser <chromium>`: exportadas por gallery-dl o yt-dlp
+///    (ver `cookies_por_motor`). En Windows, Chrome 127+ las cifra con
+///    App-Bound Encryption y esto no puede funcionar; se intenta igual porque
+///    cuesta un proceso y hay navegadores que aún no lo aplican.
+///
+/// `None` = sin sesión. Los que llaman siguen sin ella, como siempre hicieron.
+async fn sesion_nativa(dominio: &str, cookies: &[String]) -> Option<String> {
+    if let Some(i) = cookies.iter().position(|a| a == "--cookies") {
+        let ruta = cookies.get(i + 1)?;
+        let txt = tokio::fs::read_to_string(ruta).await.ok()?;
+        return v2ph::cookie_header_de(&txt, dominio);
+    }
+    let i = cookies.iter().position(|a| a == "--cookies-from-browser")?;
+    let nav = cookies.get(i + 1)?.trim().to_string();
+    if nav.is_empty() {
+        return None;
+    }
+    if nav.to_ascii_lowercase().starts_with("firefox") {
+        let dominio = dominio.to_string();
+        return tokio::task::spawn_blocking(move || {
+            crate::cookies::firefox_cookie_header_diag(&dominio).cookie
+        })
+        .await
+        .ok()
+        .flatten();
+    }
+    cookies_por_motor(&nav, dominio).await
 }
 
 fn cookie_args(s: &Settings) -> Vec<String> {
@@ -1823,6 +2042,10 @@ struct App {
     ytdlp_installing: bool,
     ytdlp_progress: f32,
     galdl_cmd: Option<String>,
+    /// Días desde que se descargó el gallery-dl integrado; `None` si es el del
+    /// sistema o no se puede saber. Instagram cambia su API cada pocas
+    /// semanas, así que un binario viejo es la primera sospecha.
+    galdl_edad_dias: Option<u64>,
     galdl_installing: bool,
     galdl_progress: f32,
     ffmpeg_cmd: Option<String>,
@@ -1892,6 +2115,22 @@ struct App {
     tip_started: Option<Instant>,
     /// Se pone al entrar en la pestaña: fuerza elegir otro GIF al azar
     tip_reload: bool,
+    // ---- Kemono / Coomer ----
+    /// Sitio elegido en la pestaña: índice en `kemono::Sitio::ALL`.
+    kemono_sitio: usize,
+    kemono_busqueda: String,
+    /// Clave de servicio por la que filtrar («patreon»), o vacío para todos.
+    kemono_servicio: String,
+    /// Texto y etiqueta con los que filtrar las publicaciones del creador que
+    /// se abra: viajan en la URL (`?q=` y `?tag=`) y la API los aplica.
+    kemono_q: String,
+    kemono_tag: String,
+    /// Listas de creadores ya descargadas, una por sitio.
+    kemono_creadores: std::collections::HashMap<kemono::Sitio, Arc<Vec<kemono::Creador>>>,
+    kemono_cargando: bool,
+    kemono_error: String,
+    kemono_resultados: Vec<kemono::Creador>,
+    kemono_epoch: u64,
     // ---- Booru Browser ----
     booru_site: usize,
     booru_tags: String,
@@ -2135,6 +2374,7 @@ impl App {
             ytdlp_progress: 0.0,
             galdl_cmd: None,
             galdl_installing: false,
+            galdl_edad_dias: None,
             galdl_progress: 0.0,
             ffmpeg_cmd: None,
             ffmpeg_installing: false,
@@ -2180,6 +2420,16 @@ impl App {
             tip_frames: Vec::new(),
             tip_started: None,
             tip_reload: true,
+            kemono_sitio: 0,
+            kemono_busqueda: String::new(),
+            kemono_servicio: String::new(),
+            kemono_q: String::new(),
+            kemono_tag: String::new(),
+            kemono_creadores: std::collections::HashMap::new(),
+            kemono_cargando: false,
+            kemono_error: String::new(),
+            kemono_resultados: Vec::new(),
+            kemono_epoch: 0,
             booru_site: 0,
             booru_tags: String::new(),
             booru_cf: None,
@@ -2964,6 +3214,76 @@ impl App {
         self.toast_until = Some(Instant::now() + Duration::from_secs(4));
     }
 
+    /// Lista un creador o un post de Kemono/Coomer en la rejilla de Perfil.
+    ///
+    /// `pagina` 1 empieza de cero —limpia lo que hubiera—; las siguientes
+    /// AÑADEN, igual que en V2PH. Lo llaman el botón Analizar, «Cargar más» y
+    /// la pestaña Kemono al abrir un creador de la búsqueda.
+    fn explorar_kemono(&mut self, url: String, pagina: u32) {
+        // Al dominio actual: `kemono.su` y `kemono.party` se reconocen, pero
+        // la API se pide en `kemono.cr`, y la URL que se enseña debe ser la
+        // que de verdad se está consultando.
+        let url = kemono::clasificar(&url).map(|d| d.url_web()).unwrap_or(url);
+        if pagina <= 1 {
+            self.profile_url = url.clone();
+            self.profile_entries.clear();
+            self.profile_thumbs.clear();
+            self.profile_pending.clear();
+            self.profile_failed.clear();
+
+            self.gallery_url = url.clone();
+            self.gallery_items.clear();
+            self.gallery_error.clear();
+            self.gallery_aviso.clear();
+            self.gallery_page = 1;
+        }
+        self.gallery_loading = true;
+        self.gallery_flujo = false;
+        self.gallery_prefetch_left = 0;
+        self.gallery_prefetching = false;
+        self.gallery_epoch += 1;
+        let ep = self.gallery_epoch;
+        self.gallery_cancel.store(false, Ordering::Relaxed);
+        self.rt.spawn(browse_kemono(
+            self.client.clone(),
+            url,
+            pagina,
+            self.tx.clone(),
+            ep,
+            self.gallery_cancel.clone(),
+        ));
+    }
+
+    /// Filtra la lista de creadores ya descargada con lo escrito en la
+    /// pestaña. Si la lista del sitio aún no está, la pide primero y vuelve
+    /// a entrar aquí cuando llegue.
+    fn buscar_creadores_kemono(&mut self) {
+        let sitio = kemono::Sitio::ALL[self.kemono_sitio.min(kemono::Sitio::ALL.len() - 1)];
+        let Some(lista) = self.kemono_creadores.get(&sitio).cloned() else {
+            if self.kemono_cargando {
+                return;
+            }
+            self.kemono_cargando = true;
+            self.kemono_error.clear();
+            self.kemono_epoch += 1;
+            self.rt.spawn(descargar_creadores_kemono(
+                self.client.clone(),
+                sitio,
+                self.tx.clone(),
+                self.kemono_epoch,
+            ));
+            return;
+        };
+        const MAX: usize = 80;
+        self.kemono_resultados = kemono::buscar(&lista, &self.kemono_busqueda, &self.kemono_servicio, MAX)
+            .into_iter()
+            .cloned()
+            .collect();
+        if self.kemono_resultados.is_empty() && !self.kemono_busqueda.trim().is_empty() {
+            self.toast(t(self.settings.lang, "kemono.sin_resultados"));
+        }
+    }
+
     fn idx(&self, id: u64) -> Option<usize> {
         self.rows.iter().position(|r| r.id == id)
     }
@@ -3453,6 +3773,9 @@ impl App {
                     }
                 }
                 Ev::YtDlp(cmd) => {
+                    if let Ok(mut m) = MOTORES.lock() {
+                        m.1 = cmd.clone();
+                    }
                     self.ytdlp_ok = Some(cmd.is_some());
                     self.ytdlp_cmd = cmd;
                     self.ytdlp_installing = false;
@@ -3467,6 +3790,18 @@ impl App {
                     self.toast(msg);
                 }
                 Ev::GalDl(cmd) => {
+                    // Cuántos días tiene el binario integrado. Se mide aquí,
+                    // una vez, y no en cada fotograma de Ajustes.
+                    self.galdl_edad_dias = cmd
+                        .as_deref()
+                        .filter(|c| *c != "gallery-dl")
+                        .and_then(|c| std::fs::metadata(c).ok())
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|d| d.as_secs() / 86_400);
+                    if let Ok(mut m) = MOTORES.lock() {
+                        m.0 = cmd.clone();
+                    }
                     self.galdl_cmd = cmd;
                     self.galdl_installing = false;
                 }
@@ -3600,8 +3935,7 @@ impl App {
                                 page + 1,
                                 self.settings.v2ph_session.clone(),
                                 self.settings.cookies_file.clone(),
-                                self.settings.use_browser_cookies
-                                    && self.settings.cookies_browser == "firefox",
+                                navegador_cookies(&self.settings),
                                 ua_efectivo(&self.settings),
                                 self.tx.clone(),
                                 self.gallery_epoch,
@@ -3773,6 +4107,17 @@ impl App {
                     // Que la primera imagen entre en el siguiente frame.
                     self.bg_cambio = None;
                 }
+                Ev::KemonoCreadores(_, _, ep) | Ev::KemonoError(_, ep) if ep != self.kemono_epoch => {}
+                Ev::KemonoCreadores(sitio, lista, _) => {
+                    self.kemono_cargando = false;
+                    self.kemono_error.clear();
+                    self.kemono_creadores.insert(sitio, lista);
+                    self.buscar_creadores_kemono();
+                }
+                Ev::KemonoError(e, _) => {
+                    self.kemono_cargando = false;
+                    self.kemono_error = e;
+                }
                 Ev::BooruError(_, epoch) if epoch != self.booru_epoch => {}
                 Ev::BooruResults(posts, _) => {
                     self.booru_searching = false;
@@ -3883,7 +4228,7 @@ async fn download_task(
     // Err y la tarea se moría sin decir nada: la fila se quedaba en «Esperando»
     // eternamente, sin error, sin progreso y sin forma de saber por qué.
     // Un fallo invisible es peor que uno ruidoso.
-    let _permit = match sem.acquire_owned().await {
+    let _permit = match sem.clone().acquire_owned().await {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(Ev::ErrorDetail(
@@ -3974,6 +4319,20 @@ async fn download_task(
     // Antes se mandaba siempre a yt-dlp, que con douyin.com/note/… responde
     // «Unsupported URL» y ocultaba el error real del enlace directo.
     if !spec.page_url.is_empty() && (expired || !last_err.is_empty()) {
+        // Patreon: el enlace nuevo sale de la API, no de la página (que es un
+        // desafío de Cloudflare para gallery-dl). Se vuelve a entrar con el
+        // enlace fresco y SIN `page_url`, para que un segundo fallo no pueda
+        // encadenar reintentos sin fin. El permiso del semáforo se suelta
+        // antes: con una sola conexión permitida, pedir otro sin soltar este
+        // sería esperarse a uno mismo.
+        if patreon_post_id(&spec.page_url).is_some() {
+            if let Some(nueva) = patreon_url_fresca(&spec).await {
+                let spec2 = DlSpec { url: nueva, page_url: String::new(), ..spec.clone() };
+                drop(_permit);
+                Box::pin(download_task(client, spec2, sem, tx, ytdlp, galdl, cyberdrop)).await;
+                return;
+            }
+        }
         match fallback_engine(&spec.page_url) {
             Some(Engine::YtDlp) => {
                 run_ytdlp(&spec, &spec.page_url.clone(), &tx, ytdlp.as_deref()).await;
@@ -4717,10 +5076,13 @@ const PATREON_UA: &str = "Patreon/126.24.0.9 (Android; Android 14; Scale/2.10)";
 /// Se comparte entre el resolutor de colecciones y el de posts: los dos hablan
 /// con la API y los dos necesitan la sesión para ver contenido de pago.
 async fn patreon_cookie_header(cookies: &[String]) -> Option<String> {
-    let i = cookies.iter().position(|a| a == "--cookies")?;
-    let ruta = cookies.get(i + 1)?;
-    let txt = tokio::fs::read_to_string(ruta).await.ok()?;
-    v2ph::cookie_header_de(&txt, "patreon.com")
+    // Por `sesion_nativa`: cookies.txt, Firefox leído aquí, o Chromium a
+    // través de los motores. ESTE ERA EL AGUJERO: antes solo se miraba el
+    // cookies.txt, y con la casilla «usar cookies del navegador» marcada los
+    // resolutores de Patreon salían SIN sesión. Un post de pago que el usuario
+    // tiene pagado volvía como `current_user_can_view: false` y la aplicación
+    // respondía «bloqueado por nivel» con la sesión a un palmo.
+    sesion_nativa("patreon.com", cookies).await
 }
 
 /// Lista los archivos de UN post de Patreon hablando con su API.
@@ -5118,22 +5480,189 @@ async fn patreon_listar_por_api(
     algo
 }
 
+/// Una petición a la API de Kemono/Coomer, con la cabecera que exige.
+///
+/// El cliente compartido manda un `Accept` de imágenes por defecto; aquí se
+/// SUSTITUYE por `text/css`, que es lo que la API pide (ver `kemono.rs`).
+/// Sin esto la respuesta es un 403 con un texto explicándolo.
+async fn kemono_get(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let req = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, kemono::ACCEPT)
+        .header(reqwest::header::REFERER, referer_for(url));
+    let r = tokio::time::timeout(Duration::from_secs(40), req.send())
+        .await
+        .map_err(|_| msg_lang("la API no contestó a tiempo", "the API did not answer in time").to_string())?
+        .map_err(|e| e.to_string())?;
+    let estado = r.status();
+    let txt = r.text().await.map_err(|e| e.to_string())?;
+    if !estado.is_success() {
+        // El cuerpo de un 403 es una frase legible; el de un 404, un JSON
+        // con `error`. Las dos se enseñan recortadas: dicen más que el código.
+        let detalle: String = txt.chars().take(160).collect();
+        return Err(format!("HTTP {} — {}", estado.as_u16(), detalle.trim()));
+    }
+    Ok(txt)
+}
+
+/// Lista una página de un creador, o un post suelto, de Kemono/Coomer.
+///
+/// Una página son cincuenta publicaciones (lo que devuelve la API por
+/// petición), con todos sus archivos. Antes de la primera se pide el perfil
+/// para saber el nombre del creador —que es el autor de cada ficha y la
+/// carpeta de destino— y cuántas publicaciones tiene, que se enseña como
+/// aviso para que se sepa cuántas veces hay que pulsar «Cargar más».
+async fn browse_kemono(
+    client: reqwest::Client,
+    url: String,
+    pagina: u32,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+    cancelar: Arc<AtomicBool>,
+) {
+    let fin = |tx: &UnboundedSender<Ev>| {
+        let _ = tx.send(Ev::GalleryDone(epoch));
+    };
+    let Some(destino) = kemono::clasificar(&url).filter(|d| d.nativo()) else {
+        let _ = tx.send(Ev::GalleryError(
+            msg_lang(
+                "Kemono: esa URL no es un creador ni un post. Para un servidor de Discord, pégala en Descargas.",
+                "Kemono: that URL is neither a creator nor a post. For a Discord server, paste it into Downloads.",
+            )
+            .to_string(),
+            epoch,
+        ));
+        fin(&tx);
+        return;
+    };
+    let sitio = destino.sitio();
+
+    // El perfil: nombre y número de publicaciones. Si falla no se para nada:
+    // el autor cae al `{service}_{id}` de la URL, que sigue siendo único.
+    let perfil = match destino.api_perfil() {
+        Some(api) => kemono_get(&client, &api).await.ok().and_then(|t| kemono::perfil_de_json(&t).ok()),
+        None => None,
+    };
+    let autor = match &perfil {
+        Some(p) if !p.nombre.is_empty() => p.nombre.clone(),
+        _ => match &destino {
+            kemono::Destino::Creador { service, user, .. } | kemono::Destino::Post { service, user, .. } => {
+                format!("{service}_{user}")
+            }
+            kemono::Destino::Otro(_) => sitio.nombre().to_string(),
+        },
+    };
+    if cancelar.load(Ordering::Relaxed) {
+        fin(&tx);
+        return;
+    }
+
+    let resultado = match &destino {
+        kemono::Destino::Post { .. } => {
+            let api = destino.api_post().unwrap_or_default();
+            kemono_get(&client, &api).await.and_then(|t| kemono::items_de_post_json(&t, sitio, &autor))
+        }
+        kemono::Destino::Creador { q, tag, .. } => {
+            let api = destino.api_posts(pagina).unwrap_or_default();
+            let r = kemono_get(&client, &api).await.and_then(|t| kemono::items_de_listado(&t, sitio, &autor));
+            if let (Ok(items), Some(p)) = (&r, &perfil) {
+                let _ = tx.send(Ev::GalleryNotice(
+                    i18n::kemono_resumen(
+                        i18n::lang(),
+                        sitio.nombre(),
+                        &autor,
+                        p.post_count,
+                        pagina,
+                        items.iter().map(|i| i.post_id.as_str()).collect::<std::collections::HashSet<_>>().len(),
+                        !q.is_empty() || !tag.is_empty(),
+                    ),
+                    epoch,
+                ));
+            }
+            r
+        }
+        kemono::Destino::Otro(_) => unreachable!("filtrado arriba"),
+    };
+    match resultado {
+        Ok(items) => {
+            let _ = tx.send(Ev::GalleryResults(items, pagina, epoch));
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::GalleryError(format!("{}: {e}", sitio.nombre()), epoch));
+        }
+    }
+    fin(&tx);
+}
+
+/// Baja la lista pública de creadores de un sitio (3-6 MB) y la parsea fuera
+/// del hilo de la interfaz. Una vez por sesión y por sitio.
+async fn descargar_creadores_kemono(
+    client: reqwest::Client,
+    sitio: kemono::Sitio,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+) {
+    let api = format!("{}/api/v1/creators", sitio.root());
+    let txt = match kemono_get(&client, &api).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tx.send(Ev::KemonoError(format!("{}: {e}", sitio.nombre()), epoch));
+            return;
+        }
+    };
+    let parseado = tokio::task::spawn_blocking(move || kemono::creadores_de_json(&txt)).await;
+    match parseado {
+        Ok(Ok(lista)) => {
+            let _ = tx.send(Ev::KemonoCreadores(sitio, Arc::new(lista), epoch));
+        }
+        Ok(Err(e)) => {
+            let _ = tx.send(Ev::KemonoError(format!("{}: {e}", sitio.nombre()), epoch));
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::KemonoError(e.to_string(), epoch));
+        }
+    }
+}
+
 /// El identificador de campaña, que es lo que la API pide para filtrar.
 ///
 /// De una colección se saca por `/api/collection/{id}`; de una URL de creador,
 /// pidiendo su página. Se reaprovecha `patreon_campaign_de_json`, que ya es
 /// tolerante a las dos formas en que puede venir.
 async fn patreon_campaign_id(url: &str, cookies: &[String]) -> Option<String> {
+    // `patreon.com/id:10554032`: la campaña viene dada. Es la forma que
+    // gallery-dl también entiende sin pedir nada.
+    if let Some(id) = patreon_id_de_url(url) {
+        return Some(id);
+    }
     let cliente = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .build()
         .ok()?;
-    let api = match patreon_coleccion_id(url) {
+    let coleccion = patreon_coleccion_id(url);
+    let api = match &coleccion {
         Some(c) => format!("https://www.patreon.com/api/collection/{c}"),
-        // Sin colección hace falta la campaña del creador, y esa vive en la
-        // página. Se deja para gallery-dl: aquí solo se acelera lo que se
-        // puede resolver de forma barata y segura.
-        None => return None,
+        // UN CREADOR SE RESUELVE POR SU `vanity`, NO POR SU PÁGINA.
+        //
+        // Antes esto devolvía `None` y el creador se dejaba a gallery-dl, que
+        // saca la campaña DESCARGANDO LA PÁGINA del creador y buscando dentro
+        // el `__NEXT_DATA__`. Medido el 21 de octubre de 2026: esa página
+        // responde 403 «Just a moment…» —el desafío de Cloudflare— a cualquier
+        // cliente que no sea un navegador, y Python no lo es. Resultado:
+        // «Unable to extract campaign ID», con o sin sesión.
+        //
+        // La API no está detrás del desafío. `GET /api/campaigns?filter[vanity]=`
+        // devuelve la campaña con su identificador, sin sesión, y no distingue
+        // mayúsculas (`kei_artworks` encuentra a `Kei_Artworks`). Una campaña
+        // para adultos también sale: se comprobó con una marcada `is_nsfw`.
+        None => match patreon_vanity_de_url(url) {
+            Some(v) => format!(
+                "https://www.patreon.com/api/campaigns\
+                 ?filter%5Bvanity%5D={}&fields%5Bcampaign%5D=vanity&json-api-version=1.0",
+                porcentaje(&v)
+            ),
+            None => return None,
+        },
     };
     let mut req = cliente.get(&api).header(reqwest::header::USER_AGENT, PATREON_UA);
     if let Some(h) = patreon_cookie_header(cookies).await {
@@ -5143,7 +5672,151 @@ async fn patreon_campaign_id(url: &str, cookies: &[String]) -> Option<String> {
     if !r.status().is_success() {
         return None;
     }
-    patreon_campaign_de_json(&r.text().await.ok()?)
+    let txt = r.text().await.ok()?;
+    if coleccion.is_some() {
+        patreon_campaign_de_json(&txt)
+    } else {
+        patreon_campaign_de_vanity_json(&txt)
+    }
+}
+
+/// `patreon.com/id:10554032`: el número de campaña puesto en la URL.
+fn patreon_id_de_url(url: &str) -> Option<String> {
+    let u = url.to_ascii_lowercase();
+    if !host_of(&u).is_some_and(|h| host_matches(&h, "patreon.com")) {
+        return None;
+    }
+    let resto = u.split("/id:").nth(1)?;
+    let id: String = resto.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// El nombre de creador («vanity») de una URL de Patreon, si es de un creador.
+///
+/// Reconoce `patreon.com/Nombre`, `patreon.com/Nombre/posts`,
+/// `patreon.com/c/Nombre` y `patreon.com/cw/Nombre`. Un post, una colección,
+/// `/home` o cualquier ruta reservada del sitio devuelven `None`: ahí no hay
+/// creador que resolver, y tomar «posts» por un nombre mandaría a la API a
+/// buscar un creador llamado así.
+fn patreon_vanity_de_url(url: &str) -> Option<String> {
+    let host = host_of(&url.to_ascii_lowercase())?;
+    if !host_matches(&host, "patreon.com") {
+        return None;
+    }
+    let sin_esquema = url.split_once("://")?.1;
+    let ruta = sin_esquema.split(['?', '#']).next()?;
+    let mut seg = ruta.split('/').skip(1).filter(|s| !s.is_empty());
+    let primero = seg.next()?;
+    let vanity = match primero {
+        "c" | "cw" => seg.next()?,
+        p => p,
+    };
+    let resto: Vec<&str> = seg.collect();
+    let solo_posts = resto.len() == 1 && resto[0].eq_ignore_ascii_case("posts");
+    if !(resto.is_empty() || solo_posts) {
+        return None;
+    }
+    // Las rutas del propio sitio. La lista sale del patrón del extractor de
+    // gallery-dl más las que la web usa para sus páginas.
+    const RESERVADAS: &[&str] = &[
+        "home", "create", "login", "signup", "search", "posts", "messages", "collection", "user",
+        "profile", "api", "join", "checkout", "settings", "explore", "m", "bepatron", "policy",
+        "about", "legal", "pricing", "product", "features", "apps", "hc", "c", "cw",
+    ];
+    let low = vanity.to_ascii_lowercase();
+    if RESERVADAS.contains(&low.as_str()) || low.starts_with("id:") {
+        return None;
+    }
+    if !vanity.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return None;
+    }
+    Some(vanity.to_string())
+}
+
+/// Saca el identificador de campaña de `/api/campaigns?filter[vanity]=…`.
+///
+/// Viene como lista: `{"data":[{"id":"10554032","type":"campaign",…}]}`. Vacía
+/// cuando el creador no existe o cerró (`{"data":[]}`), y con `errors` cuando
+/// el nombre no es válido. Las dos devuelven `None`.
+fn patreon_campaign_de_vanity_json(texto: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(texto).ok()?;
+    let id = v
+        .get("data")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("campaign"))?
+        .get("id")?;
+    let id = id.as_str().map(str::to_string).or_else(|| id.as_u64().map(|n| n.to_string()))?;
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
+}
+
+/// Cambia la URL de un creador de Patreon por su forma `id:campaña`, que
+/// gallery-dl acepta SIN descargar la página del creador.
+///
+/// Es lo que permite que la descarga entera desde Descargas siga funcionando
+/// aunque la página esté detrás del desafío de Cloudflare: la campaña se
+/// resuelve aquí por la API (ver `patreon_campaign_id`) y gallery-dl recibe
+/// el número hecho. Los parámetros de la URL original —`?filters[tag]=`,
+/// `?sort=`— se conservan, que gallery-dl los lee tal cual.
+///
+/// Si no se puede resolver, devuelve la original: fallar hacia lo de antes es
+/// mejor que no intentarlo.
+async fn patreon_resolver_creador(url: &str, cookies: &[String]) -> String {
+    if patreon_vanity_de_url(url).is_none() {
+        return url.to_string();
+    }
+    let Some(campaign) = patreon_campaign_id(url, cookies).await else {
+        return url.to_string();
+    };
+    let query = url.split_once('?').map(|(_, q)| q.split('#').next().unwrap_or("")).unwrap_or("");
+    if query.is_empty() {
+        format!("https://www.patreon.com/id:{campaign}")
+    } else {
+        format!("https://www.patreon.com/id:{campaign}?{query}")
+    }
+}
+
+/// `{post}/{hash}` de un enlace del CDN de Patreon: lo que identifica a un
+/// archivo concreto aunque cambie la firma.
+///
+/// Un enlace es `…/patreon-media/p/post/166592250/3cbea275…/eyJ3IjoxMDgwfQ==/1.png?token-…`.
+/// La firma (`token-hash`, `token-time`) caduca; el post y el hash del medio,
+/// no. Con esto se encuentra el mismo archivo en una respuesta fresca de la
+/// API sin fiarse del nombre, que se repite («1.png») entre publicaciones.
+fn patreon_media_clave(url: &str) -> Option<String> {
+    let resto = url.split("/patreon-media/p/post/").nth(1)?;
+    let mut seg = resto.split('/');
+    let post = seg.next()?;
+    let hash = seg.next()?;
+    if post.is_empty() || hash.is_empty() || !post.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{post}/{hash}"))
+}
+
+/// Enlace FRESCO para un archivo de Patreon cuyo enlace de CDN caducó.
+///
+/// El respaldo general reintentaba por la URL de la publicación con gallery-dl,
+/// y gallery-dl resuelve un post DESCARGANDO SU PÁGINA: la misma que ahora
+/// responde con el desafío de Cloudflare. Así que el reintento moría en un
+/// 403 y el archivo se daba por perdido. La API no está detrás del desafío,
+/// y `patreon_listar_post` ya sabe hablar con ella: se pide el post otra vez
+/// y se busca el mismo archivo —por su hash de medio, no por su nombre— con
+/// una firma nueva.
+async fn patreon_url_fresca(spec: &DlSpec) -> Option<String> {
+    let items = patreon_listar_post(&spec.page_url, &spec.extra_args).await.ok()?;
+    let clave = patreon_media_clave(&spec.url);
+    if let Some(clave) = &clave {
+        if let Some(it) = items.iter().find(|i| patreon_media_clave(&i.url).as_deref() == Some(clave)) {
+            return Some(it.url.clone());
+        }
+    }
+    // Sin hash que comparar (un adjunto, que va por `/file?h=…`): el nombre.
+    let nombre = spec.path.file_name()?.to_string_lossy().into_owned();
+    items
+        .iter()
+        .find(|i| !i.filename.is_empty() && nombre.ends_with(&i.filename))
+        .map(|i| i.url.clone())
 }
 
 /// El número de una colección de Patreon, si la URL es de una.
@@ -7864,7 +8537,12 @@ async fn browse_gallery_hop(
     // página y arrastra una docena de relaciones que la rejilla no usa (ver
     // `patreon_listar_por_api` para los números medidos). Si esto no puede,
     // devuelve false y se sigue por el camino de siempre.
-    if patreon_coleccion_id(&url).is_some()
+    //
+    // Y UN CREADOR TAMBIÉN, desde octubre de 2026: su campaña se resuelve por
+    // `filter[vanity]` (ver `patreon_campaign_id`) y el listado es el mismo
+    // que el de una colección. gallery-dl habría tenido que descargar la
+    // página del creador, que ahora es un desafío de Cloudflare.
+    if (patreon_coleccion_id(&url).is_some() || patreon_vanity_de_url(&url).is_some())
         && patreon_listar_por_api(&url, &cookies, &tx, page, epoch, &cancelar).await
     {
         let _ = tx.send(Ev::GalleryDone(epoch));
@@ -7872,6 +8550,9 @@ async fn browse_gallery_hop(
     }
 
     let url = patreon_resolver_coleccion(url, &cookies).await;
+    // Si la vía nativa no pudo, que gallery-dl al menos no tenga que pasar
+    // por la página: con `id:campaña` va directo a la API.
+    let url = patreon_resolver_creador(&url, &cookies).await;
 
     let mut args = gallery::list_args_flujo(&url);
     // Se clonan porque el salto de extractor vuelve a necesitarlas
@@ -8647,8 +9328,9 @@ async fn browse_v2ph(
     // Cookie obtenida al iniciar sesión desde Ajustes, si la hay
     sesion: String,
     cookies_txt: String,
-    // ¿Está activada la casilla «usar cookies del navegador»?
-    navegador: bool,
+    // Navegador del que leer cookies, o vacío si la casilla está apagada.
+    // Firefox se lee aquí; Chromium, a través de los motores (Linux y macOS).
+    navegador: String,
     ua: String,
     tx: UnboundedSender<Ev>,
     epoch: u64,
@@ -8685,7 +9367,25 @@ async fn browse_v2ph(
                 let n = c.matches('=').count();
                 (Some(c), format!("cookies.txt: {n} · v2ph.com"))
             }
-            None if navegador => {
+            None if !navegador.is_empty() && !navegador.to_ascii_lowercase().starts_with("firefox") => {
+                // Chromium: lo exportan gallery-dl o yt-dlp, que sí descifran
+                // sus cookies en Linux y macOS (ver `cookies_por_motor`).
+                let h = cookies_por_motor(&navegador, "v2ph.com").await;
+                let n = h.as_ref().map(|c| c.matches('=').count()).unwrap_or(0);
+                let traza = if h.is_some() {
+                    format!("{navegador} → gallery-dl/yt-dlp: {n} · v2ph.com")
+                } else {
+                    format!(
+                        "{navegador}: {}",
+                        msg_lang(
+                            "gallery-dl y yt-dlp no pudieron exportar cookies de v2ph.com (en Windows, Chrome 127+ las cifra y no se pueden leer; en Linux hace falta GNOME Keyring o KWallet; en macOS, permiso del Llavero)",
+                            "gallery-dl and yt-dlp could not export v2ph.com cookies (on Windows, Chrome 127+ encrypts them and they cannot be read; on Linux it needs GNOME Keyring or KWallet; on macOS, Keychain permission)",
+                        )
+                    )
+                };
+                (h, traza)
+            }
+            None if !navegador.is_empty() => {
                 let h = tokio::task::spawn_blocking(|| {
                     cookies::firefox_cookie_header_diag("v2ph.com")
                 })
@@ -9294,6 +9994,19 @@ fn galdl_hint(lang: Lang, url: &str, err: &str) -> Option<&'static str> {
     {
         return Some(i18n::t(lang, "err.instagram_login"));
     }
+    // INSTAGRAM CAMBIA SU API CADA POCAS SEMANAS, y gallery-dl la sigue: entre
+    // el 12 de septiembre y el 17 de octubre de 2026 su registro de cambios
+    // trae seis arreglos de Instagram (`posts`, `reels`, `doc_id`, `user`…).
+    // Un binario de hace dos meses falla con un `KeyError`, un `TypeError` o
+    // un 400 del GraphQL que no es de cookies ni de red: es de versión. Ese
+    // es el consejo que se da, antes de mandar a nadie a revisar su sesión.
+    if u.contains("instagram.com")
+        && ["keyerror", "typeerror", "attributeerror", "doc_id", "graphql", "400", "unsupported url"]
+            .iter()
+            .any(|m| e.contains(m))
+    {
+        return Some(i18n::t(lang, "err.instagram_galdl_viejo"));
+    }
     // UNA COOKIE CADUCADA NO ES UNA COOKIE QUE FALTA.
     //
     // gallery-dl lo dice con todas las letras —«cookies: fanbox.cc/FANBOXSESSID
@@ -9329,6 +10042,11 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
     let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
 
     throttle().await;
+
+    // Un creador de Patreon se le entrega a gallery-dl como `id:campaña`, que
+    // resuelve sin descargar la página del creador (ver `patreon_resolver_creador`).
+    let url_resuelta = patreon_resolver_creador(url, &spec.extra_args).await;
+    let url: &str = url_resuelta.as_str();
 
     let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
 
@@ -10801,6 +11519,9 @@ impl eframe::App for App {
                 if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
                     self.view = View::Booru;
                 }
+                if nav_item(ui, self.view == View::Kemono, "🗂", t(lang, "nav.kemono"), self.kemono_resultados.len()) {
+                    self.view = View::Kemono;
+                }
                 if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
                     self.view = View::Torrents;
                 }
@@ -10925,6 +11646,12 @@ impl eframe::App for App {
                             .auto_shrink([false, false])
                             .id_source("booru_scroll")
                             .show(ui, |ui| self.booru_ui(ui));
+                    }
+                    View::Kemono => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .id_source("kemono_scroll")
+                            .show(ui, |ui| self.kemono_ui(ui));
                     }
                     View::Support => {
                         egui::ScrollArea::vertical()
@@ -11097,7 +11824,7 @@ impl App {
                     }
                 }
                 View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru
-                | View::Artistas | View::Support => {}
+                | View::Kemono | View::Artistas | View::Support => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_sized(
@@ -11120,7 +11847,7 @@ impl App {
                 View::Done => r.status == Status::Done,
                 View::Failed => matches!(r.status, Status::Error(_)),
                 View::Settings | View::Profile | View::Capture | View::Torrents | View::Booru
-                | View::Artistas | View::Support => false,
+                | View::Kemono | View::Artistas | View::Support => false,
             })
             .filter(|(_, r)| {
                 search.is_empty()
@@ -11395,6 +12122,7 @@ impl App {
                     "profile.sites_grid",
                     "profile.sites_whole",
                     "profile.sites_patreon",
+                    "profile.sites_kemono",
                     "profile.sites_cookies",
                     "profile.sites_capture",
                     "profile.sites_no",
@@ -11445,6 +12173,8 @@ impl App {
                 && matches!(hf::clasificar_ruta(&self.profile_url), hf::Destino::Repo { .. })
             {
                 ui.label(RichText::new(t(lang, "profile.hf_note")).size(11.5).color(CYAN()));
+            } else if kemono::clasificar(&self.profile_url).is_some_and(|d| d.nativo()) {
+                ui.label(RichText::new(t(lang, "profile.kemono_note")).size(11.5).color(CYAN()));
             } else if is_gallery_site(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.gallery_note")).size(11.5).color(AMBER()));
             }
@@ -11543,12 +12273,15 @@ impl App {
                         1,
                         self.settings.v2ph_session.clone(),
                         self.settings.cookies_file.clone(),
-                        self.settings.use_browser_cookies
-                            && self.settings.cookies_browser == "firefox",
+                        navegador_cookies(&self.settings),
                         ua_efectivo(&self.settings),
                         self.tx.clone(),
                         ep,
                     ));
+                } else if kemono::clasificar(&url).is_some_and(|d| d.nativo()) {
+                    // Kemono y Coomer: por su API, sin gallery-dl y con las
+                    // miniaturas del sitio. Ver `explorar_kemono`.
+                    self.explorar_kemono(url, 1);
                 } else if gallery::is_browsable(&host_of(&url).unwrap_or_default()) {
                     // Instagram y Weibo: en vez de tragarse el perfil entero,
                     // se LISTA primero y el usuario elige. gallery-dl con
@@ -12018,7 +12751,9 @@ impl App {
                     // «Cargar más» solo donde de verdad queda algo: V2PH
                     // pagina álbum a álbum. Los demás se recorren enteros de
                     // una pasada, así que el botón solo podía repetir trabajo.
-                    if v2ph::is_v2ph(&self.gallery_url)
+                    // Kemono pagina de cincuenta en cincuenta publicaciones, y
+                    // también a petición: ver `paginas_encadenadas`.
+                    if (v2ph::is_v2ph(&self.gallery_url) || kemono::es_kemono(&self.gallery_url))
                         && !self.gallery_loading
                         && soft_button(ui, t(lang, "gal.more")).clicked()
                     {
@@ -12027,7 +12762,9 @@ impl App {
                         // Pedirlo a mano rearma la carga automática, salvo en
                         // V2PH: ver el comentario del análisis.
                         self.gallery_prefetch_left = paginas_encadenadas(&url);
-                        if v2ph::is_v2ph(&url) {
+                        if kemono::es_kemono(&url) {
+                            self.explorar_kemono(url, next);
+                        } else if v2ph::is_v2ph(&url) {
                             self.gallery_loading = true;
                             self.gallery_epoch += 1;
                             let ep = self.gallery_epoch;
@@ -12037,8 +12774,7 @@ impl App {
                                 next,
                                 self.settings.v2ph_session.clone(),
                                 self.settings.cookies_file.clone(),
-                                self.settings.use_browser_cookies
-                                    && self.settings.cookies_browser == "firefox",
+                                navegador_cookies(&self.settings),
                                 ua_efectivo(&self.settings),
                                 self.tx.clone(),
                                 ep,
@@ -12067,7 +12803,7 @@ impl App {
                     // estable que redirige a una firmada NUEVA en cada
                     // petición. Meter prisa donde no la hay es tan malo como
                     // no avisar donde sí.
-                    if !es_huggingface(&self.gallery_url) {
+                    if !es_huggingface(&self.gallery_url) && !kemono::es_kemono(&self.gallery_url) {
                         ui.label(
                             RichText::new(t(lang, "gal.expiry_note"))
                                 .size(10.5)
@@ -12632,6 +13368,156 @@ impl App {
         }
     }
 
+
+    // ---------------- Vista Kemono / Coomer ----------------
+
+    fn kemono_ui(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.lang;
+        ui.label(RichText::new(t(lang, "kemono.title")).size(24.0).strong().color(Color32::WHITE));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t(lang, "kemono.subtitle")).color(MUTED()));
+        ui.add_space(14.0);
+
+        let sitio = kemono::Sitio::ALL[self.kemono_sitio.min(kemono::Sitio::ALL.len() - 1)];
+        let mut buscar = false;
+        // (URL del creador, filtros) que se abre en Perfil al pulsar en un resultado.
+        let mut abrir: Option<String> = None;
+
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(860.0));
+            // Sitio
+            ui.horizontal_wrapped(|ui| {
+                for (i, s) in kemono::Sitio::ALL.iter().enumerate() {
+                    let sel = self.kemono_sitio == i;
+                    let btn = egui::Button::new(
+                        RichText::new(s.nombre()).color(if sel { Color32::WHITE } else { MUTED() }),
+                    )
+                    .fill(if sel { ACCENT() } else { CARD_HOVER() })
+                    .rounding(Rounding::same(8.0));
+                    let r = ui.add(btn);
+                    gloss_paint(ui, &r);
+                    if r.clicked() && !sel {
+                        self.kemono_sitio = i;
+                        // Los servicios de un sitio no existen en el otro.
+                        self.kemono_servicio.clear();
+                        self.kemono_resultados.clear();
+                        self.kemono_error.clear();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+
+            // Servicio
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t(lang, "kemono.servicio")).size(12.0).color(MUTED()));
+                let todos = self.kemono_servicio.is_empty();
+                if ui.selectable_label(todos, RichText::new(t(lang, "kemono.todos")).size(12.0)).clicked() {
+                    self.kemono_servicio.clear();
+                }
+                for (clave, nombre) in sitio.servicios() {
+                    let sel = self.kemono_servicio == *clave;
+                    if ui.selectable_label(sel, RichText::new(*nombre).size(12.0)).clicked() {
+                        self.kemono_servicio = if sel { String::new() } else { clave.to_string() };
+                    }
+                }
+            });
+            ui.add_space(8.0);
+
+            // Nombre del creador
+            ui.label(RichText::new(t(lang, "kemono.creador")).size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let te = ui.add_sized(
+                    [360.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.kemono_busqueda).hint_text(t(lang, "kemono.creador_hint")),
+                );
+                if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    buscar = true;
+                }
+                if self.kemono_cargando {
+                    ui.spinner();
+                    ui.label(RichText::new(t(lang, "kemono.cargando")).size(11.5).color(CYAN()));
+                } else if primary_button(ui, t(lang, "kemono.buscar")).clicked() {
+                    buscar = true;
+                }
+            });
+
+            // Filtros de las publicaciones del creador que se abra
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t(lang, "kemono.filtros")).size(12.0).color(MUTED()));
+                ui.add_sized(
+                    [220.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.kemono_q).hint_text(t(lang, "kemono.q_hint")),
+                );
+                ui.add_sized(
+                    [160.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.kemono_tag).hint_text(t(lang, "kemono.tag_hint")),
+                );
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(t(lang, "kemono.nota")).size(11.5).color(MUTED()));
+            if !self.kemono_error.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(&self.kemono_error).size(11.5).color(RED()));
+            }
+        });
+
+        if buscar {
+            self.buscar_creadores_kemono();
+        }
+
+        // Resultados
+        if !self.kemono_resultados.is_empty() {
+            ui.add_space(12.0);
+            card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width().min(860.0));
+                ui.label(
+                    RichText::new(i18n::kemono_encontrados(lang, self.kemono_resultados.len()))
+                        .size(12.0)
+                        .color(MUTED()),
+                );
+                ui.add_space(6.0);
+                for c in &self.kemono_resultados {
+                    ui.horizontal(|ui| {
+                        if primary_button(ui, t(lang, "kemono.abrir")).clicked() {
+                            abrir = Some(c.url(sitio));
+                        }
+                        ui.label(RichText::new(&c.nombre).strong().color(TEXT()));
+                        ui.label(
+                            RichText::new(sitio.servicio_legible(&c.service)).size(12.0).color(CYAN()),
+                        );
+                        ui.label(
+                            RichText::new(i18n::kemono_favoritos(lang, c.favoritos)).size(11.5).color(MUTED()),
+                        );
+                        if ui.link(RichText::new("↗").size(12.0)).on_hover_text(c.url(sitio)).clicked() {
+                            let _ = open::that(c.url(sitio));
+                        }
+                    });
+                }
+            });
+        }
+
+        if let Some(mut url) = abrir {
+            // Los filtros viajan en la URL, que es como los entiende tanto la
+            // API como `kemono::clasificar`. Así la misma URL pegada a mano en
+            // Perfil haría exactamente lo mismo.
+            let mut params: Vec<String> = Vec::new();
+            if !self.kemono_q.trim().is_empty() {
+                params.push(format!("q={}", self.kemono_q.trim().replace(' ', "+")));
+            }
+            if !self.kemono_tag.trim().is_empty() {
+                params.push(format!("tag={}", self.kemono_tag.trim().replace(' ', "+")));
+            }
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
+            }
+            self.profile_url = url.clone();
+            self.view = View::Profile;
+            self.explorar_kemono(url, 1);
+        }
+    }
 
     // ---------------- Vista Booru ----------------
 
@@ -13751,6 +14637,8 @@ impl App {
                 // enseñar ahí este aviso desanima de algo que funciona.
                 if cfg!(windows) && self.settings.cookies_browser != "firefox" {
                     ui.label(RichText::new(t(lang, "set.cookies_warn")).size(11.5).color(AMBER()));
+                } else if self.settings.cookies_browser != "firefox" {
+                    ui.label(RichText::new(t(lang, "set.cookies_unix")).size(11.5).color(CYAN()));
                 }
             }
             ui.add_space(6.0);
@@ -13895,6 +14783,17 @@ impl App {
             } else if let Some(cmd) = self.galdl_cmd.clone() {
                 ui.label(RichText::new(t(lang, "eng.galdl_ok")).color(GREEN()));
                 ui.label(RichText::new(cmd).size(11.5).color(MUTED()));
+                if let Some(dias) = self.galdl_edad_dias {
+                    // Más de tres semanas es más de dos versiones de gallery-dl,
+                    // que sale cada semana. Con Instagram eso es la diferencia
+                    // entre listar y un `KeyError`.
+                    let (texto, color) = if dias > 21 {
+                        (i18n::galdl_edad(lang, dias, true), AMBER())
+                    } else {
+                        (i18n::galdl_edad(lang, dias, false), MUTED())
+                    };
+                    ui.label(RichText::new(texto).size(11.5).color(color));
+                }
                 if soft_button(ui, t(lang, "btn.update_latest")).clicked() {
                     self.galdl_installing = true;
                     self.galdl_progress = 0.0;
@@ -14515,6 +15414,177 @@ mod tests {
         assert!(!is_gallery_site("https://patreon.com.atacante.example/c/x"));
         assert!(!is_gallery_site("https://nopatreon.com/c/x"));
         assert!(!needs_cookies_upfront("https://patreon.com.atacante.example/home"));
+    }
+
+    /// Kemono y Coomer: un creador o un post se listan por su API desde
+    /// `kemono.rs`; todo lo demás del sitio, y la descarga entera desde
+    /// Descargas, van por gallery-dl. Sin sesión: la API es pública.
+    #[test]
+    fn kemono_se_enruta_a_gallery_dl_y_no_pide_sesion() {
+        for u in [
+            "https://kemono.cr/patreon/user/135298579",
+            "https://kemono.cr/patreon/user/135298579/post/121604542",
+            "https://kemono.su/fanbox/user/123",
+            "https://www.kemono.party/fanbox/user/123",
+            "https://coomer.st/onlyfans/user/alguien",
+            "https://coomer.su/fansly/user/alguien",
+            "https://kemono.cr/discord/server/123/456",
+        ] {
+            assert!(is_gallery_site(u), "debería ir a gallery-dl: {u}");
+            assert_eq!(engine_for_url(u), Engine::GalleryDl, "{u}");
+            assert!(!needs_cookies_upfront(u), "la API es pública: {u}");
+            // Nada de cadena de páginas: cada tanda son 50 publicaciones.
+            assert_eq!(paginas_encadenadas(u), 0, "{u}");
+        }
+        // Un archivo del sitio va al motor HTTP, con el Referer del sitio.
+        let archivo = "https://kemono.cr/data/c8/90/c890722a0ddf757cc84a8bc13002464557738cd70cb30079140344d4e9384cbe.png";
+        assert_eq!(engine_for_url(archivo), Engine::Http);
+        assert_eq!(referer_for(archivo), "https://kemono.cr/");
+        assert_eq!(referer_for("https://img.kemono.cr/thumbnail/data/x.png"), "https://kemono.cr/");
+        assert_eq!(referer_for("https://n2.coomer.st/data/x.mp4"), "https://coomer.st/");
+        // Impostores por subcadena.
+        assert!(!is_gallery_site("https://kemono.cr.atacante.example/patreon/user/1"));
+        assert!(!is_gallery_site("https://ejemplo.com/kemono.cr/patreon/user/1"));
+    }
+
+    /// Prueba EN VIVO contra la API, fuera de la tanda normal porque depende
+    /// de la red. Se lanza con `cargo test -- --ignored kemono_api`. Es la
+    /// que demuestra que la cabecera `Accept: text/css` sigue valiendo y que
+    /// la respuesta —que el servidor manda comprimida— se descomprime sola.
+    #[test]
+    #[ignore]
+    fn kemono_api_en_vivo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+            let d = kemono::clasificar("https://kemono.cr/patreon/user/135298579").unwrap();
+            let perfil = kemono_get(&client, &d.api_perfil().unwrap()).await.expect("perfil");
+            let p = kemono::perfil_de_json(&perfil).expect("perfil json");
+            assert_eq!(p.nombre, "Thebardspirit");
+            assert!(p.post_count > 500, "{}", p.post_count);
+            let pagina = kemono_get(&client, &d.api_posts(1).unwrap()).await.expect("posts");
+            let items = kemono::items_de_listado(&pagina, kemono::Sitio::Kemono, &p.nombre).expect("listado");
+            assert!(items.len() > 50, "{}", items.len());
+            let posts: std::collections::HashSet<&str> = items.iter().map(|i| i.post_id.as_str()).collect();
+            // La API pagina por offset de 50, pero una página puede traer
+            // MENOS: medido el 21 de octubre de 2026, la primera de este
+            // creador trajo 40 de sus 542. Lo que sí es fijo es el tope.
+            assert!((1..=50).contains(&posts.len()), "{}", posts.len());
+            // Y la miniatura del primero existe de verdad.
+            let r = client
+                .get(&items[0].thumb_url)
+                .header(reqwest::header::REFERER, referer_for(&items[0].thumb_url))
+                .send()
+                .await
+                .expect("miniatura");
+            assert!(r.status().is_success(), "{}", r.status());
+            // Sin la cabecera, 403: es el contrato del sitio.
+            let r = client.get(d.api_perfil().unwrap()).send().await.unwrap();
+            assert_eq!(r.status().as_u16(), 403);
+        });
+    }
+
+    /// Un creador se resuelve por su `vanity` contra la API, no descargando
+    /// su página: la página es un desafío de Cloudflare para todo lo que no
+    /// sea un navegador, y por ahí es por donde gallery-dl se caía.
+    #[test]
+    fn patreon_creador_se_resuelve_por_vanity_y_no_por_la_pagina() {
+        for u in [
+            "https://www.patreon.com/c/Kei_Artworks/posts",
+            "https://www.patreon.com/c/Kei_Artworks",
+            "https://www.patreon.com/cw/Kei_Artworks/",
+            "https://www.patreon.com/Kei_Artworks",
+            "https://patreon.com/Kei_Artworks/posts?filters[tag]=sketch",
+        ] {
+            assert_eq!(patreon_vanity_de_url(u).as_deref(), Some("Kei_Artworks"), "{u}");
+        }
+        // Lo que NO es un creador: ahí no hay nada que resolver por vanity.
+        for u in [
+            "https://www.patreon.com/posts/sorry-i-was-166592250",
+            "https://www.patreon.com/collection/12345",
+            "https://www.patreon.com/home",
+            "https://www.patreon.com/id:10554032",
+            "https://www.patreon.com/user?u=93825903",
+            "https://www.patreon.com/c/",
+            "https://www.patreon.com/Kei_Artworks/membership",
+            "https://www.patreon.com/login",
+            "https://patreon.com.atacante.example/Kei_Artworks",
+        ] {
+            assert!(patreon_vanity_de_url(u).is_none(), "{u}");
+        }
+        // `id:` viene hecho y se conserva la query, que gallery-dl lee.
+        assert_eq!(
+            patreon_id_de_url("https://www.patreon.com/id:10554032?filters[tag]=x").as_deref(),
+            Some("10554032")
+        );
+        assert!(patreon_id_de_url("https://www.patreon.com/c/Kei_Artworks").is_none());
+
+        // La respuesta real de `/api/campaigns?filter[vanity]=kei_artworks`,
+        // recortada a lo que se lee.
+        let real = r#"{"data":[{"id":"10554032","type":"campaign","attributes":{"vanity":"Kei_Artworks"}}],"meta":{"pagination":{"total":1}}}"#;
+        assert_eq!(patreon_campaign_de_vanity_json(real).as_deref(), Some("10554032"));
+        // Creador cerrado: `data` vacío. Nombre inválido: `errors`.
+        assert!(patreon_campaign_de_vanity_json(r#"{"data":[],"meta":{}}"#).is_none());
+        assert!(patreon_campaign_de_vanity_json(
+            r#"{"errors":[{"code_name":"CampaignNotFound","status":"404"}]}"#
+        )
+        .is_none());
+
+        // El archivo se reconoce por post y hash de medio, no por la firma.
+        let cdn = "https://c10.patreonusercontent.com/4/patreon-media/p/post/166592250/3cbea275b1b645d69c917870268e0d82/eyJ3IjoxMDgwfQ%3D%3D/1.png?token-hash=abc&token-time=1793836800";
+        assert_eq!(
+            patreon_media_clave(cdn).as_deref(),
+            Some("166592250/3cbea275b1b645d69c917870268e0d82")
+        );
+        assert!(patreon_media_clave("https://www.patreon.com/file?h=1&i=2").is_none());
+    }
+
+    /// En vivo, fuera de la tanda normal: `cargo test -- --ignored patreon_api`.
+    /// Demuestra que la API resuelve la campaña sin sesión y que la página del
+    /// creador, que es lo que gallery-dl usaba, responde con el desafío.
+    #[test]
+    #[ignore]
+    fn patreon_api_en_vivo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let id = patreon_campaign_id("https://www.patreon.com/c/kei_artworks/posts", &[]).await;
+            assert_eq!(id.as_deref(), Some("10554032"));
+            assert_eq!(
+                patreon_resolver_creador("https://www.patreon.com/c/Kei_Artworks/posts?sort=published_at", &[]).await,
+                "https://www.patreon.com/id:10554032?sort=published_at"
+            );
+            // Un post NO se toca: no es un creador.
+            let post = "https://www.patreon.com/posts/sorry-i-was-166592250";
+            assert_eq!(patreon_resolver_creador(post, &[]).await, post);
+            // Y el post suelto sigue saliendo por la API, con sus archivos.
+            let items = patreon_listar_post(post, &[]).await.expect("post por API");
+            assert!(!items.is_empty());
+            assert!(items.iter().all(|i| patreon_media_clave(&i.url).is_some() || i.url.contains("/file?")));
+        });
+    }
+
+    /// La especificación de navegador de gallery-dl lleva el dominio justo
+    /// detrás del nombre, antes del llavero y del perfil. Ponerlo en otro
+    /// sitio exporta la sesión entera o no exporta nada.
+    #[test]
+    fn el_navegador_se_acota_al_dominio_para_gallery_dl() {
+        assert_eq!(spec_navegador_galdl("chrome", "patreon.com"), "chrome/.patreon.com");
+        assert_eq!(spec_navegador_galdl("chrome", ".patreon.com"), "chrome/.patreon.com");
+        assert_eq!(spec_navegador_galdl("chrome:Profile 1", "v2ph.com"), "chrome/.v2ph.com:Profile 1");
+        assert_eq!(spec_navegador_galdl("chromium+kwallet", "v2ph.com"), "chromium/.v2ph.com+kwallet");
+        assert_eq!(
+            spec_navegador_galdl("brave+gnomekeyring:Default", "v2ph.com"),
+            "brave/.v2ph.com+gnomekeyring:Default"
+        );
+        // Quien ya acotó, manda.
+        assert_eq!(spec_navegador_galdl("chrome/.otro.com", "v2ph.com"), "chrome/.otro.com");
+        // La casilla apagada no manda navegador alguno.
+        let mut s = Settings::default();
+        s.use_browser_cookies = false;
+        s.cookies_browser = "chrome".into();
+        assert_eq!(navegador_cookies(&s), "");
+        s.use_browser_cookies = true;
+        assert_eq!(navegador_cookies(&s), "chrome");
     }
 
     /// `/home` son TODAS las suscripciones a la vez: puede encolar cientos de
