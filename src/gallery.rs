@@ -536,6 +536,17 @@ pub fn is_browsable(host: &str) -> bool {
         // se enseñan corresponden a lo que se va a bajar y no a una copia
         // reducida.
         "patreon.com",
+        // Kemono y Coomer. Un creador o un post se listan por su API desde
+        // `kemono.rs`, con miniaturas del propio sitio, y nunca llegan a
+        // gallery-dl. Lo que SÍ llega aquí es el resto —un servidor de
+        // Discord, por ejemplo—, que gallery-dl sabe recorrer y cuyos
+        // archivos salen de `{root}/data/…`, público y sin firma.
+        "kemono.cr",
+        "kemono.su",
+        "kemono.party",
+        "coomer.st",
+        "coomer.su",
+        "coomer.party",
     ];
     SITES
         .iter()
@@ -553,8 +564,11 @@ mod tests {
         assert!(is_browsable("twitter.com"));
         assert!(is_browsable("bsky.app"));
         assert!(is_browsable("www.facebook.com"));
+        assert!(is_browsable("kemono.cr"));
+        assert!(is_browsable("coomer.st"));
         // Y el impostor de siempre
         assert!(!is_browsable("x.com.atacante.net"));
+        assert!(!is_browsable("kemono.cr.atacante.net"));
     }
 
     /// Sin esto, el respaldo de Facebook reintentaría el enlace de CDN que

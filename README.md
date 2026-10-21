@@ -60,9 +60,15 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Native V2PH extractor** — full albums and whole model profiles, in original quality, with no external engine, plus a browser-side script for when the site pushes back.
 - **Sign-in from Settings, native Firefox cookie reading and a User-Agent field** — three ways to give the application a session, and honest documentation of what each one cannot do.
 
-## What's new in v1.8.8
+## What's new in v1.9.0
 
-A release about **telling the truth when something fails**. Every fix below started
+- **Kemono and Coomer** — a new **Kemono** tab that searches the sites' public creator list by name (filtered by service, ranked by favourites), and native listing of any creator or post pasted into **Profile**: through the site's API, no account or cookies, with the site's own thumbnails, 50 posts per batch and *Load more*. File links are content hashes and never expire. A whole creator pasted into Downloads still goes through gallery-dl. The API's `Accept: text/css` requirement is honoured; without it the site answers 403.
+- **Patreon creators resolved through the API.** Patreon's pages now sit behind a Cloudflare challenge (`403 Just a moment…`), which is where gallery-dl looked up a creator's campaign id. Creators are resolved with `/api/campaigns?filter[vanity]=`, listed natively, handed to gallery-dl as `id:<campaign>` for whole downloads, and an expired post link is refreshed through the API instead of the page.
+- **Patreon listers read your browser session.** They only knew `cookies.txt`; with *Use browser cookies* selected they ran without a session and a paid post came back as "locked by tier".
+- **Chromium cookies on Linux and macOS** for the native engines (Patreon, V2PH): exported through gallery-dl, limited to the one domain, with yt-dlp as fallback; kept in memory for half an hour, never on disk beyond a single read.
+- **Instagram errors that mean "update gallery-dl"** (`KeyError`, `TypeError`, GraphQL `400`) now say so, and *Settings → Engines* shows how old the bundled binary is. Full notes in `RELEASE-NOTES-v1.9.0.md`.
+
+**Also in v1.8.8:** a release about **telling the truth when something fails**. Every fix below started
 as a silent symptom — a blank grid, an empty list, a green "all good" next to a 403
 — and the work was as much about making the failure legible as about repairing it.
 
@@ -204,6 +210,17 @@ Listing uses `gallery-dl -j`, which dumps metadata **without downloading**. Danb
 **Danbooru, AIBooru and e621 are asked to their faces, not impersonated.** Danbooru's own API help asks clients to identify themselves and says, in as many words, *don't impersonate browsers*. Until v1.8.5 the app sent them a Chrome User-Agent over Python's TLS fingerprint — not a convincing disguise but a contradiction, and plausibly the reason Cloudflare answered 403 to a request that worked fine in a browser. It now sends `TodoDownloader/<version>` with your username, and no browser cookies at all.
 
 Those three give out a **free API key** on your profile page. It is optional, but with one the anonymous page cap and tags-per-search cap disappear, and there is no `cf_clearance` cookie to re-export every half hour. Keys go to a temporary config file, never to the command line, and never appear in diagnostics.
+
+### Kemono and Coomer
+
+A **Kemono** tab and native support in the **Profile** tab for `kemono.cr` and `coomer.st` (their old `.su` and `.party` domains are recognised and rewritten).
+
+- **Search creators by name** — the site publishes its whole creator list (about 108,000 entries, 3.4 MB on Kemono, 5.9 MB on Coomer); it is fetched once per session and searched in memory, filtered by service (Patreon, Fanbox, Fantia, Gumroad, Boosty, SubscribeStar, DLsite, Discord; OnlyFans, Fansly, CandFans on Coomer) and ranked by how many users favourite them. One click opens the creator in the Profile grid.
+- **A creator or a single post pasted into Profile** is listed through the site's public API — **no account, no cookies** — with the site's own thumbnails, 50 posts at a time, newest first; *Load more* fetches the next 50. Optional `?q=` and `?tag=` filters in the URL (or the two fields in the Kemono tab) are passed straight to the API.
+- **File links do not expire**: they are content hashes, so the usual "download soon" warning is not shown. Files go through the native HTTP engine with resume and several connections.
+- A **whole creator pasted into Downloads** is fetched in one pass by gallery-dl, which has had a Kemono extractor for years. Discord servers also go that way.
+
+Why not gallery-dl for the grid: its listing walks the creator from start to end in one pass (a 542-post illustrator is twenty thousand tiles at once), starts a Python interpreter per run, and carries no thumbnails. The API answers a page in under a second. One quirk is worth knowing: the API requires `Accept: text/css` and answers 403 with a message saying so to anything else. gallery-dl sends the same header.
 
 ### Hugging Face model repositories
 
@@ -376,7 +393,11 @@ cargo test
 ### About cookies
 
 The native engines can read **Firefox's** cookie database directly, so V2PH
-works with *Use browser cookies* selected — no manual export. Firefox stores
+and the Patreon listers (a creator, a post, a collection) work with *Use
+browser cookies* selected — no manual export. Until October 2026 the Patreon
+listers only read a `cookies.txt`, so with the browser option alone they ran
+without a session and a paid post you already had access to came back as
+"locked by tier". Firefox stores
 cookies unencrypted; Chromium browsers tie them to your Windows account (and,
 since Chrome 127, to the browser process itself), so for those a `cookies.txt`
 is still required. Only cookies whose domain matches the site being fetched are
@@ -406,7 +427,8 @@ Being upfront about these:
 - **Douyin profiles cannot be enumerated** by yt-dlp or gallery-dl — no profile extractor exists for that site. That is precisely why the **Capture** tab exists: it solves the case from inside the browser.
 - Direct CDN links **expire within hours**. If you capture thousands of files, the earliest ones may expire before their turn comes. Download in batches.
 - Pause terminates the engine subprocess tree within ~150 ms, so a half-written file may be left behind. For galleries the archive records what completed, so resuming continues cleanly.
-- **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking.
+- **Instagram is the most hostile site supported.** Even with valid cookies it may return `401` mid-profile — there are long-standing upstream issues about it. The resumable archive is a mitigation, not a cure: retry in batches. Heavy scraping can also get an account flagged, so use one you don't mind risking. Instagram also **changes its API every few weeks** and gallery-dl follows (six Instagram fixes between 12 September and 17 October 2026): a `KeyError`, `TypeError` or GraphQL `400` is almost always an outdated binary, not your cookies. *Settings → Engines* shows how many days old the bundled gallery-dl is and has an *Update to latest* button; the error hint now says so too.
+- **Patreon's web pages sit behind a Cloudflare challenge** (`403 Just a moment…`) for anything that is not a browser, which is where gallery-dl used to look up a creator's campaign id and where it re-resolved a single post. The app now resolves creators through `/api/campaigns?filter[vanity]=`, lists them through the API, hands gallery-dl the `id:<campaign>` form for whole-creator downloads, and refreshes an expired CDN link of a post through the API instead of the page. Creators that closed their page return nothing, which is the truth, not a failure.
 - The binary is **not code-signed**, so SmartScreen or your antivirus may warn about it. It's a reputation-based false positive — the hash and the full source are published here.
 - Automatic ffmpeg installation is Windows-only; on Linux and macOS use your package manager.
 - **Reading cookies straight from the browser only covers Firefox**, whose cookie database is unencrypted. It also only sees cookies **with an expiry date** — session cookies live in memory and are never on disk, so a login that issues one cannot be picked up this way by any external tool. Use a `cookies.txt` in that case. Chromium browsers are unreadable on Windows (App-Bound Encryption); on Linux and macOS yt-dlp and gallery-dl can read them, with a Keychain prompt on macOS.

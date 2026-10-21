@@ -418,6 +418,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Usa la sesión que ya tienes iniciada en ese navegador (TikTok, Douyin, YouTube…). Necesario para Douyin, perfiles privados o contenido con restricción de edad.",
             "Uses the session already signed in on that browser (TikTok, Douyin, YouTube…). Required for Douyin, private profiles or age-restricted content."
         ),
+        "set.cookies_unix" => entry!(
+            "ℹ En Linux y macOS las cookies de Chromium las leen gallery-dl y yt-dlp (Linux: GNOME Keyring o KWallet; macOS: pedirá permiso del Llavero, elige «Permitir siempre»). Los motores nativos —Patreon, V2PH— las obtienen a través de ellos, acotadas al sitio que las necesita. Si un sitio sigue sin ver tu sesión, el cookies.txt de abajo es la vía segura.",
+            "ℹ On Linux and macOS, Chromium cookies are read by gallery-dl and yt-dlp (Linux: GNOME Keyring or KWallet; macOS: it will ask for Keychain permission, choose «Always allow»). The native engines — Patreon, V2PH — get them through those, limited to the site that needs them. If a site still cannot see your session, the cookies.txt below is the safe route."
+        ),
         "set.cookies_warn" => entry!(
             "⚠ EN WINDOWS, Chrome 127+ (y Edge/Brave/Opera) cifran sus cookies con App-Bound Encryption y ninguna herramienta externa puede leerlas. Usa Firefox, o el archivo cookies.txt de abajo. En Linux y macOS sí se pueden leer (macOS pedirá permiso del Llavero).",
             "⚠ ON WINDOWS, Chrome 127+ (and Edge/Brave/Opera) encrypt cookies with App-Bound Encryption and no external tool can read them. Use Firefox, or the cookies.txt file below. On Linux and macOS they can be read (macOS will ask for Keychain permission)."
@@ -505,6 +509,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Tu cookies.txt tiene la sesión de ese sitio CADUCADA. No es que falte: es que ya no vale. Vuelve a exportarlo con el sitio abierto en el navegador, o vacía el campo del archivo en Ajustes para que se use la sesión del navegador, que se relee en cada búsqueda y no envejece en disco.",
             "Your cookies.txt holds an EXPIRED session for that site. It is not missing: it is no longer valid. Export it again with the site open in your browser, or clear the file field in Settings so the browser session is used instead — that one is re-read on every search and does not go stale on disk."
         ),
+        "err.instagram_galdl_viejo" => entry!(
+            "Instagram cambia su API cada pocas semanas y gallery-dl la sigue (seis arreglos de Instagram entre el 12 de septiembre y el 17 de octubre de 2026). Este error es típico de un gallery-dl viejo, no de las cookies: ve a Ajustes → Motores y pulsa «Actualizar a la última versión». Si persiste con el binario de hoy, entonces sí: revisa la sesión.",
+            "Instagram changes its API every few weeks and gallery-dl keeps up (six Instagram fixes between 12 September and 17 October 2026). This error is typical of an outdated gallery-dl, not of cookies: go to Settings → Engines and press «Update to latest». If it persists with today's binary, then yes: check your session."
+        ),
         "err.instagram_login" => entry!(
             "Instagram exige sesión para listar el perfil entero: activa las cookies en Ajustes \
              (Firefox, o un archivo cookies.txt) y pulsa Reintentar",
@@ -527,8 +535,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
              cookies.txt exported with an extension."),
         "profile.sites" => entry!("SITIOS SOPORTADOS", "SUPPORTED SITES"),
         "profile.sites_grid" => entry!(
-            "▸ Con vista previa y selección, viendo resolución y tipo de cada archivo:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH",
-            "▸ With preview and selection, showing each file's resolution and type:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH"),
+            "▸ Con vista previa y selección, viendo resolución y tipo de cada archivo:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH · Kemono · Coomer",
+            "▸ With preview and selection, showing each file's resolution and type:  TikTok · Instagram · X (Twitter) · Facebook · Weibo · Bilibili · Bluesky · V2PH · Kemono · Coomer"),
         "profile.sites_whole" => entry!(
             "▸ Se descargan enteros, sin listado previo:  Patreon · Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)",
             "▸ Downloaded whole, with no listing first:  Patreon · Pinterest · Tumblr · DeviantArt · Flickr · ArtStation · boorus (Danbooru, Gelbooru, Safebooru, e621, Konachan, yande.re, rule34…)"),
@@ -654,6 +662,39 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         // ---------- Manejador de magnet ----------
         // ---------- Booru Browser ----------
         "nav.booru" => entry!("Booru", "Booru"),
+
+        // ---------- Kemono / Coomer ----------
+        "nav.kemono" => entry!("Kemono", "Kemono"),
+        "kemono.title" => entry!("Kemono y Coomer", "Kemono and Coomer"),
+        "kemono.subtitle" => entry!(
+            "Busca un creador por nombre, ábrelo en Perfil con sus miniaturas y elige qué bajar. Un enlace de kemono.cr o coomer.st pegado directamente en Perfil hace lo mismo.",
+            "Search a creator by name, open them in Profile with thumbnails and pick what to download. A kemono.cr or coomer.st link pasted straight into Profile does the same."
+        ),
+        "kemono.servicio" => entry!("Servicio:", "Service:"),
+        "kemono.todos" => entry!("Todos", "All"),
+        "kemono.creador" => entry!("NOMBRE DEL CREADOR", "CREATOR NAME"),
+        "kemono.creador_hint" => entry!("Thebardspirit  ·  o su identificador numérico", "Thebardspirit  ·  or their numeric id"),
+        "kemono.buscar" => entry!("🔍 Buscar creador", "🔍 Search creator"),
+        "kemono.cargando" => entry!(
+            "descargando la lista de creadores (3-6 MB, una vez por sesión)…",
+            "downloading the creator list (3-6 MB, once per session)…"
+        ),
+        "kemono.filtros" => entry!("Al abrir, filtrar sus publicaciones:", "When opening, filter their posts:"),
+        "kemono.q_hint" => entry!("texto en el título o el cuerpo", "text in the title or body"),
+        "kemono.tag_hint" => entry!("etiqueta", "tag"),
+        "kemono.nota" => entry!(
+            "ℹ No hace falta cuenta ni cookies: la API es pública. El creador se abre en Perfil de 50 publicaciones en 50 («Cargar más» trae las siguientes), las más recientes primero. Para bajar un creador ENTERO sin elegir, pega su URL en Descargas: lo hace gallery-dl de una pasada. Los enlaces de archivo son hashes y no caducan.",
+            "ℹ No account or cookies needed: the API is public. The creator opens in Profile 50 posts at a time («Load more» fetches the next ones), newest first. To download a WHOLE creator without picking, paste their URL into Downloads: gallery-dl does it in one pass. File links are hashes and do not expire."
+        ),
+        "kemono.abrir" => entry!("Abrir en Perfil", "Open in Profile"),
+        "kemono.sin_resultados" => entry!("Ningún creador con ese nombre en este sitio", "No creator by that name on this site"),
+        "profile.kemono_note" => entry!(
+            "ℹ Kemono/Coomer: se lista por su API pública, sin sesión, con las miniaturas del sitio. Llegan 50 publicaciones por tanda, las más recientes primero; «Cargar más» trae las siguientes. Las imágenes incrustadas en el texto de un post solo aparecen al abrir ese post suelto. Un servidor de Discord se pega en Descargas.",
+            "ℹ Kemono/Coomer: listed through its public API, no session needed, with the site's own thumbnails. Posts arrive 50 at a time, newest first; «Load more» fetches the next ones. Images embedded in a post's text only appear when that single post is opened. A Discord server goes into Downloads."
+        ),
+        "profile.sites_kemono" => entry!(
+            "▸ Kemono y Coomer:  un creador o un post, por su API pública y sin sesión, con miniaturas. La pestaña Kemono busca creadores por nombre. Un creador entero pegado en Descargas se baja de una pasada con gallery-dl.",
+            "▸ Kemono and Coomer:  a creator or a post, through its public API with no session, with thumbnails. The Kemono tab searches creators by name. A whole creator pasted into Downloads is fetched in one pass by gallery-dl."),
         "booru.title" => entry!("Buscador de boorus", "Booru browser"),
         "booru.subtitle" => entry!(
             "Busca por etiquetas, revisa las miniaturas y descarga solo lo que elijas, siempre en calidad original.",
@@ -1028,6 +1069,67 @@ pub fn booru_add(lang: Lang, n: usize) -> String {
     match lang {
         Lang::Es => format!("➕  Añadir {n} a la cola"),
         Lang::En => format!("➕  Add {n} to queue"),
+    }
+}
+
+/// Aviso sobre la rejilla al listar un creador de Kemono/Coomer: quién es,
+/// cuántas publicaciones tiene en total y qué tanda se está viendo.
+pub fn kemono_resumen(
+    lang: Lang,
+    sitio: &str,
+    autor: &str,
+    total: u64,
+    pagina: u32,
+    en_pagina: usize,
+    filtrado: bool,
+) -> String {
+    let por_pagina = crate::kemono::POR_PAGINA as u64;
+    let desde = (pagina as u64 - 1) * por_pagina + 1;
+    let hasta = desde + en_pagina as u64 - 1;
+    let paginas = total.div_ceil(por_pagina).max(1);
+    match lang {
+        Lang::Es if filtrado => format!(
+            "{sitio} · {autor} · {total} publicaciones en total · tanda {pagina} ({en_pagina} publicaciones que cumplen el filtro) · «Cargar más» para la siguiente"
+        ),
+        Lang::Es => format!(
+            "{sitio} · {autor} · {total} publicaciones · tanda {pagina} de {paginas} (publicaciones {desde}–{hasta}, las más recientes primero) · «Cargar más» para la siguiente"
+        ),
+        Lang::En if filtrado => format!(
+            "{sitio} · {autor} · {total} posts in total · batch {pagina} ({en_pagina} posts matching the filter) · «Load more» for the next one"
+        ),
+        Lang::En => format!(
+            "{sitio} · {autor} · {total} posts · batch {pagina} of {paginas} (posts {desde}–{hasta}, newest first) · «Load more» for the next one"
+        ),
+    }
+}
+
+/// Cuántos días tiene el gallery-dl integrado, con aviso si son demasiados.
+pub fn galdl_edad(lang: Lang, dias: u64, viejo: bool) -> String {
+    match (lang, viejo) {
+        (Lang::Es, true) => format!(
+            "⚠ Descargado hace {dias} días. gallery-dl publica una versión por semana y Instagram cambia a ese ritmo: si Instagram falla, actualiza antes de tocar nada más."
+        ),
+        (Lang::Es, false) => format!("Descargado hace {dias} días."),
+        (Lang::En, true) => format!(
+            "⚠ Downloaded {dias} days ago. gallery-dl ships a release every week and Instagram changes at that pace: if Instagram fails, update before touching anything else."
+        ),
+        (Lang::En, false) => format!("Downloaded {dias} days ago."),
+    }
+}
+
+pub fn kemono_encontrados(lang: Lang, n: usize) -> String {
+    match lang {
+        Lang::Es if n == 1 => "1 creador".into(),
+        Lang::Es => format!("{n} creadores (los más seguidos primero)"),
+        Lang::En if n == 1 => "1 creator".into(),
+        Lang::En => format!("{n} creators (most followed first)"),
+    }
+}
+
+pub fn kemono_favoritos(lang: Lang, n: u64) -> String {
+    match lang {
+        Lang::Es => format!("♥ {n}"),
+        Lang::En => format!("♥ {n}"),
     }
 }
 
