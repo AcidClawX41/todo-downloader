@@ -135,6 +135,43 @@ with cookies or the network.
 - *Settings → Engines* shows **how many days old** the bundled gallery-dl is,
   in amber past three weeks (more than two gallery-dl releases).
 
+## Hotfix, same day: Kemono files that stayed at 0 %
+
+Found in use within the hour: forty files queued from a Kemono post, all at
+0 % with no size, while the download folder filled up with files named by
+gallery-dl.
+
+`kemono.cr/data/<hash>.png` does not serve the file. It answers `302` to the
+file server on duty (`n2.kemono.cr`) and, in that same reply, sets four
+DDoS-Guard cookies for `.kemono.cr`. A browser follows the redirect with
+those cookies; so does gallery-dl, whose `requests.Session` has a cookie jar.
+The application's `reqwest` client has no jar: it followed the redirect
+without them and the file server left the connection waiting.
+
+Then the second problem. After three failed attempts, the generic fallback
+re-resolves a file through its **page URL** with gallery-dl, and for Kemono
+the page is the whole post: forty queued files became forty downloads of the
+complete post, in parallel, under gallery-dl's own file names.
+
+What changed:
+
+- **The redirect is resolved by hand**: one request that does not follow
+  redirects, read `Location` and `Set-Cookie`, and download from the file
+  server with the `Cookie` header attached. Resume and the range probe go
+  through the same path. A live test (`cargo test -- --ignored kemono_redir`)
+  checks that the `302` still carries the `__ddg*` cookies.
+- **No page fallback for Kemono files.** Their links are content hashes and
+  never expire, so a `403` or `404` is final and is reported as such, with a
+  hint that the server limits connections per address. A `429` now waits
+  8 s × attempt instead of 1.2 s.
+- **File names**: a title that already is a file name (`8-2-2025-1.png`) is
+  not given its extension a second time.
+- **Status pill**: a native download waiting for the server reads
+  «connecting…», not «yt-dlp», a leftover label.
+
+Kemono's file servers are slow on their own account and count connections per
+address; four parallel downloads is a reasonable setting there.
+
 ## Smaller things
 
 - The supported-sites panel in Profile lists Kemono and Coomer, and the note

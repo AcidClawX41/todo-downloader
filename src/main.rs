@@ -510,10 +510,13 @@ impl Status {
             Status::Downloading => t(lang, "status.downloading").into(),
             Status::Resolving => match engine {
                 Engine::GalleryDl => "gallery-dl".into(),
+                Engine::YtDlp => "yt-dlp".into(),
+                // El motor nativo no «resuelve» nada con yt-dlp; está
+                // esperando a que el servidor conteste.
+                Engine::Http => t(lang, "status.connecting").into(),
                 Engine::FileHost => t(lang, "status.resolving_host").into(),
                 Engine::Cyberdrop => "cyberdrop-dl".into(),
                 Engine::Mega => t(lang, "status.resolving_mega").into(),
-                _ => t(lang, "status.resolving").into(),
             },
             Status::Verifying => t(lang, "status.verifying").into(),
             Status::Paused => t(lang, "status.paused").into(),
@@ -1537,6 +1540,64 @@ fn cookie_descarga(s: &Settings, url: &str) -> String {
                 .and_then(|d| v2ph::cookie_header_de(&txt, d))
         })
         .unwrap_or_default()
+}
+
+/// Resuelve un archivo de Kemono/Coomer: la URL final y las cookies que hacen
+/// falta para que el servidor de ficheros conteste.
+///
+/// LO QUE PASABA. `kemono.cr/data/…` no sirve el archivo: responde `302` hacia
+/// el servidor de ficheros de turno (`n2.kemono.cr`) y, en esa misma
+/// respuesta, deja cuatro cookies de DDoS-Guard para `.kemono.cr`. Un
+/// navegador —y gallery-dl, que usa un `requests.Session` con su tarro— sigue
+/// la redirección CON esas cookies. El cliente de `reqwest` de la aplicación
+/// no tiene tarro: seguía la redirección sin ellas, y el servidor de
+/// ficheros dejaba la conexión en espera. Medido en uso: cuarenta filas en
+/// «Descargando 0 %» sin tamaño, mientras gallery-dl bajaba los mismos
+/// archivos sin problema por el respaldo de la página.
+///
+/// Así que la redirección se hace a mano: una petición sin seguir
+/// redirecciones, se lee `Location` y los `Set-Cookie`, y la descarga de
+/// verdad va al servidor final con la cabecera `Cookie` puesta. Si el sitio
+/// contesta directamente con el archivo (sin 302), se devuelve la URL tal
+/// cual. Si contesta otra cosa, `None`: el camino normal sigue como antes.
+async fn kemono_resolver_archivo(url: &str) -> Option<(String, String)> {
+    static SIN_REDIR: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let cliente = SIN_REDIR.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(UA)
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .expect("reqwest client")
+    });
+    let req = cliente.get(url).header(reqwest::header::REFERER, referer_for(url));
+    let r = tokio::time::timeout(Duration::from_secs(30), req.send()).await.ok()?.ok()?;
+    let cookies: Vec<String> = r
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        // Solo `nombre=valor`, sin atributos (Domain, Path, Expires…).
+        .filter_map(|c| c.split(';').next().map(|p| p.trim().to_string()))
+        .filter(|p| p.contains('='))
+        .collect();
+    let cookie = cookies.join("; ");
+    if r.status().is_redirection() {
+        let destino = r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?.to_string();
+        // `Location` puede venir relativa; se resuelve contra la original.
+        let destino = if destino.starts_with("http") {
+            destino
+        } else {
+            let base = url.split_once("://")?;
+            let host = base.1.split('/').next()?;
+            format!("{}://{host}{destino}", base.0)
+        };
+        return Some((destino, cookie));
+    }
+    if r.status().is_success() {
+        return Some((url.to_string(), cookie));
+    }
+    None
 }
 
 /// Rutas de gallery-dl y yt-dlp tal como se detectaron, para quien no tiene
@@ -3408,6 +3469,19 @@ impl App {
             parts.push(author);
         }
         parts.push(&vid);
+        // Un título que YA es un nombre de archivo («8-2-2025-1.png») no
+        // lleva la extensión dos veces. Kemono da el nombre con ella, y salía
+        // «….png.png». Se recorta solo cuando coincide con la que se va a
+        // añadir, para no tocar un título que lleve un punto por otra razón.
+        let title: &str = if !ext_hint.is_empty() {
+            let sufijo = format!(".{}", ext_hint.to_ascii_lowercase());
+            title
+                .strip_suffix(sufijo.as_str())
+                .or_else(|| title.strip_suffix(sufijo.to_ascii_uppercase().as_str()))
+                .unwrap_or(title)
+        } else {
+            title
+        };
         let t = sanitize(title, 40);
         if !t.is_empty() && !title.trim().is_empty() {
             parts.push(&t);
@@ -4275,6 +4349,20 @@ async fn download_task(
     let mut last_err = String::new();
     let mut expired = false;
 
+    // Kemono/Coomer: la redirección y sus cookies de DDoS-Guard, a mano (ver
+    // `kemono_resolver_archivo`). El `spec` pasa a apuntar al servidor de
+    // ficheros con la cookie puesta; `try_http` y el sondeo la mandan solos.
+    let mut spec = spec;
+    let es_kemono = kemono::es_archivo(&spec.url);
+    if es_kemono {
+        if let Some((destino, cookie)) = kemono_resolver_archivo(&spec.url).await {
+            spec.url = destino;
+            if !cookie.is_empty() {
+                spec.cookie = cookie;
+            }
+        }
+    }
+
     // Variantes de calidad: se intenta primero el original sin procesar
     // (sin marca de agua, resolución completa) y se va bajando.
     let variants = quality_variants(&spec.url);
@@ -4305,7 +4393,11 @@ async fn download_task(
                 Err(e) => {
                     last_err = e.to_string();
                     if attempt < MAX_RETRIES {
-                        tokio::time::sleep(Duration::from_millis(1200 * attempt as u64)).await;
+                        // Un 429 es «vuelve más tarde», y 1,2 s no es más
+                        // tarde para un servidor de ficheros que cuenta las
+                        // conexiones por dirección, como los de Kemono.
+                        let ms = if last_err.contains("429") { 8000 } else { 1200 };
+                        tokio::time::sleep(Duration::from_millis(ms * attempt as u64)).await;
                     }
                 }
             }
@@ -4313,6 +4405,29 @@ async fn download_task(
         if !is_last {
             continue;
         }
+    }
+
+    // UN ARCHIVO DE KEMONO NO SE REINTENTA POR LA PÁGINA DEL POST. Sus enlaces
+    // no caducan —la ruta es el hash del contenido—, así que un 403 o un 404
+    // es definitivo y no hay enlace nuevo que pedir. Y el respaldo general
+    // habría lanzado gallery-dl sobre el POST ENTERO: cuarenta filas de un
+    // mismo post son cuarenta descargas del post completo, con otro nombre de
+    // archivo y en paralelo. Se vio en uso: la carpeta llena de archivos de
+    // gallery-dl mientras las filas seguían a cero.
+    if es_kemono {
+        let _ = tx.send(Ev::ErrorDetail(
+            spec.id,
+            format!(
+                "{}\n{}",
+                last_err,
+                msg_lang(
+                    "Kemono: el servidor de ficheros no entregó el archivo. Sus enlaces no caducan, así que no se reintenta por la página; pulsa Reintentar más tarde (el servidor limita conexiones por dirección).",
+                    "Kemono: the file server did not deliver the file. Its links do not expire, so there is no page retry; press Retry later (the server limits connections per address)."
+                )
+            ),
+        ));
+        let _ = tx.send(Ev::Status(spec.id, Status::Error(last_err.chars().take(60).collect())));
+        return;
     }
 
     // Respaldo por URL de página, SOLO si algún motor la soporta.
@@ -15583,6 +15698,30 @@ mod tests {
         assert_eq!(navegador_cookies(&s), "");
         s.use_browser_cookies = true;
         assert_eq!(navegador_cookies(&s), "chrome");
+    }
+
+    /// En vivo: `kemono.cr/data/…` redirige al servidor de ficheros y deja las
+    /// cookies de DDoS-Guard en la misma respuesta. Es lo que el motor nativo
+    /// tiene que llevarse consigo. `cargo test -- --ignored kemono_redir`.
+    #[test]
+    #[ignore]
+    fn kemono_redireccion_en_vivo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let u = "https://kemono.cr/data/88/df/88df6e1c2d21355e6cfa943b2069d31e717afeefb55ff2b88c5a134fd3e00604.png";
+            let (destino, cookie) = kemono_resolver_archivo(u).await.expect("302 con Location");
+            assert!(destino.starts_with("https://") && destino.contains("kemono.cr/data/"), "{destino}");
+            assert_ne!(destino, u, "debería ser el servidor de ficheros, no la portada");
+            assert!(cookie.contains("__ddg"), "cookies de DDoS-Guard: {cookie}");
+            assert!(!cookie.contains("Domain="), "solo nombre=valor: {cookie}");
+            // Coomer: mismo software, misma redirección (`n3.coomer.st`) y
+            // mismas cookies. Comprobado el 21 de octubre de 2026.
+            let u = "https://coomer.st/data/56/0b/560b7d65dc462caebf9a1530d95bd47374a0fdf2e40a585c83f3046b4ab1ba1e.jpg";
+            let (destino, cookie) = kemono_resolver_archivo(u).await.expect("302 con Location");
+            assert!(destino.contains("coomer.st/data/") && destino != u, "{destino}");
+            assert!(cookie.contains("__ddg"), "{cookie}");
+            assert!(kemono::es_archivo(&destino), "el servidor final también es del sitio: {destino}");
+        });
     }
 
     /// `/home` son TODAS las suscripciones a la vez: puede encolar cientos de

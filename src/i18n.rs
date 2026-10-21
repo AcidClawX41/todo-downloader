@@ -255,7 +255,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "status.queued" => entry!("En cola", "Queued"),
         "status.waiting" => entry!("Esperando", "Waiting"),
         "status.downloading" => entry!("Descargando", "Downloading"),
-        "status.resolving" => entry!("yt-dlp", "yt-dlp"),
+        "status.connecting" => entry!("conectando…", "connecting…"),
         "status.paused" => entry!("Pausado", "Paused"),
         "status.done" => entry!("Completado", "Completed"),
         "status.error" => entry!("Error", "Error"),

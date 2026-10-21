@@ -67,6 +67,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Patreon listers read your browser session.** They only knew `cookies.txt`; with *Use browser cookies* selected they ran without a session and a paid post came back as "locked by tier".
 - **Chromium cookies on Linux and macOS** for the native engines (Patreon, V2PH): exported through gallery-dl, limited to the one domain, with yt-dlp as fallback; kept in memory for half an hour, never on disk beyond a single read.
 - **Instagram errors that mean "update gallery-dl"** (`KeyError`, `TypeError`, GraphQL `400`) now say so, and *Settings → Engines* shows how old the bundled binary is. Full notes in `RELEASE-NOTES-v1.9.0.md`.
+- **Hotfix, same day: Kemono files stayed at 0 %.** `kemono.cr/data/…` answers a `302` to the file server and sets DDoS-Guard cookies in that reply; the native engine followed the redirect without them and the server left the connection waiting. The redirect is now resolved by hand with the cookies attached. The page fallback no longer fires for Kemono files (it re-downloaded the whole post with gallery-dl, once per queued file), `429` waits longer, names no longer end in `.png.png`, and a native download waiting for the server reads «connecting…» instead of «yt-dlp».
 
 **Also in v1.8.8:** a release about **telling the truth when something fails**. Every fix below started
 as a silent symptom — a blank grid, an empty list, a green "all good" next to a 403
