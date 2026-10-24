@@ -664,6 +664,14 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Ninguna de estas publicaciones trae archivos ni imágenes: son de solo texto. «Cargar más» trae las siguientes.",
             "None of these posts has files or images: they are text only. «Load more» fetches the next ones."
         ),
+        "gal.no_soportada" => entry!(
+            "gallery-dl no reconoce esta dirección (dice «Unsupported URL»): no tiene extractor para ella, y no es cosa de la sesión. Prueba con la dirección del perfil, la de una foto o la de una publicación.",
+            "gallery-dl does not recognise this address (it says “Unsupported URL”): it has no extractor for it, and it is not your session. Try the address of the profile, of a photo or of a post."
+        ),
+        "gal.fb_grupo" => entry!(
+            "Los GRUPOS de Facebook no los lista gallery-dl: no tiene extractor para ellos (dice «Unsupported URL»), y no es cosa de tu sesión. Lo que sí lee: en el navegador, abre la pestaña «Archivos multimedia» del grupo, abre la primera foto y pega aquí su enlace (facebook.com/photo/?fbid=…&set=g.…). La aplicación recorre desde ella todas las fotos del grupo, una a una y despacio, como cualquier perfil de Facebook. El enlace de una publicación del grupo también vale, con las fotos de esa publicación.",
+            "Facebook GROUPS are not listed by gallery-dl: it has no extractor for them (it says “Unsupported URL”), and it is not your session. What it does read: in the browser, open the group's «Media» tab, open the first photo and paste its link here (facebook.com/photo/?fbid=…&set=g.…). The app walks every photo of the group from it, one by one and slowly, like any Facebook profile. A link to one of the group's posts works too, with that post's photos."
+        ),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
         "gal.reason" => entry!("Lo que dijo gallery-dl:", "What gallery-dl said:"),

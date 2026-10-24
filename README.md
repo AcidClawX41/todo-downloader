@@ -147,6 +147,9 @@ Everything below went into v1.9.0 itself rather than a v1.9.1.
   use it in Spanish, made gallery-dl take `profile.php` for the user name: it asked
   for `facebook.com/profile.php/photos`, which belongs to nobody, and answered an
   empty list with no error. Such addresses now reach gallery-dl with only their `id`.
+  Facebook **groups**, which gallery-dl has no extractor for, now say so instead of
+  blaming the session, and a photo from a group pasted into *Profile* walks every
+  photo of the group (gallery-dl's `&setextract`).
 - **Pasted links keep their real names.** A Hugging Face file pasted into
   Downloads, caught by the LinkGrabber or imported from a TXT used to be saved
   under a hash (`78ac96db.gguf`), which no loader looks for. It is now saved

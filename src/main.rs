@@ -846,7 +846,7 @@ fn is_gallery_site(url: &str) -> bool {
 /// navegador al abrir un post) no la reconoce gallery-dl, pero `weibo.com/u/123` sí.
 fn normalize_profile_url(url: &str) -> String {
     let u = url.trim();
-    if let Some(limpia) = facebook_por_numero(u) {
+    if let Some(limpia) = facebook_por_numero(u).or_else(|| facebook_grupo_desde_foto(u)) {
         return limpia;
     }
     let low = u.to_ascii_lowercase();
@@ -881,6 +881,46 @@ fn facebook_por_numero(url: &str) -> Option<String> {
     let id = query.split('#').next()?.split('&').find_map(|par| par.strip_prefix("id="))?;
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
         .then(|| format!("https://www.facebook.com/profile.php?id={id}"))
+}
+
+/// Una foto de un GRUPO de Facebook (`photo/?fbid=…&set=g.<grupo>`), pedida
+/// como el conjunto entero desde ella.
+///
+/// gallery-dl no tiene extractor para un grupo (`facebook.com/groups/<id>` es
+/// «Unsupported URL»), pero sí para un conjunto de fotos a partir de una:
+/// `photo/?fbid=<foto>&set=<conjunto>&setextract`, y las fotos de un grupo
+/// son el conjunto `g.<grupo>`. Su patrón quiere esos tres parámetros
+/// seguidos y en ese orden, así que el enlace se rehace limpio: el que se
+/// copia del navegador suele llevar detrás `__cft__` y `__tn__`. Solo en
+/// Perfil, que es para listar muchas: pegada en Descargas, una foto es esa
+/// foto.
+fn facebook_grupo_desde_foto(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    if !host_matches(&host, "facebook.com") {
+        return None;
+    }
+    let (ruta, query) = url.split_once("://")?.1.split_once('/')?.1.split_once('?')?;
+    if !matches!(ruta.trim_end_matches('/'), "photo" | "photo.php") {
+        return None;
+    }
+    let param = |nombre: &str| {
+        query.split('#').next()?.split('&').find_map(|par| par.strip_prefix(nombre)?.strip_prefix('='))
+    };
+    let fbid = param("fbid").filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))?;
+    let grupo = param("set")?.strip_prefix("g.").filter(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))?;
+    Some(format!("https://www.facebook.com/photo/?fbid={fbid}&set=g.{grupo}&setextract"))
+}
+
+/// ¿Es la página de un grupo de Facebook? Lo que gallery-dl no sabe listar:
+/// una publicación del grupo (`…/posts/…`, `…/permalink/…`) sí la lee.
+fn es_grupo_facebook(url: &str) -> bool {
+    let Some(host) = host_of(url) else { return false };
+    let ruta = url.split_once("://").and_then(|(_, r)| r.split_once('/')).map_or("", |(_, r)| r);
+    let ruta = ruta.split(['?', '#']).next().unwrap_or("");
+    host_matches(&host, "facebook.com")
+        && ruta.starts_with("groups/")
+        && !ruta.contains("/posts/")
+        && !ruta.contains("/permalink/")
 }
 
 /// Fuerza UTF-8 en la entrada/salida de los ayudantes escritos en Python.
@@ -14288,7 +14328,14 @@ impl App {
                 }
                 let host_perfil = host_of(&self.profile_url.to_ascii_lowercase()).unwrap_or_default();
                 let es_ig = host_matches(&host_perfil, "instagram.com");
-                if es_x(&host_perfil) {
+                // «Unsupported URL» no es la sesión: gallery-dl no tiene
+                // extractor para esa dirección. Decir «comprueba tus cookies»
+                // a quien ha pegado un grupo de Facebook le hace buscar el
+                // fallo donde no está.
+                if self.gallery_error.contains("Unsupported URL") {
+                    let clave = if es_grupo_facebook(&self.profile_url) { "gal.fb_grupo" } else { "gal.no_soportada" };
+                    ui.label(RichText::new(t(lang, clave)).size(12.0).color(AMBER()));
+                } else if es_x(&host_perfil) {
                     if self.galdl_cmd.is_some() {
                         self.pedir_ultima_galdl();
                     }
@@ -17133,6 +17180,31 @@ mod tests {
         assert_eq!(facebook_por_numero("https://www.facebook.com/profile.php?id=abc"), None);
         assert_eq!(facebook_por_numero("https://www.facebook.com/photo.php?fbid=1&id=2"), None);
         assert_eq!(facebook_por_numero("https://facebook.com.atacante.example/profile.php?id=1"), None);
+    }
+
+    /// Un grupo de Facebook es «Unsupported URL» para gallery-dl, pero una
+    /// foto del grupo con `&setextract` recorre todas las del grupo. Su patrón
+    /// quiere `fbid`, `set` y `setextract` seguidos: el enlace se rehace.
+    #[test]
+    fn una_foto_de_un_grupo_de_facebook_trae_el_grupo_entero() {
+        let todo = "https://www.facebook.com/photo/?fbid=10161234567890&set=g.1172007927763734&setextract";
+        for u in [
+            "https://www.facebook.com/photo/?fbid=10161234567890&set=g.1172007927763734",
+            "https://www.facebook.com/photo/?fbid=10161234567890&set=g.1172007927763734&__cft__[0]=AZW&__tn__=EH-R",
+            "https://m.facebook.com/photo.php?set=g.1172007927763734&fbid=10161234567890",
+            todo,
+        ] {
+            assert_eq!(normalize_profile_url(u), todo, "{u}");
+        }
+        // La foto de un álbum o de un perfil se queda como está.
+        let album = "https://www.facebook.com/photo/?fbid=1&set=a.2";
+        assert_eq!(normalize_profile_url(album), album);
+        assert_eq!(facebook_grupo_desde_foto("https://www.facebook.com/photo/?set=g.1"), None, "sin foto de partida");
+
+        assert!(es_grupo_facebook("https://www.facebook.com/groups/1172007927763734"));
+        assert!(es_grupo_facebook("https://www.facebook.com/groups/1172007927763734/media?locale=es_ES"));
+        assert!(!es_grupo_facebook("https://www.facebook.com/groups/1172007927763734/posts/987654321"), "una publicación sí la lee");
+        assert!(!es_grupo_facebook("https://www.facebook.com/zuck"));
     }
 
     /// X no se podía añadir mientras el enrutado comparaba subcadenas: hay
