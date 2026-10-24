@@ -846,7 +846,10 @@ fn is_gallery_site(url: &str) -> bool {
 /// navegador al abrir un post) no la reconoce gallery-dl, pero `weibo.com/u/123` sí.
 fn normalize_profile_url(url: &str) -> String {
     let u = url.trim();
-    if let Some(limpia) = facebook_por_numero(u).or_else(|| facebook_grupo_desde_foto(u)) {
+    if let Some(limpia) = facebook_por_numero(u)
+        .or_else(|| facebook_grupo_por_numero(u))
+        .or_else(|| facebook_grupo_desde_foto(u))
+    {
         return limpia;
     }
     let low = u.to_ascii_lowercase();
@@ -881,6 +884,30 @@ fn facebook_por_numero(url: &str) -> Option<String> {
     let id = query.split('#').next()?.split('&').find_map(|par| par.strip_prefix("id="))?;
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
         .then(|| format!("https://www.facebook.com/profile.php?id={id}"))
+}
+
+/// Un GRUPO de Facebook por número, como el conjunto de sus fotos:
+/// `media/set/?set=g.<grupo>`.
+///
+/// gallery-dl no tiene extractor para `facebook.com/groups/<id>` («Unsupported
+/// URL»), pero sí para un conjunto de fotos, y las de un grupo son el
+/// conjunto `g.<id>`. Comprobado con una sesión de verdad (25/10/2026,
+/// gallery-dl 1.33.0-dev): Facebook sirve esa página y gallery-dl recorre el
+/// grupo foto a foto. Una publicación del grupo (`…/posts/…`, `…/permalink/…`)
+/// ya la lee gallery-dl tal cual, y un grupo con NOMBRE no se puede convertir
+/// sin abrir su página: esos se quedan como están.
+fn facebook_grupo_por_numero(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    if !host_matches(&host, "facebook.com") {
+        return None;
+    }
+    let ruta = url.split_once("://")?.1.split_once('/')?.1.split(['?', '#']).next()?;
+    let mut segs = ruta.strip_prefix("groups/")?.split('/').filter(|s| !s.is_empty());
+    let id = segs.next().filter(|id| id.bytes().all(|b| b.is_ascii_digit()))?;
+    if matches!(segs.next(), Some("posts" | "permalink")) {
+        return None;
+    }
+    Some(format!("https://www.facebook.com/media/set/?set=g.{id}"))
 }
 
 /// Una foto de un GRUPO de Facebook (`photo/?fbid=…&set=g.<grupo>`), pedida
@@ -4064,10 +4091,11 @@ impl App {
             None => url,
         };
         // Un perfil de Facebook por número, con solo su `id`, o gallery-dl
-        // no baja nada: ver `facebook_por_numero`. Con y sin `&locale=` es
-        // el mismo perfil, así que también va antes de deduplicar.
+        // no baja nada: ver `facebook_por_numero`. Un grupo por número, como
+        // el conjunto de sus fotos: ver `facebook_grupo_por_numero`. Con y
+        // sin `&locale=` es lo mismo, así que también va antes de deduplicar.
         let fb_url;
-        let url: &str = match facebook_por_numero(url) {
+        let url: &str = match facebook_por_numero(url).or_else(|| facebook_grupo_por_numero(url)) {
             Some(u) => { fb_url = u; &fb_url }
             None => url,
         };
@@ -17201,10 +17229,36 @@ mod tests {
         assert_eq!(normalize_profile_url(album), album);
         assert_eq!(facebook_grupo_desde_foto("https://www.facebook.com/photo/?set=g.1"), None, "sin foto de partida");
 
+        // El aviso de grupo solo sale para uno con nombre: los de número se
+        // convierten (ver la prueba siguiente).
+        assert!(es_grupo_facebook("https://www.facebook.com/groups/fans.de.lycoris"));
         assert!(es_grupo_facebook("https://www.facebook.com/groups/1172007927763734"));
         assert!(es_grupo_facebook("https://www.facebook.com/groups/1172007927763734/media?locale=es_ES"));
         assert!(!es_grupo_facebook("https://www.facebook.com/groups/1172007927763734/posts/987654321"), "una publicación sí la lee");
         assert!(!es_grupo_facebook("https://www.facebook.com/zuck"));
+    }
+
+    /// Un grupo de Facebook por número se lista como el conjunto de sus fotos,
+    /// `media/set/?set=g.<id>`: lo que gallery-dl sí lee. Comprobado con una
+    /// sesión de verdad el 25/10/2026: la rejilla se llena con las del grupo.
+    #[test]
+    fn un_grupo_de_facebook_por_numero_se_lista_como_su_conjunto() {
+        let conjunto = "https://www.facebook.com/media/set/?set=g.1172007927763734";
+        for u in [
+            "https://www.facebook.com/groups/1172007927763734",
+            "https://www.facebook.com/groups/1172007927763734?locale=es_ES",
+            "https://www.facebook.com/groups/1172007927763734/media",
+            "https://web.facebook.com/groups/1172007927763734/media/photos/",
+        ] {
+            assert_eq!(normalize_profile_url(u), conjunto, "{u}");
+        }
+        // Una publicación del grupo ya la lee gallery-dl: no se toca.
+        let post = "https://www.facebook.com/groups/1172007927763734/posts/987654321";
+        assert_eq!(normalize_profile_url(post), post);
+        assert_eq!(facebook_grupo_por_numero("https://www.facebook.com/groups/1172007927763734/permalink/9/"), None);
+        // Uno con nombre necesitaría abrir su página para saber el número.
+        assert_eq!(facebook_grupo_por_numero("https://www.facebook.com/groups/fans.de.lycoris"), None);
+        assert_eq!(facebook_grupo_por_numero("https://facebook.com.atacante.example/groups/1"), None);
     }
 
     /// X no se podía añadir mientras el enrutado comparaba subcadenas: hay
