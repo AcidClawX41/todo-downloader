@@ -37,8 +37,18 @@ own thumbnails, choose, download. No account and no cookies.
 |:---:|:---:|:---:|
 | ![Kemono creator search](docs/media/kemono-search.png) | ![Kemono preview grid](docs/media/kemono-preview.png) | ![Kemono downloads completed](docs/media/kemono-downloads.png) |
 
-<sub>Content shown: NASA's public Threads account, the Apache-2.0 Qwen2.5 model
-and Godot Engine's public Patreon posts.</sub>
+**More screenshots**
+
+| | |
+|:---:|:---:|
+| ![A Threads profile at original resolution, carousels marked](docs/media/screenshot-threads.png) | ![A Hugging Face repository: pick a quantisation and the counter adds up its size](docs/media/screenshot-huggingface.png) |
+| ![A 469 MB model downloading at 195 MB/s over several connections](docs/media/screenshot-speed.png) | ![Completed downloads keep their real names](docs/media/screenshot-downloads.png) |
+
+▶ **[Watch the 48-second demo video](docs/media/todo-downloader-demo.mp4)** (MP4, 0.9 MB)
+
+<sub>Content shown: NASA's public Threads account and images, the Apache-2.0
+Qwen2.5 model, Hugging Face's test repositories and Godot Engine's public
+Patreon posts.</sub>
 
 ---
 
@@ -124,6 +134,13 @@ Everything below went into v1.9.0 itself rather than a v1.9.1.
   are shown instead of looking like a hang, Instagram videos come as direct MP4s,
   and an empty Instagram list says to update gallery-dl before it blames your
   session.
+- **Pasted links keep their real names.** A Hugging Face file pasted into
+  Downloads, caught by the LinkGrabber or imported from a TXT used to be saved
+  under a hash (`78ac96db.gguf`), which no loader looks for. It is now saved
+  exactly as the repository names it, in the repository's folder, like a file
+  picked from the listing, and two `config.json` from different folders do not
+  overwrite each other. Any other direct link keeps the name it carries,
+  numbered like a browser does when the name is taken.
 - **Pause on Linux stops the download.** gallery-dl's Python process kept going
   after Pause on Ubuntu 24.04 and later, whose `kill` ignored the process-group
   form the app used; the group is now signalled with the system call, and
@@ -362,7 +379,8 @@ do not tell you whether what you marked is four gigabytes or sixty.
   `vae/` are components and all three are needed.
 - **Each file keeps its own name.** `hunyuanimage2.1_refiner_fp8_e4m3fn.safetensors`
   is saved exactly like that, because that is what ComfyUI looks for in its own
-  `models/` subfolder. The folder is prefixed only where two files in the
+  `models/` subfolder. The same goes for a single file's link pasted into
+  Downloads: it lands in its repository's folder under its exact name. The folder is prefixed only where two files in the
   repository share a name — a diffusion model has a `config.json` in three of
   them.
 - **Gated repositories are caught before anything is queued.** Hugging Face lets
