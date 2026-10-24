@@ -1653,6 +1653,19 @@ async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &Unbound
 
     let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
     let mut ultimo_error = String::new();
+    // PAUSAR TIENE QUE PARAR AQUÍ TAMBIÉN. `try_http` solo mira la bandera
+    // mientras recibe datos, y con la avería no llega a recibir nada: la
+    // fila pausada seguía resolviendo, reintentando y durmiendo, y acababa
+    // en vista previa o en Error en vez de en Pausada.
+    let pausada = || spec.cancel.load(Ordering::Relaxed);
+    macro_rules! si_pausada {
+        () => {
+            if pausada() {
+                let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+                return;
+            }
+        };
+    }
 
     if kemono::originales_caidos(sitio) {
         ultimo_error = msg_lang(
@@ -1668,8 +1681,10 @@ async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &Unbound
                 s.cookie = cookie;
             }
         }
+        si_pausada!();
         let _ = tx.send(Ev::Status(spec.id, Status::Downloading));
         for intento in 1..=2u64 {
+            si_pausada!();
             match try_http(client, &s, tx).await {
                 Ok(HttpOutcome::Done) => {
                     kemono::marcar_originales_vivos(sitio);
@@ -1699,6 +1714,7 @@ async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &Unbound
         }
     }
 
+    si_pausada!();
     // --- La vista previa ---
     if spec.kemono_preview {
         if let Some(miniatura) = kemono::url_miniatura(&url_original) {
@@ -1722,6 +1738,7 @@ async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &Unbound
             };
             let mut error_prev = String::new();
             for intento in 1..=MAX_RETRIES as u64 {
+                si_pausada!();
                 match try_http(client, &s, tx).await {
                     Ok(HttpOutcome::Done) => {
                         let _ = tx.send(Ev::Status(spec.id, Status::Done));
@@ -1766,8 +1783,42 @@ async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &Unbound
 /// cola que venga detrás no tiene que volver a descubrirlo archivo a archivo.
 async fn kemono_sondear_originales(client: &reqwest::Client, url: &str) -> bool {
     let Some(sitio) = kemono::sitio_de_archivo(url) else { return true };
+    // Tres respuestas posibles, no dos. `None` = la respuesta habla de ESE
+    // archivo (un 404, un 403), no del servidor, y no toca el disyuntor: un
+    // primer archivo borrado del nodo armaba diez minutos de vistas previas
+    // para todo el sitio, y con la opción apagada, diez minutos de errores
+    // sin intentar siquiera el original.
     let prueba = async {
-        let (destino, cookie) = kemono_resolver_archivo(url).await?;
+        let r = match cliente_sin_redireccion()
+            .get(url)
+            .header(reqwest::header::REFERER, referer_for(url))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return Some(false),
+        };
+        let estado = r.status();
+        if estado.is_server_error() {
+            return Some(false);
+        }
+        if estado.is_client_error() {
+            return None;
+        }
+        let cookie: String = r
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok()?.split(';').next().map(|p| p.trim().to_string()))
+            .filter(|p| p.contains('='))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let destino = if estado.is_redirection() {
+            let l = r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?.to_string();
+            if l.starts_with("http") { l } else { return None }
+        } else {
+            return Some(true);
+        };
         let mut req = client
             .get(&destino)
             .header(reqwest::header::RANGE, "bytes=0-0")
@@ -1775,16 +1826,26 @@ async fn kemono_sondear_originales(client: &reqwest::Client, url: &str) -> bool 
         if !cookie.is_empty() {
             req = req.header(reqwest::header::COOKIE, cookie);
         }
-        let r = req.send().await.ok()?;
-        Some(r.status().is_success())
+        match req.send().await {
+            Err(_) => Some(false),
+            Ok(r) if r.status().is_success() => Some(true),
+            Ok(r) if r.status().is_server_error() => Some(false),
+            Ok(_) => None,
+        }
     };
-    let vivo = matches!(tokio::time::timeout(Duration::from_secs(20), prueba).await, Ok(Some(true)));
-    if vivo {
-        kemono::marcar_originales_vivos(sitio);
-    } else {
-        kemono::marcar_originales_caidos(sitio);
+    match tokio::time::timeout(Duration::from_secs(20), prueba).await {
+        Ok(Some(true)) => {
+            kemono::marcar_originales_vivos(sitio);
+            true
+        }
+        // Timeout del sondeo entero, conexión cortada o 5xx: el servidor.
+        Ok(Some(false)) | Err(_) => {
+            kemono::marcar_originales_caidos(sitio);
+            false
+        }
+        // Un 4xx de ese archivo: no se sabe nada del resto. Sin aviso.
+        Ok(None) => true,
     }
-    vivo
 }
 
 /// Rutas de gallery-dl y yt-dlp tal como se detectaron, para quien no tiene
@@ -1861,11 +1922,31 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Cache::new()));
     let clave = format!("{nav}|{dominio}");
-    if let Some((cuando, valor)) = cache.lock().ok().and_then(|c| c.get(&clave).cloned()) {
+    let en_cache = || -> Option<Option<String>> {
+        let (cuando, valor) = cache.lock().ok()?.get(&clave).cloned()?;
         let vigente = if valor.is_some() { 30 * 60 } else { 2 * 60 };
-        if cuando.elapsed().as_secs() < vigente {
-            return valor;
-        }
+        (cuando.elapsed().as_secs() < vigente).then_some(valor)
+    };
+    if let Some(v) = en_cache() {
+        return v;
+    }
+    // UNA CONSULTA A LA VEZ POR CLAVE. Tres filas de Patreon que caducan a la
+    // vez lanzaban tres gallery-dl contra el MISMO archivo temporal: uno lo
+    // leía y lo borraba, otro borraba el del tercero antes de que lo leyera,
+    // y un «sin sesión» podía quedarse dos minutos en caché, con los posts de
+    // pago resolviéndose como bloqueados. Esperando aquí, el segundo y el
+    // tercero se encuentran la respuesta del primero ya en caché. En macOS
+    // ahorra además dos avisos del Llavero.
+    type Cerrojos = std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>;
+    static CERROJOS: std::sync::OnceLock<std::sync::Mutex<Cerrojos>> = std::sync::OnceLock::new();
+    let cerrojo = CERROJOS
+        .get_or_init(|| std::sync::Mutex::new(Cerrojos::new()))
+        .lock()
+        .map(|mut m| m.entry(clave.clone()).or_default().clone())
+        .unwrap_or_else(|_| Arc::new(tokio::sync::Mutex::new(())));
+    let _turno = cerrojo.lock().await;
+    if let Some(v) = en_cache() {
+        return v;
     }
 
     let (galdl, ytdlp) = MOTORES.lock().map(|m| m.clone()).unwrap_or((None, None));
@@ -1878,7 +1959,11 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await;
     }
-    let tmp = dir.join(format!("{}-{}.txt", dominio.trim_start_matches('.'), std::process::id()));
+    // Nombre propio por llamada, por si dos claves distintas coinciden en el
+    // mismo dominio (dos navegadores): el cerrojo es por clave, no por archivo.
+    static SECUENCIA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SECUENCIA.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!("{}-{}-{n}.txt", dominio.trim_start_matches('.'), std::process::id()));
     let tmp_s = tmp.to_string_lossy().into_owned();
     let dir_s = dir.to_string_lossy().into_owned();
 
@@ -5803,6 +5888,7 @@ async fn patreon_listar_por_api(
 
     let mut cursor: Option<String> = None;
     let mut algo = false;
+    let mut lotes: u32 = 0;
     loop {
         if cancelar.load(Ordering::Relaxed) {
             break;
@@ -5828,8 +5914,14 @@ async fn patreon_listar_por_api(
             return algo;
         };
         if !items.is_empty() {
+            // CADA LOTE CON SU NÚMERO. Iban todos como `page` (la 1), y la
+            // rejilla trata la página 1 como «sustituir»: cada lote de cien
+            // borraba el anterior y solo quedaba el último. Con una colección
+            // o un creador de más de cien publicaciones, se veía una parte.
+            let n = page + lotes;
+            lotes += 1;
             algo = true;
-            let _ = tx.send(Ev::GalleryResults(items, page, epoch));
+            let _ = tx.send(Ev::GalleryResults(items, n, epoch));
         }
         match siguiente {
             Some(c) => cursor = Some(c),
@@ -6192,10 +6284,35 @@ async fn patreon_url_fresca(spec: &DlSpec) -> Option<String> {
     }
     // Sin hash que comparar (un adjunto, que va por `/file?h=…`): el nombre.
     let nombre = spec.path.file_name()?.to_string_lossy().into_owned();
-    items
-        .iter()
-        .find(|i| !i.filename.is_empty() && nombre.ends_with(&i.filename))
-        .map(|i| i.url.clone())
+    patreon_por_nombre(&nombre, items.iter().map(|i| (i.filename.as_str(), i.url.as_str())))
+}
+
+/// El enlace cuyo archivo se guardó con `nombre`, o `None` si no hay
+/// exactamente uno.
+///
+/// POR EL NOMBRE COMPLETO, NO POR SUFIJO. Con `ends_with`, la fila
+/// `…_11.zip` casaba con el adjunto `1.zip` —«…_11.zip» termina en «1.zip»—
+/// y se guardaba el contenido de otro archivo con el nombre de este, sin
+/// error. Aquí se reconstruye el final exacto que pone `add_url_ext`
+/// (`_<título sin extensión>.<ext>`) y se exige que solo uno encaje.
+fn patreon_por_nombre<'a>(nombre: &str, items: impl Iterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    let mut encontrados = items.filter(|(archivo, _)| {
+        if archivo.is_empty() {
+            return false;
+        }
+        let (base, ext) = archivo.rsplit_once('.').unwrap_or((archivo, ""));
+        let fin = if ext.is_empty() {
+            format!("_{}", sanitize(base, 40))
+        } else {
+            format!("_{}.{}", sanitize(base, 40), ext.to_ascii_lowercase())
+        };
+        nombre.ends_with(&fin) || nombre == *archivo
+    });
+    let primero = encontrados.next()?;
+    if encontrados.next().is_some() {
+        return None;
+    }
+    Some(primero.1.to_string())
 }
 
 /// El número de una colección de Patreon, si la URL es de una.
@@ -8921,7 +9038,12 @@ async fn browse_gallery_hop(
     // `filter[vanity]` (ver `patreon_campaign_id`) y el listado es el mismo
     // que el de una colección. gallery-dl habría tenido que descargar la
     // página del creador, que ahora es un desafío de Cloudflare.
-    if (patreon_coleccion_id(&url).is_some() || patreon_vanity_de_url(&url).is_some())
+    // Con `?filters[…]=` en la URL, el creador va por gallery-dl (con
+    // `id:campaña`), que SÍ los aplica; el listado nativo los ignoraría y
+    // enseñaría todas las publicaciones como si fueran las filtradas.
+    let con_filtros = url.to_ascii_lowercase().contains("filters[")
+        || url.to_ascii_lowercase().contains("filters%5b");
+    if (patreon_coleccion_id(&url).is_some() || (patreon_vanity_de_url(&url).is_some() && !con_filtros))
         && patreon_listar_por_api(&url, &cookies, &tx, page, epoch, &cancelar).await
     {
         let _ = tx.send(Ev::GalleryDone(epoch));
@@ -13243,7 +13365,14 @@ impl App {
                     // una pasada, así que el botón solo podía repetir trabajo.
                     // Kemono pagina de cincuenta en cincuenta publicaciones, y
                     // también a petición: ver `paginas_encadenadas`.
-                    if (v2ph::is_v2ph(&self.gallery_url) || kemono::es_kemono(&self.gallery_url))
+                    // En Kemono, solo para un CREADOR: un post suelto no tiene
+                    // página siguiente, y pedirla lo volvía a traer entero y
+                    // duplicaba cada archivo en la rejilla.
+                    if (v2ph::is_v2ph(&self.gallery_url)
+                        || matches!(
+                            kemono::clasificar(&self.gallery_url),
+                            Some(kemono::Destino::Creador { .. })
+                        ))
                         && !self.gallery_loading
                         && soft_button(ui, t(lang, "gal.more")).clicked()
                     {
@@ -13994,10 +14123,10 @@ impl App {
             // Perfil haría exactamente lo mismo.
             let mut params: Vec<String> = Vec::new();
             if !self.kemono_q.trim().is_empty() {
-                params.push(format!("q={}", self.kemono_q.trim().replace(' ', "+")));
+                params.push(format!("q={}", kemono::query_escape(self.kemono_q.trim())));
             }
             if !self.kemono_tag.trim().is_empty() {
-                params.push(format!("tag={}", self.kemono_tag.trim().replace(' ', "+")));
+                params.push(format!("tag={}", kemono::query_escape(self.kemono_tag.trim())));
             }
             if !params.is_empty() {
                 url.push('?');
@@ -16078,6 +16207,21 @@ mod tests {
     /// La especificación de navegador de gallery-dl lleva el dominio justo
     /// detrás del nombre, antes del llavero y del perfil. Ponerlo en otro
     /// sitio exporta la sesión entera o no exporta nada.
+    /// Un enlace caducado de Patreon se busca por el nombre COMPLETO con el que
+    /// se guardó. Por sufijo, `…_11.zip` casaba con `1.zip`.
+    #[test]
+    fn el_enlace_fresco_de_patreon_es_el_del_mismo_archivo() {
+        let items = [("1.zip", "https://cdn/1"), ("11.zip", "https://cdn/11"), ("portada.png", "https://cdn/p")];
+        let buscar = |n: &str| patreon_por_nombre(n, items.iter().copied());
+        assert_eq!(buscar("Kei_166592250_11.zip").as_deref(), Some("https://cdn/11"));
+        assert_eq!(buscar("Kei_166592250_1.zip").as_deref(), Some("https://cdn/1"));
+        assert_eq!(buscar("Kei_166592250_portada.png").as_deref(), Some("https://cdn/p"));
+        assert!(buscar("Kei_166592250_otro.zip").is_none());
+        // Dos archivos que darían el mismo nombre: mejor ninguno que el malo.
+        let dobles = [("a.png", "https://cdn/a1"), ("a.png", "https://cdn/a2")];
+        assert!(patreon_por_nombre("X_1_a.png", dobles.iter().copied()).is_none());
+    }
+
     /// La URL ficticia del puente de cookies no puede ser de ningún sitio con
     /// extractor propio: con la de Patreon, gallery-dl abría su página y no
     /// exportaba nada.

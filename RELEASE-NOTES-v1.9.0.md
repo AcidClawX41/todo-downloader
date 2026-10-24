@@ -218,6 +218,32 @@ writes the file; yt-dlp fails to resolve, exits 1, and writes it anyway. Both
 verified. The temporary folder is private (`0700`) on Linux and macOS, since
 yt-dlp dumps the whole jar for an instant before it is filtered.
 
+### Found in an independent review of all the new code
+
+- **Patreon collections and creators with more than 100 posts showed only the
+  last batch.** Every API page was sent to the grid as "page 1", which the
+  grid treats as "replace". Collections had this since v1.8.8; creators
+  inherited it with the native listing. Each batch now carries its own number
+  and adds to the grid.
+- **A creator URL with `?filters[tag]=…` listed everything.** The native
+  listing ignored the filters; such URLs now go through gallery-dl with
+  `id:<campaign>`, which applies them.
+- **An expired Patreon link could be refreshed with another file's URL**:
+  matching by suffix made `…_11.zip` match `1.zip`. It now rebuilds the exact
+  name and refuses when more than one file would match.
+- **Concurrent cookie lookups clobbered each other's temporary file**, which
+  could cache "no session" for two minutes. One lookup per browser and domain
+  at a time, each with its own file.
+- **The Kemono probe armed the outage breaker on a 404 of one file**; it now
+  does so only for timeouts, dropped connections and 5xx.
+- **Pausing a Kemono row during the outage did not pause it**; it now stops
+  between attempts and before the preview.
+- **«Load more» on a single Kemono post duplicated every file**; it is shown
+  only for creators.
+- **A `%` followed by a non-ASCII character in a Kemono URL (`100%に`) closed
+  the application**, and `&`, `#` and `+` in the tab's filter fields were
+  mangled. Both fixed, with tests.
+
 ## Smaller things
 
 - The supported-sites panel in Profile lists Kemono and Coomer, and the note

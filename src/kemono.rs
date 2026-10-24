@@ -279,7 +279,7 @@ impl Destino {
 }
 
 /// Escapa lo mínimo para que un término de búsqueda viaje en una query.
-fn query_escape(s: &str) -> String {
+pub fn query_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -538,15 +538,17 @@ fn query_unescape(s: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'+' => out.push(b' '),
-            b'%' if i + 2 < bytes.len() => {
-                let hex = &s[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 2;
-                    }
-                    Err(_) => out.push(b'%'),
-                }
+            // Se decide por los BYTES, nunca cortando el `&str`: con un
+            // carácter de varios bytes detrás del `%` («100%に») el corte caía
+            // en mitad del carácter y la aplicación se cerraba. `clasificar`
+            // corre en cada fotograma sobre lo que se teclea en Perfil.
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
+                let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+                out.push(hex(bytes[i + 1]) * 16 + hex(bytes[i + 2]));
+                i += 2;
             }
             b => out.push(b),
         }
@@ -1215,6 +1217,15 @@ mod tests {
         assert_eq!(query_escape("C.C. & más"), "C.C.+%26+m%C3%A1s");
         assert_eq!(query_unescape("C.C.+%26+m%C3%A1s"), "C.C. & más");
         assert_eq!(query_unescape("100%"), "100%");
+        // No puede cerrar la aplicación: `%` seguido de un carácter multibyte.
+        assert_eq!(query_unescape("100%に"), "100%に");
+        assert_eq!(query_unescape("%E3%81%AB%"), "に%");
+        assert_eq!(query_unescape("%zz"), "%zz");
+        assert!(clasificar("https://kemono.cr/patreon/user/1?tag=100%に").is_some());
+        // Ida y vuelta con lo que rompía `R&D`, `#` y `+`.
+        for t in ["R&D", "C#", "a+b", "100% real", "に"] {
+            assert_eq!(query_unescape(&query_escape(t)), t, "{t}");
+        }
         assert_eq!(extension_de("archivo.SAFETENSORS"), "safetensors");
         assert_eq!(extension_de("sin_extension"), "");
     }
