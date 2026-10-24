@@ -94,9 +94,8 @@ and grew into something that handles 1000+ sites:
 - **Threads without a browser.** A post pasted into *Profile* (or *Downloads*) is
   listed natively, whole, at original resolution and without an account: with the
   four `Sec-Fetch-*` headers of a real navigation, threads.com serves the post's
-  media in the page itself. Of a profile, Threads shows visitors only its first
-  posts, so those are listed and the grid points to the capturer for the rest;
-  when a profile is not shown to visitors at all, the app says so.
+  media in the page itself. Whole profiles too, page by page: see the hotfix
+  below.
 - **Threads videos at maximum quality.** Meta's ready-made MP4 stops at 720p; the
   same video's DASH manifest goes up to 1080p. The app takes the best DASH video
   track and joins its separate audio with ffmpeg, without re-encoding. Without
@@ -134,6 +133,15 @@ Everything below went into v1.9.0 itself rather than a v1.9.1.
   are shown instead of looking like a hang, Instagram videos come as direct MP4s,
   and an empty Instagram list says to update gallery-dl before it blames your
   session.
+- **Whole Threads profiles, natively.** A profile pasted into *Profile* is read
+  to the end, 15 posts per page with a few seconds' pause between pages, straight
+  into the grid as they arrive, with *Stop* and *Load more* (about 300 posts per
+  batch). It repeats the query the profile page itself used, field by field as
+  Threads' own site sends it, and needs no account as far as Threads shows the
+  profile to visitors: measured, @zuck's entire history back to July 2023 (231
+  posts, 139 files) in one batch. Profiles Threads hides from visitors, or private
+  ones you follow, are read with **your threads.com session** (browser cookies or
+  a `cookies.txt`), and only then. The capturer stays as an alternative.
 - **Pasted links keep their real names.** A Hugging Face file pasted into
   Downloads, caught by the LinkGrabber or imported from a TXT used to be saved
   under a hash (`78ac96db.gguf`), which no loader looks for. It is now saved
@@ -423,7 +431,7 @@ from inside your own browser instead. See below.
   - **Douyin** profiles, which no extractor can enumerate.
   - **TikTok** profiles, as an alternative to the API path.
   - **V2PH**, for when the site rate-limits the application. The browser walks the album and hands the URLs over; downloading is unaffected because the image CDN is not the part that pushes back.
-  - **Whole Threads profiles**, which no extractor covers — and which cannot be solved by rewriting a thumbnail URL, because Meta signs its CDN links. A single post, and the first posts of a profile, are read natively from *Profile*; for the rest, the script reads the responses the page already received in your session, takes the largest entry of `image_versions2.candidates` and `video_versions`, and sends them to the **Profile** grid with their real resolution. Best installed as a **userscript**: it then hooks in before the page requests anything, and reaches the application on Chrome and Vivaldi.
+  - **Threads**, as an alternative: posts and whole profiles are read natively from *Profile*, but the script reads what the page already received in your own session — the largest entry of `image_versions2.candidates` and `video_versions` — and sends it to the **Profile** grid with its real resolution, for when Threads stops serving the application. Best installed as a **userscript**: it then hooks in before the page requests anything, and reaches the application on Chrome and Vivaldi.
   
   Chrome blocks pages from reaching `127.0.0.1`, so there the script falls back to saving a JSON file you import from *Downloads → Import TXT/JSON*. Firefox delivers directly.
 - TXT/JSON import and drag-and-drop onto the window.
@@ -516,7 +524,7 @@ cargo test
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
 | Grab a Threads post | **Profile** tab → paste `threads.com/@user/post/…` → analyze (no account needed) |
-| Grab a whole Threads profile | **Capture** tab → install the userscript → open the profile → press its button |
+| Grab a whole Threads profile | **Profile** tab → paste `threads.com/@user` → analyze; *Load more* for profiles over ~300 posts |
 | V2PH keeps returning 403 | **Capture** tab → V2PH script → paste into the album's console |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
 | Browse and grab booru art | **Booru** tab → pick a site → tags → select thumbnails → queue |
@@ -574,7 +582,7 @@ Being upfront about these:
 - **A Hugging Face repository with several precision variants in one folder ticks all of them.** `Comfy-Org/Qwen-Image_ComfyUI` offers eight diffusion models — bf16, fp8_e4m3fn, fp8_hq, fp8mixed, nvfp4 — and only the `.bin`-vs-`.safetensors` and GGUF cases are recognised as alternatives. That listing marks around 260 GB. Use *Select none* and pick.
 - **Multi-connection downloads apply only where the server proves it supports ranges**, and only to heavy files. If a host rate-limits you for opening several, set connections per file to 1.
 - **Bilibili and NicoNico require ffmpeg**, always — both serve video and audio as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast, or to connections its anti-bot control distrusts; requests are spaced out, and a signed-in session usually helps. Bilibili's video pages need the app's yt-dlp plugin since its site change of 22 October 2026, until yt-dlp catches up.
-- **Threads profiles without the capturer** show only the posts Threads shows visitors — the first few. The app deliberately does not send your Meta session from outside the browser: that is the kind of activity Meta flags.
+- **Threads profiles hidden from visitors need your threads.com session**, and the app uses it only when Threads shows visitors nothing: a Meta session used outside the browser is the kind of activity Meta watches. That request mirrors Threads' own site field by field, but it could not be tested against a real account while it was written; if it fails, the notice says why and the capturer reads from your browser. Profiles are read 15 posts per page with pauses of a few seconds, so a very large one takes a while.
 
 ## Architecture
 
@@ -593,7 +601,7 @@ src/
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
 ├── receiver.rs   Local HTTP receiver (Click'n'Load), 127.0.0.1 only
-├── threads.rs    Threads posts and profiles read natively from the page (no extractor exists)
+├── threads.rs    Threads posts and whole profiles, read natively: the page, then its own query page by page
 ├── ytdlp_plugins.rs  yt-dlp plugin written and loaded for Bilibili's new page paths
 └── scripts.rs    Browser console scripts (TikTok, Douyin, V2PH, Threads) with an on-page HUD
 ```

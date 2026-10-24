@@ -452,6 +452,10 @@ fn paginas_encadenadas(url: &str) -> u32 {
     if kemono::es_kemono(url) {
         return 0;
     }
+    // Threads tampoco: recorre sus propias páginas (`threads_recorrer`).
+    if is_threads(url) {
+        return 0;
+    }
     match host_of(&url.to_ascii_lowercase()) {
         Some(h) if host_matches(&h, "facebook.com") => 3,
         _ => GALLERY_AUTO_PAGES,
@@ -647,6 +651,9 @@ enum Ev {
     /// cuantizaciones…). Va aparte porque `gallery_error` solo se pinta
     /// cuando el listado viene vacío, y esto acompaña a un listado bueno.
     GalleryNotice(String, u64),
+    /// Por dónde va la lectura de un perfil de Threads, tras cada página que
+    /// llega a la rejilla; `None` = se ha leído entero.
+    ThreadsSigue(Option<Box<ThreadsSigue>>, u64),
     /// Miniatura de un elemento de galería ya decodificada (índice, imagen)
     GalleryThumb(usize, egui::ColorImage, u64),
     /// Dimensiones REALES del archivo previsualizado, antes de reducirlo.
@@ -2727,6 +2734,9 @@ struct App {
     /// Último motivo de fallo, íntegro y legible en la propia vista
     gallery_error: String,
     gallery_aviso: String,
+    /// Por dónde va un perfil de Threads, para «Cargar más» (ver
+    /// `threads_recorrer`).
+    threads_sigue: Option<Box<ThreadsSigue>>,
     /// Con qué fuentes salió la última búsqueda de artistas.
     art_aviso: String,
     /// Nombres del personaje en chino, para buscarlo en Weibo.
@@ -3007,6 +3017,7 @@ impl App {
             gallery_url: String::new(),
             gallery_error: String::new(),
             gallery_aviso: String::new(),
+            threads_sigue: None,
             art_aviso: String::new(),
             art_alias: Vec::new(),
             art_aviso_ok: false,
@@ -3752,6 +3763,11 @@ impl App {
         self.gallery_prefetching = false;
         self.gallery_loading = false;
         self.gallery_epoch += 1;
+        // Un perfil de Threads se queda donde iba, y el aviso lo dice: el de
+        // «leyendo…» ya no es verdad, y «Cargar más» sigue desde ahí.
+        if let Some(s) = self.threads_sigue.as_deref().filter(|_| is_threads(&self.gallery_url)) {
+            self.gallery_aviso = aviso_threads(self.settings.lang, s, i18n::FaseThreads::Tanda);
+        }
     }
 
     /// Pregunta UNA vez por sesión cuál es la última versión de gallery-dl.
@@ -3821,10 +3837,11 @@ impl App {
     }
 
     /// Lee un post o un perfil de Threads sin navegador (ver `threads.rs`) y
-    /// lo pone en la rejilla. Lo que Threads no enseña sin sesión —el resto
-    /// de un perfil— se avisa y se deja al userscript.
+    /// lo pone en la rejilla. Un perfil llega por páginas, en flujo, hasta una
+    /// tanda; el resto, con «Cargar más» (`seguir_threads`).
     fn explorar_threads(&mut self, url: String) {
         let url = threads::clasificar(&url).map(|d| d.url_web()).unwrap_or(url);
+        let es_perfil = matches!(threads::clasificar(&url), Some(threads::Destino::Perfil { .. }));
         self.profile_url = url.clone();
         self.profile_entries.clear();
         self.profile_thumbs.clear();
@@ -3835,15 +3852,53 @@ impl App {
         self.gallery_items.clear();
         self.gallery_error.clear();
         self.gallery_aviso.clear();
+        self.threads_sigue = None;
         self.gallery_page = 1;
         self.gallery_loading = true;
-        self.gallery_flujo = false;
+        // Un perfil va en flujo, como un listado de gallery-dl: la primera
+        // tanda no es el final, y lo que lo apaga es `GalleryDone`.
+        self.gallery_flujo = es_perfil;
+        self.gallery_prefetching = es_perfil;
         self.gallery_prefetch_left = 0;
-        self.gallery_prefetching = false;
         self.gallery_epoch += 1;
         let ep = self.gallery_epoch;
         self.gallery_cancel.store(false, Ordering::Relaxed);
-        self.rt.spawn(browse_threads(self.client.clone(), url, self.tx.clone(), ep, self.gallery_cancel.clone()));
+        self.rt.spawn(browse_threads(
+            self.client.clone(),
+            url,
+            cookie_args(&self.settings),
+            ua_efectivo(&self.settings),
+            self.tx.clone(),
+            ep,
+            self.gallery_cancel.clone(),
+        ));
+    }
+
+    /// «Cargar más» en un perfil de Threads: la tanda siguiente, desde donde
+    /// se quedó la anterior (o donde se detuvo).
+    fn seguir_threads(&mut self) {
+        let Some(sigue) = self.threads_sigue.as_deref() else { return };
+        let mut sigue = sigue.clone();
+        // Lo que ya está en la rejilla no se repite, aunque se detuviera
+        // justo entre una página y el aviso de por dónde iba.
+        sigue.vistas.extend(self.gallery_items.iter().map(|i| i.post_id.clone()));
+        self.gallery_error.clear();
+        self.gallery_loading = true;
+        self.gallery_flujo = true;
+        self.gallery_prefetching = true;
+        self.gallery_prefetch_left = 0;
+        self.gallery_epoch += 1;
+        let ep = self.gallery_epoch;
+        self.gallery_cancel.store(false, Ordering::Relaxed);
+        self.rt.spawn(threads_recorrer(
+            self.client.clone(),
+            sigue,
+            self.gallery_page,
+            cookie_args(&self.settings),
+            self.tx.clone(),
+            ep,
+            self.gallery_cancel.clone(),
+        ));
     }
 
     /// Filtra la lista de creadores ya descargada con lo escrito en la
@@ -4597,6 +4652,8 @@ impl App {
                 }
                 Ev::GalleryNotice(_, epoch) if epoch != self.gallery_epoch => {}
                 Ev::GalleryNotice(msg, _) => self.gallery_aviso = msg,
+                Ev::ThreadsSigue(_, epoch) if epoch != self.gallery_epoch => {}
+                Ev::ThreadsSigue(sigue, _) => self.threads_sigue = sigue,
                 Ev::GalleryResults(items, page, _) => {
                     self.gallery_loading = false;
                     // En flujo lo apaga `GalleryDone`: aquí el extractor sigue
@@ -4654,9 +4711,10 @@ impl App {
                         // en silencio: el usuario ve la pantalla igual que antes
                         // y no sabe si falló, si está cargando o si no hay nada.
                         // En Instagram la causa casi siempre es la sesión.
-                        // Kemono no pasa por gallery-dl ni pide sesión: su
-                        // tarjeta de lista vacía ya dice lo que pasa.
-                        if items.is_empty() && !kemono::es_kemono(&self.gallery_url) {
+                        // Kemono no pasa por gallery-dl ni pide sesión, y
+                        // Threads tampoco: su tarjeta y su aviso ya dicen lo
+                        // que pasa.
+                        if items.is_empty() && !kemono::es_kemono(&self.gallery_url) && !is_threads(&self.gallery_url) {
                             self.toast(t(self.settings.lang, "gal.empty"));
                         }
                         self.gallery_items = items;
@@ -6293,45 +6351,323 @@ async fn kemono_get(client: &reqwest::Client, url: &str) -> Result<String, Strin
     Ok(txt)
 }
 
-/// Lista una página de un creador, o un post suelto, de Kemono/Coomer.
-///
-/// Una página son cincuenta publicaciones (lo que devuelve la API por
-/// petición), con todos sus archivos. Antes de la primera se pide el perfil
-/// para saber el nombre del creador —que es el autor de cada ficha y la
-/// carpeta de destino— y cuántas publicaciones tiene, que se enseña como
-/// aviso para que se sepa cuántas veces hay que pulsar «Cargar más».
+/// Con qué se lee Threads con la sesión del usuario: la cabecera `Cookie` de
+/// threads.com y el User-Agent de su navegador, que es con el que Meta conoce
+/// esa sesión.
+#[derive(Clone)]
+struct SesionThreads {
+    cookie: String,
+    ua: String,
+}
+
+/// Por qué no se ha podido leer una página de Threads.
+#[derive(Debug)]
+enum ErrorThreads {
+    /// El muro de «inicia sesión»: Threads no enseña eso a visitantes.
+    PideSesion,
+    /// La carcasa de error, sin datos.
+    NoServida,
+    Http(u16),
+    Red(String),
+}
+
+impl ErrorThreads {
+    fn texto(&self, lang: Lang) -> String {
+        match self {
+            ErrorThreads::PideSesion => i18n::threads_pide_sesion(lang, i18n::SesionThreads::SinConfigurar),
+            ErrorThreads::NoServida => i18n::threads_no_servida(lang),
+            ErrorThreads::Http(c) => i18n::threads_http(lang, *c),
+            ErrorThreads::Red(e) => format!("Threads: {e}"),
+        }
+    }
+}
+
 /// Pide una página de Threads como la pide un navegador —con las cabeceras
 /// `Sec-Fetch-*`, sin las cuales llega la carcasa de error— y la lee.
 ///
-/// El error vuelve ya traducido: quien llama solo lo enseña.
-async fn threads_leer(client: &reqwest::Client, destino: &threads::Destino) -> Result<threads::Lectura, String> {
+/// Sin `sesion`, como un visitante, y devuelve además las cookies que le ha
+/// puesto threads.com (`csrftoken`, `ig_did`): un navegador las devolvería en
+/// las peticiones siguientes, y la paginación las devuelve igual. Con
+/// `sesion`, con sus cookies, y devuelve esas.
+async fn threads_leer(
+    client: &reqwest::Client,
+    destino: &threads::Destino,
+    sesion: Option<&SesionThreads>,
+) -> Result<(threads::Lectura, String), ErrorThreads> {
     let mut req = client
         .get(destino.url_web())
-        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::USER_AGENT, sesion.map_or(UA, |s| s.ua.as_str()))
         .timeout(Duration::from_secs(40));
     for (k, v) in threads::CABECERAS {
         req = req.header(*k, *v);
     }
-    let resp = req.send().await.map_err(|e| format!("Threads: {e}"))?;
-    let estado = resp.status().as_u16();
-    if !resp.status().is_success() {
-        return Err(i18n::threads_http(i18n::lang(), estado));
+    if let Some(s) = sesion {
+        req = req.header(reqwest::header::COOKIE, &s.cookie);
     }
-    let html = resp.text().await.map_err(|e| format!("Threads: {e}"))?;
+    let resp = req.send().await.map_err(|e| ErrorThreads::Red(e.to_string()))?;
+    // Con sesión, acabar en la página de entrar es que la sesión no vale.
+    let ruta = resp.url().path();
+    if sesion.is_some() && (ruta.starts_with("/login") || ruta.starts_with("/accounts/login")) {
+        return Err(ErrorThreads::PideSesion);
+    }
+    if !resp.status().is_success() {
+        return Err(ErrorThreads::Http(resp.status().as_u16()));
+    }
+    let cookie = match sesion {
+        Some(s) => s.cookie.clone(),
+        None => cookies_puestas(resp.headers()),
+    };
+    let html = resp.text().await.map_err(|e| ErrorThreads::Red(e.to_string()))?;
     match threads::leer_html(&html, destino) {
         // Sin una sola publicación, el muro de «inicia sesión» lo explica: ese
-        // perfil no se enseña a visitantes, y el capturador sí puede leerlo.
-        Some(l) if l.publicaciones == 0 && threads::pide_sesion(&html) => Err(i18n::threads_pide_sesion(i18n::lang())),
-        Some(l) => Ok(l),
-        None if threads::pide_sesion(&html) => Err(i18n::threads_pide_sesion(i18n::lang())),
-        None => Err(i18n::threads_no_servida(i18n::lang())),
+        // perfil no se enseña a visitantes.
+        Some(l) if l.publicaciones == 0 && threads::pide_sesion(&html) => Err(ErrorThreads::PideSesion),
+        Some(l) => Ok((l, cookie)),
+        None if threads::pide_sesion(&html) => Err(ErrorThreads::PideSesion),
+        None => Err(ErrorThreads::NoServida),
     }
 }
 
+/// Las cookies que pone una respuesta (`Set-Cookie`), como cabecera `Cookie`.
+fn cookies_puestas(cabeceras: &reqwest::header::HeaderMap) -> String {
+    cabeceras
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.split(';').next())
+        .map(str::trim)
+        .filter(|par| par.split_once('=').is_some_and(|(n, v)| !n.is_empty() && !v.is_empty()))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Por qué no se ha podido leer con la sesión del usuario.
+#[derive(Debug)]
+enum FalloSesion {
+    Sesion(i18n::SesionThreads),
+    Otro(ErrorThreads),
+}
+
+/// Lee con la sesión de threads.com del usuario, por el camino que tenga
+/// configurado (ver `sesion_nativa`), y SOLO con las cookies de threads.com.
+async fn threads_leer_con_sesion(
+    client: &reqwest::Client,
+    destino: &threads::Destino,
+    cookies: &[String],
+    ua: &str,
+) -> Result<(threads::Lectura, SesionThreads), FalloSesion> {
+    if cookies.is_empty() {
+        return Err(FalloSesion::Sesion(i18n::SesionThreads::SinConfigurar));
+    }
+    let cookie = sesion_nativa("threads.com", cookies)
+        .await
+        .ok_or(FalloSesion::Sesion(i18n::SesionThreads::SinCookies))?;
+    let sesion = SesionThreads { cookie, ua: ua.to_string() };
+    match threads_leer(client, destino, Some(&sesion)).await {
+        Ok((l, _)) if l.publicaciones > 0 || l.hay_mas => Ok((l, sesion)),
+        Ok(_) | Err(ErrorThreads::PideSesion) => Err(FalloSesion::Sesion(i18n::SesionThreads::NoBasta)),
+        Err(e) => Err(FalloSesion::Otro(e)),
+    }
+}
+
+/// Por dónde va la lectura de un perfil de Threads, para que «Cargar más»
+/// siga desde ahí.
+#[derive(Clone)]
+struct ThreadsSigue {
+    pag: threads::Paginador,
+    /// La cabecera `Cookie` de las peticiones: las del visitante o las de la
+    /// sesión del usuario. Solo va a www.threads.com (`threads::URL_CONSULTA`).
+    cookie: String,
+    /// El User-Agent con el que se leyó la página del perfil.
+    ua: String,
+    /// El del navegador del usuario, por si hay que pasar a su sesión.
+    ua_navegador: String,
+    vistas: std::collections::HashSet<String>,
+    publicaciones: usize,
+    archivos: usize,
+}
+
+fn aviso_threads(lang: Lang, s: &ThreadsSigue, fase: i18n::FaseThreads) -> String {
+    i18n::threads_perfil(lang, &s.pag.usuario, s.publicaciones, s.archivos, fase, s.pag.con_sesion())
+}
+
+/// Páginas que se piden por tanda, de 15 hilos: unos 300, poco más de un
+/// minuto con las pausas. @zuck entero son 12; uno más grande sigue con
+/// «Cargar más».
+const THREADS_PAGINAS_POR_TANDA: u32 = 20;
+
+/// La pausa entre páginas: de 2,5 a 4 s, como quien baja con la rueda.
+/// Medido con ella: doce páginas seguidas sin un bloqueo. Se corta en cuanto
+/// se pulsa «Detener»; `false` = detenido.
+async fn pausa_threads(cancelar: &AtomicBool) -> bool {
+    let ruido = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_millis());
+    let mut quedan = 2500 + u64::from(ruido % 1500);
+    while quedan > 0 {
+        if cancelar.load(Ordering::Relaxed) {
+            return false;
+        }
+        let paso = quedan.min(200);
+        tokio::time::sleep(Duration::from_millis(paso)).await;
+        quedan -= paso;
+    }
+    !cancelar.load(Ordering::Relaxed)
+}
+
+/// Por qué ha fallado una página de un perfil.
+enum CorteThreads {
+    Http(u16, String),
+    Red(String),
+    Pagina(threads::FalloPagina),
+}
+
+impl CorteThreads {
+    /// Threads ha dejado de servir al visitante (una página en vez de datos,
+    /// un «inicia sesión», 401/403): con la sesión del usuario puede que sí.
+    /// Un 429 no: es el ritmo, y con la cuenta del usuario sería peor.
+    fn es_rechazo(&self) -> bool {
+        matches!(self, CorteThreads::Http(401 | 403, _) | CorteThreads::Pagina(_))
+    }
+
+    fn texto(&self, lang: Lang) -> String {
+        let m = match self {
+            CorteThreads::Http(c, dice) => i18n::MotivoThreads::Http(*c, dice),
+            CorteThreads::Red(e) => i18n::MotivoThreads::Red(e),
+            CorteThreads::Pagina(threads::FalloPagina::NoEsJson) => i18n::MotivoThreads::NoEsJson,
+            CorteThreads::Pagina(threads::FalloPagina::SinDatos(dice)) => i18n::MotivoThreads::Meta(dice),
+        };
+        i18n::threads_motivo(lang, m)
+    }
+}
+
+/// Pide y lee la página siguiente de un perfil.
+async fn threads_pagina(client: &reqwest::Client, sigue: &mut ThreadsSigue) -> Result<threads::Pagina, CorteThreads> {
+    let Some(pet) = sigue.pag.peticion(&sigue.cookie) else {
+        return Ok(threads::Pagina::default());
+    };
+    let mut req = client
+        .post(threads::URL_CONSULTA)
+        .header(reqwest::header::USER_AGENT, &sigue.ua)
+        .form(&pet.cuerpo)
+        .timeout(Duration::from_secs(40));
+    for (k, v) in &pet.cabeceras {
+        req = req.header(*k, v);
+    }
+    if !sigue.cookie.is_empty() {
+        req = req.header(reqwest::header::COOKIE, &sigue.cookie);
+    }
+    let resp = req.send().await.map_err(|e| CorteThreads::Red(e.to_string()))?;
+    let estado = resp.status().as_u16();
+    let cuerpo = resp.text().await.map_err(|e| CorteThreads::Red(e.to_string()))?;
+    if !(200..300).contains(&estado) {
+        return Err(CorteThreads::Http(estado, threads::mensaje_de_error(&cuerpo)));
+    }
+    sigue.pag.leer_pagina(&cuerpo, &mut sigue.vistas).map_err(CorteThreads::Pagina)
+}
+
+/// Pasa a la sesión del usuario a mitad de un perfil, desde el mismo punto:
+/// se lee la página del perfil con sus cookies, para tener las fichas de esa
+/// sesión, y se sigue con el cursor que se llevaba.
+async fn threads_pasar_a_sesion(
+    client: &reqwest::Client,
+    sigue: &mut ThreadsSigue,
+    cookies: &[String],
+) -> Result<(), i18n::SesionThreads> {
+    let destino = threads::Destino::Perfil { usuario: sigue.pag.usuario.clone() };
+    let (lectura, sesion) = match threads_leer_con_sesion(client, &destino, cookies, &sigue.ua_navegador).await {
+        Ok(x) => x,
+        Err(FalloSesion::Sesion(s)) => return Err(s),
+        Err(FalloSesion::Otro(_)) => return Err(i18n::SesionThreads::NoBasta),
+    };
+    let mut pag = lectura.paginador.filter(|p| p.con_sesion()).ok_or(i18n::SesionThreads::NoBasta)?;
+    pag.seguir_desde(&sigue.pag);
+    sigue.pag = pag;
+    sigue.cookie = sesion.cookie;
+    sigue.ua = sesion.ua;
+    Ok(())
+}
+
+/// Recorre las páginas siguientes de un perfil y las va poniendo en la
+/// rejilla según llegan, con una pausa entre una y otra. Lo llaman el
+/// análisis, tras la página del perfil, y «Cargar más».
+///
+/// Tras cada página manda por dónde va (`Ev::ThreadsSigue`): si se detiene,
+/// la aplicación se queda con lo último que llegó a la rejilla, y «Cargar
+/// más» sigue desde ahí.
+async fn threads_recorrer(
+    client: reqwest::Client,
+    mut sigue: ThreadsSigue,
+    mut pagina_ui: u32,
+    cookies: Vec<String>,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+    cancelar: Arc<AtomicBool>,
+) {
+    let lang = i18n::lang();
+    let mut motivo: Option<String> = None;
+    // A la sesión se pasa una vez como mucho, y solo si Threads deja de
+    // servir al visitante.
+    let mut sesion_probada = sigue.pag.con_sesion();
+    let mut pedidas = 0;
+    while sigue.pag.hay_mas() && pedidas < THREADS_PAGINAS_POR_TANDA {
+        if !pausa_threads(&cancelar).await {
+            return;
+        }
+        pedidas += 1;
+        match threads_pagina(&client, &mut sigue).await {
+            Ok(pag) => {
+                // Lo que llega tras «Detener» no entra: la aplicación ya se
+                // quedó con la página anterior, y esta se volverá a pedir.
+                if cancelar.load(Ordering::Relaxed) {
+                    return;
+                }
+                sigue.publicaciones += pag.publicaciones;
+                sigue.archivos += pag.items.len();
+                if !pag.items.is_empty() {
+                    pagina_ui += 1;
+                    let _ = tx.send(Ev::GalleryResults(pag.items, pagina_ui, epoch));
+                }
+                let _ = tx.send(Ev::ThreadsSigue(sigue.pag.hay_mas().then(|| Box::new(sigue.clone())), epoch));
+                let _ = tx.send(Ev::GalleryNotice(aviso_threads(lang, &sigue, i18n::FaseThreads::Leyendo), epoch));
+            }
+            Err(e) if !sesion_probada && e.es_rechazo() => {
+                sesion_probada = true;
+                // Si la sesión entra, se repite la misma página con ella.
+                if let Err(s) = threads_pasar_a_sesion(&client, &mut sigue, &cookies).await {
+                    motivo = Some(format!("{} {}", e.texto(lang), i18n::threads_sesion_breve(lang, s)));
+                    break;
+                }
+            }
+            Err(e) => {
+                motivo = Some(e.texto(lang));
+                break;
+            }
+        }
+    }
+    if cancelar.load(Ordering::Relaxed) {
+        return;
+    }
+    let fase = match &motivo {
+        Some(m) => i18n::FaseThreads::Cortado(m),
+        None if sigue.pag.hay_mas() => i18n::FaseThreads::Tanda,
+        None => i18n::FaseThreads::Completo,
+    };
+    let _ = tx.send(Ev::GalleryNotice(aviso_threads(lang, &sigue, fase), epoch));
+    let _ = tx.send(Ev::GalleryDone(epoch));
+}
+
 /// Lista un post o un perfil de Threads en la rejilla (ver `threads.rs`).
+///
+/// Primero como visitante. La sesión del usuario solo entra si así no se ve
+/// nada: el muro de «inicia sesión», o un perfil que a un visitante le sale
+/// vacío (privado). Un perfil sigue después página a página, solo, hasta una
+/// tanda (`threads_recorrer`).
 async fn browse_threads(
     client: reqwest::Client,
     url: String,
+    cookies: Vec<String>,
+    ua_navegador: String,
     tx: UnboundedSender<Ev>,
     epoch: u64,
     cancelar: Arc<AtomicBool>,
@@ -6342,36 +6678,79 @@ async fn browse_threads(
         let _ = tx.send(Ev::GalleryDone(epoch));
         return;
     };
-    let resultado = threads_leer(&client, &destino).await;
-    if !cancelar.load(Ordering::Relaxed) {
-        match resultado {
-            Ok(lectura) => {
-                // El aviso va ANTES que la lista, como en Kemono: la rejilla
-                // lo pinta encima en cuanto llegan los archivos.
-                let aviso = match &destino {
-                    threads::Destino::Perfil { usuario } => Some(i18n::threads_perfil(
-                        lang,
-                        usuario,
-                        lectura.publicaciones,
-                        lectura.items.len(),
-                        lectura.hay_mas,
-                    )),
-                    threads::Destino::Post { .. } if lectura.items.is_empty() => {
-                        Some(t(lang, "threads.post_texto").to_string())
-                    }
-                    threads::Destino::Post { .. } => None,
-                };
-                if let Some(a) = aviso {
-                    let _ = tx.send(Ev::GalleryNotice(a, epoch));
-                }
+    let visita = threads_leer(&client, &destino, None).await;
+    let nada = match &visita {
+        Ok((l, _)) => l.publicaciones == 0 && !l.hay_mas,
+        Err(e) => matches!(e, ErrorThreads::PideSesion),
+    };
+    // (lectura, cabecera Cookie, User-Agent con que se leyó, ¿con sesión?)
+    let leido: Result<(threads::Lectura, String, String, bool), String> = if nada && !cancelar.load(Ordering::Relaxed) {
+        match threads_leer_con_sesion(&client, &destino, &cookies, &ua_navegador).await {
+            Ok((l, s)) => Ok((l, s.cookie, s.ua, true)),
+            // Vacío para un visitante y sin sesión que lo cambie: se queda así.
+            Err(_) if visita.is_ok() => visita.map(|(l, c)| (l, c, UA.to_string(), false)).map_err(|e| e.texto(lang)),
+            Err(FalloSesion::Sesion(s)) => Err(i18n::threads_pide_sesion(lang, s)),
+            Err(FalloSesion::Otro(e)) => Err(e.texto(lang)),
+        }
+    } else {
+        visita.map(|(l, c)| (l, c, UA.to_string(), false)).map_err(|e| e.texto(lang))
+    };
+    if cancelar.load(Ordering::Relaxed) {
+        return;
+    }
+    let (mut lectura, cookie, ua, con_sesion) = match leido {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = tx.send(Ev::GalleryError(e, epoch));
+            let _ = tx.send(Ev::GalleryDone(epoch));
+            return;
+        }
+    };
+    let threads::Destino::Perfil { usuario } = &destino else {
+        // Un post: entero, de una vez.
+        if lectura.items.is_empty() {
+            let _ = tx.send(Ev::GalleryNotice(t(lang, "threads.post_texto").to_string(), epoch));
+        }
+        let _ = tx.send(Ev::GalleryResults(lectura.items, 1, epoch));
+        let _ = tx.send(Ev::GalleryDone(epoch));
+        return;
+    };
+
+    // El aviso va ANTES que la lista, como en Kemono: la rejilla lo pinta
+    // encima en cuanto llegan los archivos.
+    match lectura.paginador.take().filter(|p| p.hay_mas()) {
+        Some(pag) => {
+            let sigue = ThreadsSigue {
+                pag,
+                cookie,
+                ua,
+                ua_navegador,
+                vistas: std::mem::take(&mut lectura.vistas),
+                publicaciones: lectura.publicaciones,
+                archivos: lectura.items.len(),
+            };
+            let _ = tx.send(Ev::GalleryNotice(aviso_threads(lang, &sigue, i18n::FaseThreads::Leyendo), epoch));
+            let mut pagina_ui = 0;
+            if !lectura.items.is_empty() {
+                pagina_ui = 1;
                 let _ = tx.send(Ev::GalleryResults(lectura.items, 1, epoch));
             }
-            Err(e) => {
-                let _ = tx.send(Ev::GalleryError(e, epoch));
+            let _ = tx.send(Ev::ThreadsSigue(Some(Box::new(sigue.clone())), epoch));
+            threads_recorrer(client, sigue, pagina_ui, cookies, tx, epoch, cancelar).await;
+        }
+        None => {
+            // Todo el perfil cabía en su página, o la página no trae con qué
+            // pedir el resto.
+            let fase = if lectura.hay_mas { i18n::FaseThreads::SinConsulta } else { i18n::FaseThreads::Completo };
+            let aviso =
+                i18n::threads_perfil(lang, usuario, lectura.publicaciones, lectura.items.len(), fase, con_sesion);
+            let _ = tx.send(Ev::GalleryNotice(aviso, epoch));
+            if !lectura.items.is_empty() {
+                let _ = tx.send(Ev::GalleryResults(lectura.items, 1, epoch));
             }
+            let _ = tx.send(Ev::GalleryDone(epoch));
         }
     }
-    let _ = tx.send(Ev::GalleryDone(epoch));
 }
 
 /// El enlace nuevo de un archivo de Threads cuya firma ha caducado: se vuelve
@@ -6379,7 +6758,7 @@ async fn browse_threads(
 async fn threads_url_fresca(client: &reqwest::Client, spec: &DlSpec) -> Option<(String, String)> {
     let destino = threads::clasificar(&spec.page_url)?;
     let threads::Destino::Post { codigo, .. } = &destino else { return None };
-    let lectura = threads_leer(client, &destino).await.ok()?;
+    let (lectura, _) = threads_leer(client, &destino, None).await.ok()?;
     threads::url_fresca(&lectura, &spec.url, codigo, spec.num_en_post)
 }
 
@@ -6451,6 +6830,13 @@ async fn anadir_audio(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSen
     }
 }
 
+/// Lista una página de un creador, o un post suelto, de Kemono/Coomer.
+///
+/// Una página son cincuenta publicaciones (lo que devuelve la API por
+/// petición), con todos sus archivos. Antes de la primera se pide el perfil
+/// para saber el nombre del creador —que es el autor de cada ficha y la
+/// carpeta de destino— y cuántas publicaciones tiene, que se enseña como
+/// aviso para que se sepa cuántas veces hay que pulsar «Cargar más».
 async fn browse_kemono(
     client: reqwest::Client,
     url: String,
@@ -13848,6 +14234,22 @@ impl App {
                 // para las colecciones de Patreon, que fallan por otra cosa.
                 // Mandar a revisar las cookies a quien las tiene bien es
                 // gastarle el tiempo, que es lo que este proyecto persigue.
+                // Threads no pasa por gallery-dl: ni su «no devolvió nada» ni
+                // su «Repetir con detalle» dicen nada aquí. Lo que haya que
+                // decir es el error, o el aviso de debajo; y si el perfil
+                // sigue —una tanda de solo texto—, poder seguir.
+                if is_threads(&self.gallery_url) {
+                    let texto = if self.gallery_error.is_empty() {
+                        t(lang, "threads.sin_archivos").to_string()
+                    } else {
+                        self.gallery_error.clone()
+                    };
+                    ui.label(RichText::new(texto).size(12.0).color(AMBER()));
+                    if self.threads_sigue.is_some() && soft_button(ui, t(lang, "gal.more")).clicked() {
+                        self.seguir_threads();
+                    }
+                    return;
+                }
                 let host_perfil = host_of(&self.profile_url.to_ascii_lowercase()).unwrap_or_default();
                 let es_ig = host_matches(&host_perfil, "instagram.com");
                 if es_x(&host_perfil) {
@@ -14261,7 +14663,13 @@ impl App {
                     // En Kemono, solo para un CREADOR: un post suelto no tiene
                     // página siguiente, y pedirla lo volvía a traer entero y
                     // duplicaba cada archivo en la rejilla.
+                    // En Threads, cuando el perfil sigue (`threads_sigue`) y
+                    // no hay ya una tanda en marcha.
+                    let threads_mas = self.threads_sigue.is_some()
+                        && is_threads(&self.gallery_url)
+                        && !self.gallery_prefetching;
                     if (v2ph::is_v2ph(&self.gallery_url)
+                        || threads_mas
                         || matches!(
                             kemono::clasificar(&self.gallery_url),
                             Some(kemono::Destino::Creador { .. })
@@ -14269,39 +14677,43 @@ impl App {
                         && !self.gallery_loading
                         && soft_button(ui, t(lang, "gal.more")).clicked()
                     {
-                        let next = self.gallery_page + 1;
-                        let url = self.gallery_url.clone();
-                        // Pedirlo a mano rearma la carga automática, salvo en
-                        // V2PH: ver el comentario del análisis.
-                        self.gallery_prefetch_left = paginas_encadenadas(&url);
-                        if kemono::es_kemono(&url) {
-                            self.explorar_kemono(url, next);
-                        } else if v2ph::is_v2ph(&url) {
-                            self.gallery_loading = true;
-                            self.gallery_epoch += 1;
-                            let ep = self.gallery_epoch;
-                            self.rt.spawn(browse_v2ph(
-                                self.client.clone(),
-                                url,
-                                next,
-                                self.settings.v2ph_session.clone(),
-                                self.settings.cookies_file.clone(),
-                                navegador_cookies(&self.settings),
-                                ua_efectivo(&self.settings),
-                                self.tx.clone(),
-                                ep,
-                            ));
-                        } else if let Some(prog) = self.galdl_cmd.clone() {
-                            self.gallery_loading = true;
-                            let tx = self.tx.clone();
-                            let cookies = cookie_args(&self.settings);
-                            self.gallery_epoch += 1;
-                            let ep = self.gallery_epoch;
-                            self.gallery_cancel.store(false, Ordering::Relaxed);
-                            self.rt.spawn(browse_gallery(
-                                prog, url.clone(), next, per_page_de(&url), cookies, tx, ep,
-                                self.gallery_cancel.clone(),
-                            ));
+                        if threads_mas {
+                            self.seguir_threads();
+                        } else {
+                            let next = self.gallery_page + 1;
+                            let url = self.gallery_url.clone();
+                            // Pedirlo a mano rearma la carga automática, salvo en
+                            // V2PH: ver el comentario del análisis.
+                            self.gallery_prefetch_left = paginas_encadenadas(&url);
+                            if kemono::es_kemono(&url) {
+                                self.explorar_kemono(url, next);
+                            } else if v2ph::is_v2ph(&url) {
+                                self.gallery_loading = true;
+                                self.gallery_epoch += 1;
+                                let ep = self.gallery_epoch;
+                                self.rt.spawn(browse_v2ph(
+                                    self.client.clone(),
+                                    url,
+                                    next,
+                                    self.settings.v2ph_session.clone(),
+                                    self.settings.cookies_file.clone(),
+                                    navegador_cookies(&self.settings),
+                                    ua_efectivo(&self.settings),
+                                    self.tx.clone(),
+                                    ep,
+                                ));
+                            } else if let Some(prog) = self.galdl_cmd.clone() {
+                                self.gallery_loading = true;
+                                let tx = self.tx.clone();
+                                let cookies = cookie_args(&self.settings);
+                                self.gallery_epoch += 1;
+                                let ep = self.gallery_epoch;
+                                self.gallery_cancel.store(false, Ordering::Relaxed);
+                                self.rt.spawn(browse_gallery(
+                                    prog, url.clone(), next, per_page_de(&url), cookies, tx, ep,
+                                    self.gallery_cancel.clone(),
+                                ));
+                            }
                         }
                     }
                     if self.gallery_prefetching {
@@ -14309,6 +14721,13 @@ impl App {
                         ui.label(
                             RichText::new(t(lang, "gal.prefetching")).size(10.5).color(MUTED()),
                         );
+                        // Con la rejilla ya llena, el «Detener» de arriba no se
+                        // pinta: un listado en flujo, o un perfil de Threads
+                        // que va por su tanda, se para desde aquí.
+                        if ui.small_button(t(lang, "gal.stop")).clicked() {
+                            self.detener_exploracion();
+                            self.toast(t(lang, "gal.stopped"));
+                        }
                     }
                     // Los enlaces de CDN de las redes sociales sí caducan en
                     // horas. Los de Hugging Face no: `/resolve/` es una URL
@@ -14336,6 +14755,7 @@ impl App {
                 self.gallery_aviso.clear();
                 self.gallery_url.clear();
                 self.gallery_page = 1;
+                self.threads_sigue = None;
                 // Detiene además el proceso que esté listando: vaciar la lista
                 // y dejar a gallery-dl trabajando para llenarla otra vez no es
                 // lo que nadie espera de un botón llamado «Limpiar lista».
@@ -17087,10 +17507,6 @@ mod tests {
         assert!(!is_gallery_site("https://ejemplo.com/kemono.cr/patreon/user/1"));
     }
 
-    /// Prueba EN VIVO contra la API, fuera de la tanda normal porque depende
-    /// de la red. Se lanza con `cargo test -- --ignored kemono_api`. Es la
-    /// que demuestra que la cabecera `Accept: text/css` sigue valiendo y que
-    /// la respuesta —que el servidor manda comprimida— se descomprime sola.
     /// La máxima calidad de Threads de punta a punta, con el código de la
     /// aplicación: leer el post, bajar la pista de vídeo de 1080p y juntarle
     /// el audio con ffmpeg (`anadir_audio`). Necesita red, ffmpeg y ffprobe:
@@ -17102,7 +17518,7 @@ mod tests {
         rt.block_on(async {
             let client = reqwest::Client::builder().build().unwrap();
             let d = threads::clasificar("https://www.threads.com/@netflix/post/De1nYC8Eggo").unwrap();
-            let v = threads_leer(&client, &d).await.expect("post").items.remove(0);
+            let v = threads_leer(&client, &d, None).await.expect("post").0.items.remove(0);
             assert!(!v.audio_url.is_empty(), "la máxima calidad llega en dos pistas");
             let dir = std::env::temp_dir().join(format!("td-threads-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -17155,25 +17571,123 @@ mod tests {
             let client = reqwest::Client::builder().build().unwrap();
 
             let d = threads::clasificar("https://www.threads.com/@netflix/post/De1nYC8Eggo").unwrap();
-            let l = threads_leer(&client, &d).await.expect("post de vídeo");
+            let (l, _) = threads_leer(&client, &d, None).await.expect("post de vídeo");
             assert_eq!(l.items.len(), 1);
             let v = &l.items[0];
             assert!(v.is_video && v.ext == "mp4", "{v:?}");
             assert!(v.width >= 1280, "{}x{}", v.width, v.height);
 
             let d = threads::clasificar("https://www.threads.com/@nasa/post/Decc755lYhC").unwrap();
-            let l = threads_leer(&client, &d).await.expect("post con carrusel");
+            let (l, _) = threads_leer(&client, &d, None).await.expect("post con carrusel");
             assert_eq!(l.items.len(), 4, "{:?}", l.items.iter().map(|i| &i.url).collect::<Vec<_>>());
             assert!(l.items.iter().all(|i| i.count_in_post == 4 && !i.is_video));
 
             let d = threads::clasificar("https://www.threads.com/@nasa").unwrap();
-            let l = threads_leer(&client, &d).await.expect("perfil");
+            let (l, cookie) = threads_leer(&client, &d, None).await.expect("perfil");
             assert!(l.publicaciones >= 1, "{}", l.publicaciones);
             assert!(l.items.iter().all(|i| i.author == "nasa"));
             eprintln!("perfil @nasa: {} publicaciones, {} archivos, más: {}", l.publicaciones, l.items.len(), l.hay_mas);
+            assert!(l.paginador.as_ref().is_some_and(|p| p.hay_mas() && !p.con_sesion()), "{:?}", l.paginador);
+            assert!(cookie.contains("csrftoken="), "threads.com pone sus cookies al visitante: {cookie:?}");
         });
     }
 
+    /// Un perfil ENTERO sin sesión, con el mismo código que la aplicación:
+    /// `browse_threads` y su recorrido, recogiendo los eventos que llegarían a
+    /// la interfaz. @zuck son 12 páginas, ~50 s. Otro perfil, con
+    /// `TD_THREADS_USUARIO=…`. `cargo test -- --ignored threads_perfil_en_vivo --nocapture`
+    #[test]
+    #[ignore]
+    fn threads_perfil_en_vivo() {
+        let usuario = std::env::var("TD_THREADS_USUARIO").unwrap_or_else(|_| "zuck".into());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let url = format!("https://www.threads.com/@{usuario}");
+            browse_threads(client, url, Vec::new(), UA.into(), tx, 1, Arc::new(AtomicBool::new(false))).await;
+            let (mut items, mut paginas, mut aviso, mut sigue, mut fin) = (Vec::new(), Vec::new(), String::new(), None, false);
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    Ev::GalleryResults(i, p, _) => {
+                        paginas.push(p);
+                        items.extend(i);
+                    }
+                    Ev::GalleryNotice(a, _) => aviso = a,
+                    Ev::ThreadsSigue(s, _) => sigue = s,
+                    Ev::GalleryError(e, _) => panic!("{e}"),
+                    Ev::GalleryDone(_) => fin = true,
+                    _ => {}
+                }
+            }
+            eprintln!("@{usuario}: {} archivos en {} entregas; aviso final: {aviso}", items.len(), paginas.len());
+            assert!(fin, "acaba con GalleryDone");
+            assert!(!items.is_empty());
+            assert!(paginas.windows(2).all(|w| w[1] == w[0] + 1), "páginas seguidas: {paginas:?}");
+            let mut urls = std::collections::HashSet::new();
+            assert!(items.iter().all(|i| urls.insert(i.url.split('?').next().unwrap_or("").to_string())), "sin repetidos");
+            assert!(items.iter().all(|i| i.author.eq_ignore_ascii_case(&usuario)));
+            let completo = aviso.contains("perfil completo") || aviso.contains("whole profile");
+            assert!(completo || sigue.is_some(), "o se ha leído entero, o «Cargar más» puede seguir: {aviso}");
+            assert!(!aviso.contains('⚠'), "sin cortes: {aviso}");
+        });
+    }
+
+    /// La paginación CON SESIÓN, la parte que no se pudo medir donde se
+    /// escribió (ver `threads.rs`). Necesita un cookies.txt con la sesión de
+    /// threads.com, y lee por defecto un perfil que Threads no enseña a
+    /// visitantes (@nasawebb):
+    /// `TD_THREADS_COOKIES=~/cookies.txt cargo test -- --ignored threads_sesion_en_vivo --nocapture`
+    /// No imprime ni una cookie ni un token: solo recuentos.
+    #[test]
+    #[ignore]
+    fn threads_sesion_en_vivo() {
+        let Ok(ruta) = std::env::var("TD_THREADS_COOKIES") else {
+            panic!("falta TD_THREADS_COOKIES=<ruta de un cookies.txt con la sesión de threads.com>");
+        };
+        let usuario = std::env::var("TD_THREADS_USUARIO").unwrap_or_else(|_| "nasawebb".into());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+            let cookies = vec!["--cookies".to_string(), ruta];
+            let d = threads::Destino::Perfil { usuario: usuario.clone() };
+            let (l, sesion) = match threads_leer_con_sesion(&client, &d, &cookies, UA).await {
+                Ok(x) => x,
+                Err(e) => panic!("la página del perfil con la sesión: {e:?}"),
+            };
+            eprintln!("@{usuario} con sesión: {} publicaciones, {} archivos en su página", l.publicaciones, l.items.len());
+            let pag = l.paginador.expect("la página trae su consulta");
+            assert!(pag.con_sesion(), "la página no reconoce la sesión (sin fb_dtsg o sin id): {pag:?}");
+            if !pag.hay_mas() {
+                eprintln!("el perfil cabe en su página: no hay página siguiente que probar");
+                return;
+            }
+            let mut sigue = ThreadsSigue {
+                pag,
+                cookie: sesion.cookie,
+                ua: sesion.ua,
+                ua_navegador: UA.into(),
+                vistas: l.vistas,
+                publicaciones: l.publicaciones,
+                archivos: l.items.len(),
+            };
+            for n in 1..=2 {
+                assert!(pausa_threads(&AtomicBool::new(false)).await);
+                match threads_pagina(&client, &mut sigue).await {
+                    Ok(p) => eprintln!("página {n} con sesión: {} publicaciones nuevas, {} archivos", p.publicaciones, p.items.len()),
+                    Err(e) => panic!("página {n} con sesión: {}", e.texto(Lang::Es)),
+                }
+                if !sigue.pag.hay_mas() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Prueba EN VIVO contra la API, fuera de la tanda normal porque depende
+    /// de la red. Se lanza con `cargo test -- --ignored kemono_api`. Es la
+    /// que demuestra que la cabecera `Accept: text/css` sigue valiendo y que
+    /// la respuesta —que el servidor manda comprimida— se descomprime sola.
     #[test]
     #[ignore]
     fn kemono_api_en_vivo() {

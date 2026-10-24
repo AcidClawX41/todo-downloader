@@ -1,29 +1,47 @@
-//! Threads (threads.com) sin navegador: un post suelto, entero, y las
-//! publicaciones que Threads enseña de un perfil a quien no ha iniciado sesión.
+//! Threads (threads.com) sin navegador: un post suelto, entero, y un perfil
+//! entero, página a página.
 //!
 //! LO QUE SE MIDIÓ ANTES DE ESCRIBIR ESTO (24 de octubre de 2026). Ni gallery-dl
 //! (1.33.0-dev) ni yt-dlp (2026.10.21) tienen extractor de Threads. Pero la
 //! página de un post, pedida como la pide un navegador, ya trae en el HTML las
 //! publicaciones con sus medios: los mismos `image_versions2`, `video_versions`
 //! y `carousel_media` que lee el userscript, a resolución original (3072×4096
-//! en la muestra) y con las URL firmadas del CDN. No hace falta reconstruir la
-//! API de Meta ni su `doc_id`, que es lo que hacía inviable un extractor.
+//! en la muestra) y con las URL firmadas del CDN.
 //!
 //! LA TRAMPA: sin las cuatro cabeceras `Sec-Fetch-*` de una navegación,
 //! threads.com responde `200` con la carcasa de su página de error
 //! (`Barcelona404ErrorRoot`) y ni un solo medio. Ninguna de las cuatro basta
 //! por separado. Con ellas, lo mismo con curl que con reqwest/rustls.
 //!
-//! EL LÍMITE: sin sesión, de un perfil Threads solo enseña las primeras
-//! publicaciones (la consulta de la página pide `first: 4`, y al hacer scroll
-//! no pide más: pide iniciar sesión). Para un perfil entero sigue estando el
-//! userscript, que lee con la sesión del propio navegador. No se mandan aquí
-//! las cookies de Meta del usuario a propósito: una sesión de Instagram usada
-//! desde un cliente que no es un navegador es justo lo que Meta marca como
-//! actividad sospechosa, y la cuenta es suya.
+//! UN PERFIL ENTERO. Su página trae los cuatro primeros hilos y, con ellos, la
+//! consulta con la que los pidió (`BarcelonaProfileThreadsTabDirectQuery`: su
+//! `queryID`, sus variables y el `end_cursor`), más las fichas que el JS de la
+//! web mete en cada petición (`LSD`, el token CSRF, `SiteData`…). Para seguir,
+//! la web repite esa consulta con `after`, y aquí se repite igual, campo por
+//! campo (ver `Paginador::peticion`). A un visitante se la sirve si lleva la
+//! cabecera que la web pone en ese caso, `X-LOGGED-OUT-THREADS-MIGRATED-REQUEST`.
+//! Medido sin sesión: @zuck entero —171 hilos, hasta julio de 2023— en 12
+//! páginas de 15, con pausas de ~3 s y sin un solo bloqueo. La primera página
+//! vuelve a traer los hilos del HTML: de ahí `Lectura::vistas`.
+//!
+//! CON SESIÓN. Hay perfiles que Threads no enseña a visitantes (piden iniciar
+//! sesión: @nasawebb, @nasahubble) y cuentas privadas que solo ve quien las
+//! sigue. Para esos se usa la sesión de threads.com del usuario —las cookies de
+//! su navegador o su cookies.txt—, con la misma petición que hace la web con
+//! sesión: su `fb_dtsg`, su id (`av`, `__user`) y sin la cabecera de
+//! visitante. Sin sesión, esa forma de la petición contesta «User not found»:
+//! el servidor la toma por una con sesión. Solo se usa cuando sin ella no se
+//! ve nada, porque una sesión de Meta usada fuera del navegador es justo lo que
+//! Meta vigila, y la cuenta es del usuario.
+//!
+//! LO QUE NO SE HA PODIDO MEDIR: la petición con una sesión de verdad, porque
+//! donde se escribió esto no hay cuenta de Threads. Está hecha a imagen del JS
+//! de la web (`BarcelonaRelayEnvironment`, `createRelayFBNetworkFetch`,
+//! `getAsyncParams`), y `threads_sesion_en_vivo` la prueba con un cookies.txt.
 
 use crate::gallery::GalleryItem;
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 /// Qué se ha pegado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +121,12 @@ pub struct Lectura {
     pub publicaciones: usize,
     /// El perfil tiene más publicaciones de las que Threads ha enseñado.
     pub hay_mas: bool,
+    /// Con qué pedir las siguientes: solo en un perfil, y si la página trae
+    /// su consulta.
+    pub paginador: Option<Paginador>,
+    /// Las publicaciones ya leídas, por su código. Las páginas siguientes no
+    /// deben repetirlas, y la primera vuelve a traer las de la página.
+    pub vistas: HashSet<String>,
 }
 
 /// Lee las publicaciones de una página de Threads.
@@ -145,23 +169,443 @@ pub fn leer_html(html: &str, destino: &Destino) -> Option<Lectura> {
         }
     };
 
-    let mut vistas_pk = std::collections::HashSet::new();
-    let mut vistas_url = std::collections::HashSet::new();
-    let mut lectura = Lectura { hay_mas: html.contains("\"has_next_page\":true"), ..Default::default() };
-    for p in elegidas {
-        let pk = texto(Some(p), "pk");
-        let clave = if pk.is_empty() { texto(Some(p), "code") } else { pk };
-        if !vistas_pk.insert(clave) {
+    let mut lectura = Lectura::default();
+    anadir(&elegidas, &mut lectura.vistas, &mut lectura.items, &mut lectura.publicaciones);
+    if let Destino::Perfil { usuario } = destino {
+        lectura.paginador = paginador(html, usuario);
+    }
+    lectura.hay_mas = match &lectura.paginador {
+        Some(p) => p.hay_mas(),
+        None => html.contains("\"has_next_page\":true"),
+    };
+    Some(lectura)
+}
+
+/// Pasa a fichas las publicaciones que no estén ya en `vistas`.
+fn anadir(publicaciones: &[&Value], vistas: &mut HashSet<String>, items: &mut Vec<GalleryItem>, cuenta: &mut usize) {
+    let mut vistas_url = HashSet::new();
+    for p in publicaciones {
+        // Por el código, que es lo que lleva cada ficha en `post_id`: al
+        // seguir tras «Detener», la aplicación siembra con él lo que ya está
+        // en la rejilla.
+        let codigo = texto(Some(p), "code");
+        let clave = if codigo.is_empty() { texto(Some(p), "pk") } else { codigo };
+        if !vistas.insert(clave) {
             continue;
         }
-        lectura.publicaciones += 1;
+        *cuenta += 1;
         for item in items_de_publicacion(p) {
             if vistas_url.insert(sin_query(&item.url).to_string()) {
-                lectura.items.push(item);
+                items.push(item);
             }
         }
     }
-    Some(lectura)
+}
+
+// ------------------- Las páginas siguientes de un perfil -------------------
+
+/// Adonde pide la web de Threads las publicaciones de un perfil.
+///
+/// Es una consulta «distillery» (`is_distillery: true` en su JS), y
+/// `createRelayIGNetwork` manda esas a `/graphql/query`; las demás, a
+/// `/api/graphql`. Medido: las dos direcciones la sirven, y se imita a la web.
+pub const URL_CONSULTA: &str = "https://www.threads.com/graphql/query";
+
+/// Hilos por página. Pedir más no sirve: con `first: 20` llegan 15 igual.
+const POR_PAGINA: u64 = 15;
+
+/// `X-IG-App-ID` de la web de Threads, por si la página no lo trae.
+const APP_ID: &str = "238260118697367";
+
+/// `X-ASBD-ID`: una constante del JS de Meta (`BDHeaderConfig`).
+const ASBD_ID: &str = "359341";
+
+/// Lo necesario para pedir las publicaciones siguientes de un perfil: la
+/// consulta con la que su propia página trajo las primeras y los datos de esa
+/// página que el JS de la web mete en cada petición.
+#[derive(Clone, PartialEq)]
+pub struct Paginador {
+    pub usuario: String,
+    doc_id: String,
+    consulta: String,
+    variables: Map<String, Value>,
+    /// Por dónde sigue el perfil. `None` = no hay más; vacío = desde el
+    /// principio (`after: null`), si la página dice que hay más sin decir
+    /// desde dónde.
+    cursor: Option<String>,
+    lsd: String,
+    csrf: String,
+    /// `fb_dtsg`: solo lo trae una página leída con sesión.
+    dtsg: String,
+    /// Quién mira: `0` sin sesión.
+    espectador: String,
+    app_id: String,
+    bloks: String,
+    hs: String,
+    rev: String,
+    hsi: String,
+    comet: String,
+    dpr: String,
+    ccg: String,
+    /// `__s` y `X-Web-Session-ID`: la web lo inventa al cargar.
+    sesion_web: String,
+    /// `__req`: cuántas peticiones lleva, en base 36.
+    peticiones: u32,
+}
+
+/// A mano, para que un `{:?}` no saque nunca las fichas de una sesión.
+impl std::fmt::Debug for Paginador {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Paginador")
+            .field("usuario", &self.usuario)
+            .field("consulta", &self.consulta)
+            .field("doc_id", &self.doc_id)
+            .field("hay_mas", &self.hay_mas())
+            .field("con_sesion", &self.con_sesion())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Una petición lista para mandar: cabeceras y cuerpo (form-urlencoded).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peticion {
+    pub cabeceras: Vec<(&'static str, String)>,
+    pub cuerpo: Vec<(&'static str, String)>,
+}
+
+/// Las publicaciones nuevas de una página.
+#[derive(Debug, Default)]
+pub struct Pagina {
+    pub items: Vec<GalleryItem>,
+    /// Publicaciones nuevas de la cuenta, con medios o sin ellos.
+    pub publicaciones: usize,
+}
+
+/// Por qué una página no ha traído publicaciones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FalloPagina {
+    /// No es JSON: Threads ha contestado con una página (la de iniciar sesión,
+    /// una comprobación de seguridad).
+    NoEsJson,
+    /// JSON sin publicaciones, con lo que diga Meta (`User not found`,
+    /// `login_required`…).
+    SinDatos(String),
+}
+
+impl Paginador {
+    pub fn hay_mas(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// ¿Sale de una página leída con sesión? Sin `fb_dtsg` y sin id de quien
+    /// mira, la petición va como la de un visitante.
+    pub fn con_sesion(&self) -> bool {
+        !self.dtsg.is_empty() && !self.espectador.is_empty() && self.espectador != "0"
+    }
+
+    /// Sigue desde donde iba otro: al pasar a la sesión a mitad de un perfil.
+    pub fn seguir_desde(&mut self, otro: &Paginador) {
+        self.cursor = otro.cursor.clone();
+    }
+
+    /// La petición de la página siguiente, como la hace la web: cabeceras de
+    /// `BarcelonaRelayEnvironment` y `getAsyncHeaders`, cuerpo de
+    /// `getAsyncParams` y `createRelayFBNetworkFetch`, en ese orden. `cookie`
+    /// es la cabecera que irá con ella: de ahí sale el token CSRF si la página
+    /// no lo traía. `None` si ya no hay más.
+    pub fn peticion(&mut self, cookie: &str) -> Option<Peticion> {
+        let cursor = self.cursor.as_deref()?;
+        let mut variables = self.variables.clone();
+        let after = if cursor.is_empty() { Value::Null } else { Value::String(cursor.to_string()) };
+        variables.insert("after".into(), after);
+        variables.insert("first".into(), Value::from(POR_PAGINA));
+        self.peticiones += 1;
+        let sesion = self.con_sesion();
+        // `jazoest` es `DTSGUtils.getNumericValue`: un 2 (la versión de
+        // `SprinkleConfig`) y la suma de los códigos del token, que es el
+        // `fb_dtsg` con sesión y el `lsd` sin ella.
+        let ficha = if sesion { &self.dtsg } else { &self.lsd };
+        let mut cuerpo = vec![
+            ("av", self.espectador.clone()),
+            ("__user", self.espectador.clone()),
+            ("__a", "1".to_string()),
+            ("__req", base36(self.peticiones)),
+            ("__hs", self.hs.clone()),
+            ("dpr", self.dpr.clone()),
+            ("__ccg", self.ccg.clone()),
+            ("__rev", self.rev.clone()),
+            ("__s", self.sesion_web.clone()),
+            ("__hsi", self.hsi.clone()),
+            ("__comet_req", self.comet.clone()),
+        ];
+        if sesion {
+            cuerpo.push(("fb_dtsg", self.dtsg.clone()));
+        }
+        cuerpo.extend([
+            ("jazoest", jazoest(ficha)),
+            ("lsd", self.lsd.clone()),
+            ("fb_api_caller_class", "RelayModern".to_string()),
+            ("fb_api_req_friendly_name", self.consulta.clone()),
+            ("server_timestamps", "true".to_string()),
+            ("variables", Value::Object(variables).to_string()),
+            ("doc_id", self.doc_id.clone()),
+        ]);
+        // Un dato que la página no trajo no se manda vacío: se omite.
+        cuerpo.retain(|(_, v)| !v.is_empty());
+
+        let csrf = if self.csrf.is_empty() { valor_cookie(cookie, "csrftoken") } else { self.csrf.clone() };
+        let mut cabeceras = vec![
+            ("Accept", "*/*".to_string()),
+            ("Accept-Language", "en-US,en;q=0.9".to_string()),
+            ("Origin", "https://www.threads.com".to_string()),
+            ("Referer", format!("https://www.threads.com/@{}", self.usuario)),
+            ("Sec-Fetch-Dest", "empty".to_string()),
+            ("Sec-Fetch-Mode", "cors".to_string()),
+            ("Sec-Fetch-Site", "same-origin".to_string()),
+            ("X-ASBD-ID", ASBD_ID.to_string()),
+            ("X-BLOKS-VERSION-ID", self.bloks.clone()),
+            ("X-CSRFToken", csrf),
+            ("X-FB-Friendly-Name", self.consulta.clone()),
+            ("X-FB-LSD", self.lsd.clone()),
+            ("X-IG-App-ID", self.app_id.clone()),
+            ("X-Web-Session-ID", self.sesion_web.clone()),
+        ];
+        if !sesion {
+            // La que pone la web a un visitante. Sin ella el servidor toma la
+            // petición por una con sesión, y sin sesión: «User not found».
+            cabeceras.push(("X-LOGGED-OUT-THREADS-MIGRATED-REQUEST", "true".to_string()));
+        }
+        cabeceras.retain(|(_, v)| !v.is_empty());
+        Some(Peticion { cabeceras, cuerpo })
+    }
+
+    /// Lee la respuesta a `peticion` y avanza el cursor. Lo que no es de la
+    /// cuenta, y lo ya leído (`vistas`), se descarta.
+    ///
+    /// Un error suelto junto a los datos no tumba la página: medido, Threads
+    /// manda a veces `field_exception` en un campo y los hilos completos, y su
+    /// propia web solo se para con los de gravedad `CRITICAL`.
+    pub fn leer_pagina(&mut self, cuerpo: &str, vistas: &mut HashSet<String>) -> Result<Pagina, FalloPagina> {
+        let v = json_de_meta(cuerpo).ok_or(FalloPagina::NoEsJson)?;
+        let Some(datos) = v.get("data").and_then(|d| d.get("mediaData")).filter(|m| m.is_object()) else {
+            return Err(FalloPagina::SinDatos(mensaje_de(&v)));
+        };
+        let mut halladas = Vec::new();
+        cosechar(datos, &mut halladas, 0);
+        let elegidas: Vec<&Value> = halladas
+            .into_iter()
+            .filter(|p| texto(p.get("user"), "username").eq_ignore_ascii_case(&self.usuario))
+            .collect();
+        let mut pagina = Pagina::default();
+        anadir(&elegidas, vistas, &mut pagina.items, &mut pagina.publicaciones);
+
+        // Un cursor que no avanza, o una página vacía que dice que hay más,
+        // acabarían en un bucle: el perfil se da por acabado.
+        let hilos = datos.get("edges").and_then(Value::as_array).map_or(0, Vec::len);
+        let nuevo = datos.get("page_info").and_then(cursor_de).filter(|c| !c.is_empty());
+        self.cursor = match nuevo {
+            Some(c) if hilos > 0 && self.cursor.as_deref() != Some(c.as_str()) => Some(c),
+            _ => None,
+        };
+        Ok(pagina)
+    }
+}
+
+/// Saca de la página de un perfil lo necesario para pedir sus publicaciones
+/// siguientes. `None` si no trae la consulta o sus fichas: Threads ha cambiado
+/// su web, y quien llama se queda con lo que ya tiene.
+pub fn paginador(html: &str, usuario: &str) -> Option<Paginador> {
+    let lsd = cadena(&modulo(html, "LSD")?, "token")?;
+    let (doc_id, consulta, variables) = bloques_json(html)
+        .filter(|b| b.contains("adp_BarcelonaProfileThreadsTab"))
+        .filter_map(|b| serde_json::from_str::<Value>(b).ok())
+        .find_map(|v| buscar_consulta(&v, 0))?;
+    let cursor = bloques_json(html)
+        .filter(|b| b.contains("\"page_info\""))
+        .filter_map(|b| serde_json::from_str::<Value>(b).ok())
+        .find_map(|v| buscar_cursor(&v, 0))
+        .flatten();
+    let de = |nombre: &str, clave: &str| modulo(html, nombre).and_then(|m| cadena(&m, clave));
+    let cifras = |s: &String| s.bytes().all(|b| b.is_ascii_digit());
+    Some(Paginador {
+        usuario: usuario.to_string(),
+        doc_id,
+        consulta,
+        variables,
+        cursor,
+        lsd,
+        csrf: de("InstagramSecurityConfig", "csrf_token").unwrap_or_default(),
+        dtsg: de("DTSGInitialData", "token").unwrap_or_default(),
+        espectador: de("CurrentUserInitialData", "USER_ID").filter(cifras).unwrap_or_else(|| "0".into()),
+        app_id: de("CurrentUserInitialData", "APP_ID").filter(cifras).unwrap_or_else(|| APP_ID.into()),
+        bloks: de("WebBloksVersioningID", "versioningID").unwrap_or_default(),
+        hs: de("SiteData", "haste_session").unwrap_or_default(),
+        rev: de("SiteData", "client_revision").unwrap_or_default(),
+        hsi: de("SiteData", "hsi").unwrap_or_default(),
+        comet: de("SiteData", "comet_env").unwrap_or_default(),
+        dpr: de("SiteData", "pr").unwrap_or_else(|| "1".into()),
+        ccg: de("WebConnectionClassServerGuess", "connectionClass").unwrap_or_else(|| "EXCELLENT".into()),
+        sesion_web: sesion_web_nueva(),
+        peticiones: 0,
+    })
+}
+
+/// Lo que dice Meta en una respuesta de error, en una línea. Sirve para el
+/// cuerpo de un 4xx, que también suele ser JSON.
+pub fn mensaje_de_error(cuerpo: &str) -> String {
+    json_de_meta(cuerpo).map(|v| mensaje_de(&v)).unwrap_or_default()
+}
+
+/// Una respuesta JSON de Meta, sin el `for (;;);` que antepone a algunas.
+fn json_de_meta(cuerpo: &str) -> Option<Value> {
+    let cuerpo = cuerpo.trim_start();
+    serde_json::from_str(cuerpo.strip_prefix("for (;;);").unwrap_or(cuerpo)).ok()
+}
+
+/// En las de GraphQL, `errors[0]`: su `description`, que es la legible
+/// («User not found»), y si no su `message`. En las de la API de siempre
+/// (`{"message":"checkpoint_required","status":"fail"}`), `message`.
+fn mensaje_de(v: &Value) -> String {
+    let e = v.get("errors").and_then(|e| e.get(0));
+    let m = [
+        e.and_then(|e| e.get("description")),
+        e.and_then(|e| e.get("message")),
+        e.and_then(|e| e.get("summary")),
+        v.get("message"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|x| x.as_str().map(str::trim).filter(|s| !s.is_empty()))
+    .unwrap_or("");
+    m.chars().filter(|c| !c.is_control()).take(160).collect()
+}
+
+/// La configuración de un módulo de la página: `["LSD",[],{"token":"…"},323]`
+/// → `{"token":"…"}`. Las páginas de Meta los declaran todos así; el objeto
+/// se lee con el analizador de JSON, que se para al cerrarlo.
+fn modulo(html: &str, nombre: &str) -> Option<Map<String, Value>> {
+    let clave = format!("[\"{nombre}\",[],");
+    let ini = html.find(&clave)? + clave.len();
+    match serde_json::Deserializer::from_str(&html[ini..]).into_iter::<Value>().next()? {
+        Ok(Value::Object(m)) => Some(m),
+        _ => None,
+    }
+}
+
+/// Un valor corto de texto o número, tal cual. Lo que no lo es —o es largo,
+/// o trae controles— no sale de aquí hacia una cabecera.
+fn cadena(m: &Map<String, Value>, clave: &str) -> Option<String> {
+    let s = match m.get(clave)? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control)).then_some(s)
+}
+
+/// La consulta de la pestaña de hilos entre los «preloaders» de la página:
+/// su `queryID`, su nombre y sus variables (`userID` y los
+/// `__relay_internal__pv__…`, sin los cuales Threads contesta
+/// `missing_required_variable_value`).
+fn buscar_consulta(v: &Value, prof: u32) -> Option<(String, String, Map<String, Value>)> {
+    if prof > 40 {
+        return None;
+    }
+    match v {
+        Value::Array(a) => a.iter().find_map(|x| buscar_consulta(x, prof + 1)),
+        Value::Object(o) => {
+            let id = o.get("preloaderID").and_then(Value::as_str).unwrap_or("");
+            if let Some(resto) = id.strip_prefix("adp_BarcelonaProfileThreadsTab") {
+                let doc = o
+                    .get("queryID")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+                let variables = o.get("variables").and_then(Value::as_object).filter(|m| m.contains_key("userID"));
+                if let (Some(doc), Some(variables)) = (doc, variables) {
+                    let nombre = o.get("queryName").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| {
+                        format!("BarcelonaProfileThreadsTab{}", resto.split("RelayPreloader").next().unwrap_or(""))
+                    });
+                    return Some((doc.to_string(), nombre, variables.clone()));
+                }
+            }
+            o.values().find_map(|x| buscar_consulta(x, prof + 1))
+        }
+        _ => None,
+    }
+}
+
+/// El cursor de los hilos del perfil, de su `mediaData.page_info`:
+/// `Some(None)` = está, y no hay más.
+fn buscar_cursor(v: &Value, prof: u32) -> Option<Option<String>> {
+    if prof > 40 {
+        return None;
+    }
+    match v {
+        Value::Array(a) => a.iter().find_map(|x| buscar_cursor(x, prof + 1)),
+        Value::Object(o) => match o.get("mediaData").and_then(|m| m.get("page_info")) {
+            Some(pi) => Some(cursor_de(pi)),
+            None => o.values().find_map(|x| buscar_cursor(x, prof + 1)),
+        },
+        _ => None,
+    }
+}
+
+/// Por dónde sigue un `page_info`: `None` si no hay más.
+fn cursor_de(pi: &Value) -> Option<String> {
+    (pi.get("has_next_page").and_then(Value::as_bool) == Some(true))
+        .then(|| pi.get("end_cursor").and_then(Value::as_str).unwrap_or("").to_string())
+}
+
+/// El valor de una cookie en una cabecera `Cookie`.
+fn valor_cookie(cookie: &str, nombre: &str) -> String {
+    cookie
+        .split(';')
+        .filter_map(|par| par.trim().split_once('='))
+        .find(|(n, _)| *n == nombre)
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// `jazoest`: `2` y la suma de los códigos UTF-16 del token.
+fn jazoest(token: &str) -> String {
+    format!("2{}", token.encode_utf16().map(u32::from).sum::<u32>())
+}
+
+fn base36(mut n: u32) -> String {
+    const CIFRAS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut s = Vec::new();
+    loop {
+        s.push(CIFRAS[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    s.reverse();
+    String::from_utf8(s).unwrap_or_default()
+}
+
+/// El `WebSession.getId()` de la web: tres grupos de seis caracteres en base
+/// 36 (`k3x9q1:0f7zrm:p2a8cd`) que se inventa al cargar la página. No es un
+/// secreto ni hace falta que sea impredecible: identifica la pestaña.
+fn sesion_web_nueva() -> String {
+    let semilla = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64);
+    let mut x = semilla | 1;
+    let mut grupo = || -> String {
+        (0..6)
+            .map(|_| {
+                // xorshift64
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from_digit((x % 36) as u32, 36).unwrap_or('0')
+            })
+            .collect()
+    };
+    let (a, b, c) = (grupo(), grupo(), grupo());
+    format!("{a}:{b}:{c}")
 }
 
 /// ¿La página es el muro de «inicia sesión» de Threads? Algunos perfiles no se
@@ -723,5 +1167,208 @@ mod tests {
         assert_eq!(fecha_de_unix(951_782_400), "2000-02-29");
         assert_eq!(extension_imagen("https://x.cdninstagram.com/v/t51/1_n.webp?stp=dst-webp"), "webp");
         assert_eq!(extension_imagen("https://x.cdninstagram.com/v/t51/AQabc?stp=1"), "jpg");
+    }
+
+    // ------------------------ Páginas siguientes ------------------------
+
+    /// La página real de @nasa sin sesión (24/10/2026), recortada a lo que
+    /// se lee: los módulos de configuración, los dos «preloaders» y el
+    /// resultado de la consulta con su `page_info`. Misma estructura.
+    const PERFIL: &str = include_str!("testdata/threads_perfil.html");
+    /// La primera respuesta real de la consulta, recortada a cuatro hilos:
+    /// un carrusel con su respuesta, una foto, un vídeo y uno de texto.
+    const PAGINA: &str = include_str!("testdata/threads_pagina.json");
+
+    fn nasa() -> Destino {
+        Destino::Perfil { usuario: "nasa".into() }
+    }
+
+    /// Lo que sale de una petición, por nombre.
+    fn campo<'a>(lista: &'a [(&'static str, String)], nombre: &str) -> Option<&'a str> {
+        lista.iter().find(|(n, _)| *n == nombre).map(|(_, v)| v.as_str())
+    }
+
+    /// La misma página como la vería alguien con sesión: con su `fb_dtsg`,
+    /// su id y, para probar el otro camino, sin el token CSRF en la página.
+    fn perfil_con_sesion() -> String {
+        PERFIL
+            .replace("[\"DTSGInitialData\",[],{}", "[\"DTSGInitialData\",[],{\"token\":\"NAcMQ1oUbxYZ3zUPZ0ZvJxQ8Jp8yoKqfYv3Wq9F8KQ7x2b1bZ6JQ:17:1700000000\"}")
+            .replace("\"USER_ID\":\"0\"", "\"USER_ID\":\"63000000001\"")
+            .replace("{\"csrf_token\":\"lRYHa7pHB_mZgMd14MNyrP\"}", "{}")
+    }
+
+    #[test]
+    fn el_perfil_trae_su_consulta_y_sus_fichas() {
+        let l = leer_html(PERFIL, &nasa()).unwrap();
+        assert_eq!(l.publicaciones, 5, "cuatro hilos, uno con su respuesta");
+        assert_eq!(l.items.len(), 6, "el carrusel de 4 y dos fotos");
+        assert_eq!(l.vistas.len(), 5);
+        assert!(l.hay_mas);
+        let p = l.paginador.expect("la página trae su consulta");
+        assert!(p.hay_mas() && !p.con_sesion());
+        assert_eq!(p.doc_id, "28424781820556358");
+        assert_eq!(p.consulta, "BarcelonaProfileThreadsTabDirectQuery", "la de los hilos, no la de la cabecera");
+        assert_eq!(p.variables["userID"], "28829152388");
+        assert!(p.variables.keys().any(|k| k.starts_with("__relay_internal__pv__")));
+        assert!(p.cursor.as_deref().is_some_and(|c| c.starts_with("QVFD")), "{:?}", p.cursor);
+        assert_eq!(p.lsd, "AdTPbcKXYmvP_c_XyiAaC-b7Ecs");
+        assert_eq!(p.csrf, "lRYHa7pHB_mZgMd14MNyrP");
+        assert_eq!((p.espectador.as_str(), p.dtsg.as_str()), ("0", ""));
+        assert_eq!(p.app_id, "238260118697367");
+        assert_eq!((p.rev.as_str(), p.comet.as_str(), p.dpr.as_str()), ("1051607682", "122", "1"));
+        assert!(p.hs.contains("barcelona_logged_out_pkg") && !p.hsi.is_empty() && !p.bloks.is_empty());
+        assert_eq!(p.ccg, "EXCELLENT");
+
+        // Un post no lleva paginador, y una página sin la consulta tampoco.
+        let post = Destino::Post { usuario: "nasa".into(), codigo: "Decc755lYhC".into() };
+        assert!(leer_html(PERFIL, &post).unwrap().paginador.is_none());
+        assert!(leer_html(&pagina(""), &nasa()).unwrap().paginador.is_none());
+    }
+
+    /// Sin sesión, la petición es la de la web a un visitante, campo a campo.
+    #[test]
+    fn la_peticion_sin_sesion_es_la_de_la_web() {
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        let cursor = p.cursor.clone().unwrap();
+        let pet = p.peticion("").unwrap();
+        let cab = |k| campo(&pet.cabeceras, k);
+        let cuerpo = |k| campo(&pet.cuerpo, k);
+        assert_eq!(cab("X-LOGGED-OUT-THREADS-MIGRATED-REQUEST"), Some("true"));
+        assert_eq!(cab("X-FB-LSD"), Some("AdTPbcKXYmvP_c_XyiAaC-b7Ecs"));
+        assert_eq!(cab("X-CSRFToken"), Some("lRYHa7pHB_mZgMd14MNyrP"));
+        assert_eq!(cab("X-IG-App-ID"), Some("238260118697367"));
+        assert_eq!(cab("X-ASBD-ID"), Some("359341"));
+        assert_eq!(cab("X-FB-Friendly-Name"), Some("BarcelonaProfileThreadsTabDirectQuery"));
+        assert_eq!(cab("Sec-Fetch-Mode"), Some("cors"));
+        assert_eq!(cab("Referer"), Some("https://www.threads.com/@nasa"));
+        assert!(cab("X-BLOKS-VERSION-ID").is_some_and(|v| v.starts_with("f6e7112f")));
+        assert_eq!((cuerpo("av"), cuerpo("__user"), cuerpo("__a")), (Some("0"), Some("0"), Some("1")));
+        assert_eq!(cuerpo("fb_dtsg"), None, "un visitante no tiene");
+        assert_eq!(cuerpo("jazoest"), Some("22398"), "la suma del lsd");
+        assert_eq!(cuerpo("lsd"), Some("AdTPbcKXYmvP_c_XyiAaC-b7Ecs"));
+        assert_eq!(cuerpo("doc_id"), Some("28424781820556358"));
+        assert_eq!(cuerpo("fb_api_caller_class"), Some("RelayModern"));
+        assert_eq!(cuerpo("server_timestamps"), Some("true"));
+        assert_eq!(cuerpo("__comet_req"), Some("122"));
+        assert_eq!(cuerpo("__req"), Some("1"));
+        let s = cuerpo("__s").unwrap();
+        assert_eq!(cab("X-Web-Session-ID"), Some(s));
+        assert!(s.len() == 20 && s.split(':').all(|g| g.len() == 6 && g.bytes().all(|b| b.is_ascii_alphanumeric())), "{s}");
+        let v: Value = serde_json::from_str(cuerpo("variables").unwrap()).unwrap();
+        assert_eq!(v["after"], Value::String(cursor));
+        assert_eq!(v["first"], 15);
+        assert_eq!(v["userID"], "28829152388");
+        assert_eq!(v["__relay_internal__pv__BarcelonaIsLoggedInrelayprovider"], false);
+        // Cada petición lleva su número, como en la web.
+        assert_eq!(campo(&p.peticion("").unwrap().cuerpo, "__req"), Some("2"));
+    }
+
+    /// Con sesión: su `fb_dtsg`, su id, el CSRF de su cookie si la página no
+    /// lo trae, y sin la cabecera de visitante. Y nada de eso en un `{:?}`.
+    #[test]
+    fn con_sesion_lleva_el_dtsg_y_quien_mira() {
+        let mut p = paginador(&perfil_con_sesion(), "nasa").unwrap();
+        assert!(p.con_sesion());
+        let pet = p.peticion("sessionid=s3cr3t; csrftoken=CSRF123; ds_user_id=63000000001").unwrap();
+        let cab = |k| campo(&pet.cabeceras, k);
+        let cuerpo = |k| campo(&pet.cuerpo, k);
+        assert_eq!(cab("X-LOGGED-OUT-THREADS-MIGRATED-REQUEST"), None);
+        assert_eq!(cab("X-CSRFToken"), Some("CSRF123"), "el de la cookie");
+        assert_eq!((cuerpo("av"), cuerpo("__user")), (Some("63000000001"), Some("63000000001")));
+        assert_eq!(cuerpo("fb_dtsg"), Some("NAcMQ1oUbxYZ3zUPZ0ZvJxQ8Jp8yoKqfYv3Wq9F8KQ7x2b1bZ6JQ:17:1700000000"));
+        assert_eq!(cuerpo("jazoest"), Some("25095"), "la suma del fb_dtsg, no la del lsd");
+        let depurado = format!("{p:?}");
+        assert!(!depurado.contains("NAcMQ") && !depurado.contains("AdTPbc"), "{depurado}");
+        assert!(depurado.contains("con_sesion: true"), "{depurado}");
+    }
+
+    /// Una página de la API: sus publicaciones y el cursor siguiente.
+    #[test]
+    fn una_pagina_da_sus_publicaciones_y_el_cursor() {
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        let mut vistas = HashSet::new();
+        let pag = p.leer_pagina(PAGINA, &mut vistas).unwrap();
+        assert_eq!(pag.publicaciones, 5);
+        assert_eq!(pag.items.len(), 6, "4 del carrusel, la foto y el vídeo");
+        let v = pag.items.iter().find(|i| i.is_video).expect("el vídeo");
+        assert_eq!((v.post_id.as_str(), v.ext.as_str()), ("DeMqtuYgkaL", "mp4"));
+        assert!(pag.items.iter().all(|i| i.author == "nasa"));
+        assert!(p.cursor.as_deref().is_some_and(|c| c.starts_with("AQHT1DxH")), "{:?}", p.cursor);
+        // La misma página otra vez no trae nada nuevo.
+        let otra = p.leer_pagina(PAGINA, &mut vistas).unwrap();
+        assert_eq!((otra.publicaciones, otra.items.len()), (0, 0));
+    }
+
+    /// MEDIDO: la primera página repite los hilos que ya traía el HTML. Lo
+    /// leído en la página del perfil no vuelve a la rejilla.
+    #[test]
+    fn la_primera_pagina_no_repite_lo_del_html() {
+        let mut l = leer_html(PERFIL, &nasa()).unwrap();
+        let mut p = l.paginador.take().unwrap();
+        let pag = p.leer_pagina(PAGINA, &mut l.vistas).unwrap();
+        assert_eq!(pag.publicaciones, 1, "solo el vídeo es nuevo");
+        assert_eq!(pag.items.len(), 1);
+        assert!(pag.items[0].is_video);
+    }
+
+    /// Lo que no es de la cuenta no entra; y el final del perfil, o un cursor
+    /// que no avanza, lo dan por acabado en vez de pedir lo mismo sin fin.
+    #[test]
+    fn el_final_del_perfil_y_los_bucles() {
+        let mut v: Value = serde_json::from_str(PAGINA).unwrap();
+        v["data"]["mediaData"]["edges"][1]["node"]["thread_items"][0]["post"]["user"]["username"] = "otra.cuenta".into();
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        let pag = p.leer_pagina(&v.to_string(), &mut HashSet::new()).unwrap();
+        assert_eq!(pag.publicaciones, 4, "la foto de otra cuenta, fuera");
+
+        let fin = PAGINA.replace("\"has_next_page\":true", "\"has_next_page\":false");
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        p.leer_pagina(&fin, &mut HashSet::new()).unwrap();
+        assert!(!p.hay_mas());
+        assert!(p.peticion("").is_none(), "ya no hay nada que pedir");
+
+        // El mismo cursor dos veces: se acaba.
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        p.leer_pagina(PAGINA, &mut HashSet::new()).unwrap();
+        assert!(p.hay_mas());
+        p.leer_pagina(PAGINA, &mut HashSet::new()).unwrap();
+        assert!(!p.hay_mas());
+
+        // Una página sin hilos que dice que hay más, también.
+        let mut v: Value = serde_json::from_str(PAGINA).unwrap();
+        v["data"]["mediaData"]["edges"] = Value::Array(Vec::new());
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        p.leer_pagina(&v.to_string(), &mut HashSet::new()).unwrap();
+        assert!(!p.hay_mas());
+    }
+
+    /// Lo que contesta Meta cuando no hay datos, tal cual llega.
+    #[test]
+    fn los_errores_de_meta() {
+        let mut p = paginador(PERFIL, "nasa").unwrap();
+        let mut vistas = HashSet::new();
+        // La respuesta real de `/graphql/query` como «con sesión» sin tenerla.
+        let sin_usuario = r#"{"errors":[{"message":"execution error","code":4630001,"summary":"Bad Request","description":"User not found","path":["mediaData"],"severity":"CRITICAL"}],"data":null,"extensions":{"is_final":true},"status":"ok"}"#;
+        assert_eq!(p.leer_pagina(sin_usuario, &mut vistas).unwrap_err(), FalloPagina::SinDatos("User not found".into()));
+        assert_eq!(
+            p.leer_pagina("<!DOCTYPE html><html><body>Log in</body></html>", &mut vistas).unwrap_err(),
+            FalloPagina::NoEsJson
+        );
+        assert_eq!(mensaje_de_error(r#"{"message":"checkpoint_required","status":"fail"}"#), "checkpoint_required");
+        assert_eq!(mensaje_de_error("no es json"), "");
+        // Un error suelto con los datos buenos: la página vale (medido).
+        let mut v: Value = serde_json::from_str(PAGINA).unwrap();
+        v["errors"] = serde_json::json!([{"message": "A server error field_exception occured.", "severity": "WARNING"}]);
+        assert_eq!(p.leer_pagina(&format!("for (;;);{v}"), &mut vistas).unwrap().publicaciones, 5);
+        assert!(p.hay_mas());
+    }
+
+    #[test]
+    fn jazoest_base36_y_cookies() {
+        assert_eq!(jazoest("AdTPbcKXYmvP_c_XyiAaC-b7Ecs"), "22398");
+        assert_eq!([1, 35, 36, 1295].map(base36), ["1", "z", "10", "zz"]);
+        assert_eq!(valor_cookie("a=1; csrftoken=XY z; b=2", "csrftoken"), "XY z");
+        assert_eq!(valor_cookie("xcsrftoken=1", "csrftoken"), "");
+        assert_ne!(sesion_web_nueva(), "", "y con el formato de la web: ver la prueba de la petición");
     }
 }

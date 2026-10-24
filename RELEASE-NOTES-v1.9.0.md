@@ -334,12 +334,9 @@ Measured on 24 October 2026:
   carousel position, the video's own resolution (`original_width`; its cover
   is 640 px), and the cover as thumbnail. Only that post: the page also
   carries replies and "related" posts of other accounts.
-- **Of a profile, Threads shows visitors only its first posts** (its query
-  asks for `first: 4`, and scrolling asks you to sign in instead of loading
-  more). Those are listed, and the grid says so and points to the capturer,
-  which reads the whole profile with your own browser session. Sending your
-  Meta session from outside the browser is deliberately not done: that is
-  the kind of activity Meta flags, and the account is yours.
+- **A profile is read whole.** Its page carries the first four threads and
+  the query that fetched them, and the app repeats that query page by page:
+  see *Whole Threads profiles, natively* below.
 - Threads videos are a progressive MP4 with audio, served from paths without
   an extension (`/o1/v/t16/f2/m84/AQ…`), up to 720p in the sample; the 1080p
   rendition exists only as separate DASH video and audio.
@@ -364,6 +361,55 @@ Measured on 24 October 2026:
   audio cannot be fetched, the video is kept at full quality without audio
   and a notice says why — quality first, as asked; the missing-ffmpeg notice
   appears once per session.
+
+### Whole Threads profiles, natively
+
+The first version of the native reader stopped at a profile's first four
+threads and sent you to the capturer for the rest. Measured on 24 October
+2026, that limit was the web page's, not Threads':
+
+- **The profile page carries its own query.** Besides the first threads, it
+  holds the query that fetched them (`BarcelonaProfileThreadsTabDirectQuery`:
+  its `queryID`, its variables and the `end_cursor`) and what the site's
+  JavaScript adds to every request (`LSD`, the CSRF token, `SiteData`).
+  Threads' site asks for more by repeating that query with `after`; the app
+  repeats it the same way, field by field as `BarcelonaRelayEnvironment`,
+  `createRelayFBNetworkFetch` and `getAsyncParams` build it, to
+  `/graphql/query`.
+- **Visitors get it too**, with the header the site itself sends when you are
+  not signed in (`X-LOGGED-OUT-THREADS-MIGRATED-REQUEST`). Without it, the
+  same request answers "User not found": the server takes it for a signed-in
+  one. Measured without an account: @zuck's whole history, back to July
+  2023, in 12 pages of 15, with a 2.5–4 s pause between pages and not a
+  single block; @nasa's 149 threads in 10 pages.
+- **The first page repeats what the profile page already showed**, so posts
+  are de-duplicated by their code across pages, and against the grid when
+  *Load more* resumes after *Stop*. A partial error next to good data
+  (`field_exception` on one field, seen once in 25 pages) does not drop the
+  page, as on Threads' own site, which only stops on `CRITICAL` errors. A
+  cursor that does not advance, or an empty page that claims there is more,
+  ends the profile instead of looping.
+- **In the grid**, posts arrive as each page does. A batch is 20 pages (about
+  300 posts, a little over a minute); *Load more* continues from where it
+  stopped, and *Stop* now also sits next to "fetching more in the
+  background…", where the one at the top is no longer drawn. The notice
+  above the grid says how many posts and files have been read and whether
+  the profile is complete. Tested end to end against threads.com with the
+  application's own code: @zuck, 231 posts and 139 files in one batch, no
+  duplicates.
+- **Your threads.com session, only when it is needed.** Some profiles are not
+  shown to visitors at all (@nasawebb, @nasahubble), and private accounts
+  only to their followers. For those, and only when the visitor view shows
+  nothing or Threads stops serving pages to it, the app reads the profile
+  with your session: the cookies of the browser chosen in Settings, or your
+  `cookies.txt`, threads.com only, sent only to www.threads.com. The request
+  is the signed-in one of Threads' site: your `fb_dtsg`, your id (`av`,
+  `__user`), and no visitor header. **This path could not be tested against
+  a real account** while it was written. It can be checked with
+  `TD_THREADS_COOKIES=<cookies.txt> cargo test -- --ignored
+  threads_sesion_en_vivo --nocapture`, which prints counts and never a cookie
+  or a token. If it fails, the notice says what Threads answered, and the
+  capturer remains.
 
 ### Bilibili: working again despite its site change
 
