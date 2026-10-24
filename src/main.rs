@@ -4978,7 +4978,8 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 /// gallery-dl es un empaquetado PyInstaller y deja un nieto de Python vivo si
 /// se termina únicamente el lanzador.
 /// Ejecuta un proceso leyendo su stdout LÍNEA A LÍNEA, y llama a `por_linea`
-/// con cada una según llega.
+/// con cada una según llega. Las de stderr van a `por_aviso`, también según
+/// llegan, y se devuelven además todas juntas al final.
 ///
 /// La diferencia con `run_capture_timeout` no es de estilo: aquella espera a
 /// que el proceso termine para entregar nada, y con un listado en flujo eso
@@ -4986,34 +4987,58 @@ async fn write_booru_auth(json: &str) -> Option<PathBuf> {
 /// la escribe, así que la rejilla se llena mientras el extractor sigue
 /// trabajando.
 ///
+/// EL PLAZO ES DE INACTIVIDAD, NO TOTAL. Antes era total: cinco minutos desde
+/// el arranque, aunque gallery-dl estuviera entregando resultados sin parar.
+/// Un perfil grande de Instagram —seis a doce segundos entre peticiones— o de
+/// X se cortaba a los cinco minutos. Y como el corte salía con el mismo tipo
+/// de error que «Detener», el que llama lo descartaba en silencio: la rejilla
+/// se quedaba a medias y el indicador de «trayendo más» girando para siempre.
+/// Ahora cuenta el tiempo desde la última línea, de stdout o de stderr, y el
+/// corte por plazo sale como `TimedOut`, distinto de la parada (`Interrupted`).
+///
+/// LAS ESPERAS DECLARADAS NO SON INACTIVIDAD. Cuando X o Instagram limitan las
+/// peticiones, gallery-dl lo anuncia por stderr —«Waiting for 15 minutes until
+/// 13:45:12 (rate limit)»— y se queda dormido hasta esa hora. Tras un aviso
+/// así se concede `espera_declarada` en vez de `inactividad`: matarlo a los
+/// cinco minutos de una espera de quince tiraba un listado que iba a seguir.
+///
 /// EL BUCLE NO ESPERA DIRECTAMENTE SOBRE `next_line`. Un `select!` que cancela
 /// una lectura a medias puede perder lo que llevaba en el búfer, así que las
-/// líneas viajan por un canal —cuya recepción sí es segura de cancelar— y el
+/// líneas viajan por canales —cuya recepción sí es segura de cancelar— y el
 /// bucle principal alterna entre recibirlas y comprobar la parada y el plazo.
-async fn run_lineas_timeout<F>(
+async fn run_lineas_timeout<F, G>(
     mut cmd: tokio::process::Command,
-    limite: Duration,
+    inactividad: Duration,
+    espera_declarada: Duration,
     cancelar: Option<Arc<AtomicBool>>,
     mut por_linea: F,
+    mut por_aviso: G,
 ) -> std::io::Result<(std::process::ExitStatus, String)>
 where
     F: FnMut(&str),
+    G: FnMut(&str),
 {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn()?;
     let salida = child.stdout.take();
-    let mut errores = child.stderr.take();
+    let errores = child.stderr.take();
 
     // stderr en su propia tarea: hay que drenarlo mientras tanto o el hijo se
-    // bloquearía al llenar la tubería, y el plazo saltaría por un motivo
-    // equivocado.
+    // bloquearía al llenar la tubería. Cada línea se reenvía al bucle (para
+    // los avisos y para contar actividad) y se acumula para devolverla entera.
+    let (etx, mut erx) = unbounded_channel::<String>();
     let t_err = tokio::spawn(async move {
         let mut s = String::new();
-        if let Some(h) = errores.as_mut() {
-            let _ = h.read_to_string(&mut s).await;
+        if let Some(h) = errores {
+            let mut lineas = BufReader::new(h).lines();
+            while let Ok(Some(l)) = lineas.next_line().await {
+                s.push_str(&l);
+                s.push('\n');
+                let _ = etx.send(l);
+            }
         }
         s
     });
@@ -5029,58 +5054,73 @@ where
         }
     });
 
-    let fin = Instant::now() + limite;
-    let abortar = |motivo: &'static str, es: &'static str| {
-        std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            if i18n::lang() == i18n::Lang::Es { es } else { motivo },
-        )
+    let abortar = |kind: std::io::ErrorKind, motivo: &'static str, es: &'static str| {
+        std::io::Error::new(kind, if i18n::lang() == i18n::Lang::Es { es } else { motivo })
     };
+    let mut ultima = Instant::now();
+    let mut margen = inactividad;
+    let mut stdout_abierto = true;
+    let mut stderr_abierto = true;
 
     loop {
         tokio::select! {
-            linea = lrx.recv() => match linea {
-                Some(l) => por_linea(&l),
+            linea = lrx.recv(), if stdout_abierto => match linea {
+                Some(l) => {
+                    ultima = Instant::now();
+                    margen = inactividad;
+                    por_linea(&l);
+                }
                 // stdout cerrado: el proceso ha terminado de escribir.
-                None => break,
+                None => stdout_abierto = false,
             },
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                // Se mata el ÁRBOL, no solo el proceso: gallery-dl es Python y
-                // puede tener hijos propios, y matar solo al padre dejaría al
-                // nieto pidiendo páginas sin que nadie escuche la respuesta.
-                if cancelar.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
-                    kill_tree(&mut child).await;
-                    let _ = child.wait().await;
-                    return Err(abortar("search stopped", "búsqueda detenida"));
+            linea = erx.recv(), if stderr_abierto => match linea {
+                Some(l) => {
+                    ultima = Instant::now();
+                    margen = if es_espera_declarada(&l) { espera_declarada } else { inactividad };
+                    por_aviso(&l);
                 }
-                if Instant::now() >= fin {
-                    kill_tree(&mut child).await;
-                    let _ = child.wait().await;
-                    return Err(abortar("timed out", "se agotó el tiempo"));
-                }
-            }
+                None => stderr_abierto = false,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
-    }
-
-    // Ya no llegan líneas; se espera al proceso sin dejar de vigilar la parada.
-    let estado = loop {
-        if let Some(st) = child.try_wait()? {
-            break st;
-        }
+        // Se mata el ÁRBOL, no solo el proceso: gallery-dl es Python y puede
+        // tener hijos propios, y matar solo al padre dejaría al nieto pidiendo
+        // páginas sin que nadie escuche la respuesta.
         if cancelar.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             kill_tree(&mut child).await;
             let _ = child.wait().await;
-            return Err(abortar("search stopped", "búsqueda detenida"));
+            return Err(abortar(std::io::ErrorKind::Interrupted, "search stopped", "búsqueda detenida"));
         }
-        if Instant::now() >= fin {
+        if !stdout_abierto {
+            if let Some(estado) = child.try_wait()? {
+                return Ok((estado, t_err.await.unwrap_or_default()));
+            }
+        }
+        if ultima.elapsed() >= margen {
             kill_tree(&mut child).await;
             let _ = child.wait().await;
-            return Err(abortar("timed out", "se agotó el tiempo"));
+            return Err(abortar(
+                std::io::ErrorKind::TimedOut,
+                "no output for too long",
+                "demasiado tiempo sin respuesta",
+            ));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    }
+}
 
-    Ok((estado, t_err.await.unwrap_or_default()))
+/// ¿Es una línea de gallery-dl anunciando que se queda esperando por límite
+/// de peticiones? Su formato, en `extractor/common.py:wait`:
+/// `Waiting for 15 minutes until 13:45:12 (rate limit)`, y en Instagram
+/// `… (429 Too Many Requests)`.
+fn es_espera_declarada(linea: &str) -> bool {
+    linea.contains("Waiting for ") && linea.contains(" until ")
+}
+
+/// La hora hasta la que espera, tal como la escribe gallery-dl («13:45:12»).
+fn hora_de_espera(linea: &str) -> Option<String> {
+    let resto = linea.split(" until ").nth(1)?;
+    let hora: String = resto.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+    (hora.len() >= 5).then_some(hora)
 }
 
 async fn run_capture_timeout(
@@ -6655,9 +6695,15 @@ fn booru_pacing(url: &str) -> &'static str {
         "0.5"
     }
 }
-/// Tope para listar una galería. Mucho mayor porque Instagram se espacia
-/// 6-12 s entre peticiones y una página de 30 puede tardar varios minutos.
+/// Silencio máximo de gallery-dl mientras lista una galería, sin contar las
+/// esperas que él mismo anuncia (ver `run_lineas_timeout`). Cinco minutos
+/// sobran: Instagram se espacia de 6 a 12 s entre peticiones, y Facebook, el
+/// más lento, entrega algo con cada foto.
 const GALLERY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Tras un «Waiting for … until …» de gallery-dl: la ventana de X es de quince
+/// minutos, y se deja un margen.
+const GALLERY_ESPERA_LIMITE: Duration = Duration::from_secs(20 * 60);
 
 #[allow(clippy::too_many_arguments)]
 async fn booru_search(
@@ -9119,34 +9165,86 @@ async fn browse_gallery_hop(
         }
     };
 
-    let resultado = run_lineas_timeout(cmd, GALLERY_TIMEOUT, Some(cancelar.clone()), |linea| {
-        let l = linea.trim();
-        if l.is_empty() {
-            return;
-        }
-        crudas.push(l.to_string());
-        pendientes.push(l.to_string());
-        suelta(&mut pendientes, &mut cola, &mut enviados, &mut tanda_n, false);
-    })
+    // ¿Hay un aviso de espera en pantalla? Se retira en cuanto vuelven a
+    // llegar resultados: dejarlo diría que sigue esperando cuando ya no.
+    let en_espera = AtomicBool::new(false);
+    let resultado = run_lineas_timeout(
+        cmd,
+        GALLERY_TIMEOUT,
+        GALLERY_ESPERA_LIMITE,
+        Some(cancelar.clone()),
+        |linea| {
+            let l = linea.trim();
+            if l.is_empty() {
+                return;
+            }
+            if en_espera.swap(false, Ordering::Relaxed) {
+                let _ = tx.send(Ev::GalleryNotice(String::new(), epoch));
+            }
+            crudas.push(l.to_string());
+            pendientes.push(l.to_string());
+            suelta(&mut pendientes, &mut cola, &mut enviados, &mut tanda_n, false);
+        },
+        // Una espera por límite de peticiones se CUENTA. Sin esto, X dormía
+        // quince minutos y la pantalla se quedaba igual que si se hubiera
+        // colgado.
+        |aviso| {
+            if es_espera_declarada(aviso) {
+                en_espera.store(true, Ordering::Relaxed);
+                let hora = hora_de_espera(aviso).unwrap_or_default();
+                let _ = tx.send(Ev::GalleryNotice(i18n::galdl_espera(i18n::lang(), &hora), epoch));
+            }
+        },
+    )
     .await;
     suelta(&mut pendientes, &mut cola, &mut enviados, &mut tanda_n, true);
 
     let (estado, stderr) = match resultado {
         Ok(o) => o,
-        Err(e) => {
-            // Una parada pedida por el usuario no es un fallo y no viaja como
-            // tal. El epoch ya la descartaría, pero mandarla igualmente sería
-            // dejar preparado un error rojo por si algún día alguien cambia
-            // ese filtro.
-            if e.kind() != std::io::ErrorKind::Interrupted {
-                let _ = tx.send(Ev::GalleryError(format!("gallery-dl: {e}"), epoch));
+        // Una parada pedida por el usuario no es un fallo y no viaja como tal.
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+        // Plazo agotado: SÍ se dice, y lo ya listado se queda. Antes salía
+        // como si fuera una parada y se callaba.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            let minutos = GALLERY_TIMEOUT.as_secs() / 60;
+            if enviados > 0 {
+                let _ = tx.send(Ev::GalleryNotice(i18n::listado_cortado(i18n::lang(), minutos), epoch));
+            } else {
+                let _ = tx.send(Ev::GalleryError(
+                    format!("gallery-dl: {e}\n\n{}", i18n::listado_cortado(i18n::lang(), minutos)),
+                    epoch,
+                ));
             }
+            let _ = tx.send(Ev::GalleryDone(epoch));
+            return;
+        }
+        Err(e) => {
+            let _ = tx.send(Ev::GalleryError(format!("gallery-dl: {e}"), epoch));
+            let _ = tx.send(Ev::GalleryDone(epoch));
             return;
         }
     };
     // Lo que ya se entregó no se vuelve a entregar: a partir de aquí solo se
     // decide qué hacer si NO salió nada.
     if enviados > 0 {
+        // PERO SI gallery-dl TERMINÓ CON ERROR, LA LISTA ESTÁ INCOMPLETA, y eso
+        // se dice. X corta a mitad de perfil con un 429 o un «Unable to
+        // retrieve Tweets», Instagram con un 401: antes se daba por buena la
+        // mitad sin avisar, y el usuario creía tener el perfil entero.
+        if !estado.success() {
+            let ultima = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let pista = galdl_hint(i18n::lang(), &url, &stderr).unwrap_or("");
+            let _ = tx.send(Ev::GalleryNotice(
+                i18n::listado_incompleto(i18n::lang(), &ultima, pista),
+                epoch,
+            ));
+        }
         let _ = tx.send(Ev::GalleryDone(epoch));
         return;
     }
@@ -9215,6 +9313,11 @@ async fn browse_gallery_hop(
                      before retrying; if it keeps happening, the spacing should go back up.",
                 )
             )
+        } else if let Some(pista) = galdl_hint(i18n::lang(), &url, &err) {
+            // Los consejos por sitio —sesión de X, versión vieja para
+            // Instagram…— solo se usaban en las DESCARGAS. Los listados, que
+            // es donde X e Instagram fallan, se quedaban con el texto crudo.
+            format!("{extra}\n\n{pista}")
         } else if de_weibo && (err.contains("403") || stdout.contains("403")) {
             format!(
                 "{extra}\n\n{}",
@@ -9315,10 +9418,12 @@ async fn browse_gallery_hop(
                 let _ = tx.send(Ev::GalleryError(motivo(
                     msg_lang("gallery-dl encadena demasiadas redirecciones de extractor.", "gallery-dl chains too many extractor redirects."),
                 ), epoch));
+                let _ = tx.send(Ev::GalleryDone(epoch));
             }
         }
         Accion::Fallo(m) => {
             let _ = tx.send(Ev::GalleryError(m, epoch));
+            let _ = tx.send(Ev::GalleryDone(epoch));
         }
     }
 }
@@ -10482,6 +10587,25 @@ fn galdl_opts_listado(url: &str) -> Vec<String> {
     if es_x(&host) {
         v.extend(opts_de("twitter", &["previews=true"]));
     }
+    // INSTAGRAM: LOS VÍDEOS COMO MP4 DIRECTO, NO COMO `ytdl:`.
+    //
+    // Por omisión gallery-dl entrega cada vídeo con manifiesto DASH —casi
+    // todos los reels y vídeos actuales— como `ytdl:<post>/<n>.mp4`
+    // (`instagram.py`, `videos_dash`). No es una URL: es una contraseña para
+    // su propio descargador, que la resuelve con el manifiesto que lleva en
+    // metadatos privados. Fuera de ese proceso no significa nada, y `-j` ni
+    // siquiera imprime el manifiesto. La rejilla la encolaba tal cual: iba a
+    // gallery-dl, que se la daba a yt-dlp como si fuera un post, y acababa
+    // bajando el post entero con otro nombre, o fallando.
+    //
+    // Con `videos=merged` entrega `video_url`: el MP4 progresivo, con audio,
+    // que el motor nativo baja y reanuda como cualquier otro archivo, y con
+    // las dimensiones de ESE archivo en vez de las del DASH. La descarga del
+    // perfil entero desde Descargas no lleva esto: ahí gallery-dl sí tiene el
+    // manifiesto y puede montar la mejor calidad.
+    if host_matches(&host, "instagram.com") {
+        v.extend(opts_de("instagram", &["videos=merged"]));
+    }
     v
 }
 
@@ -10507,6 +10631,36 @@ fn galdl_hint(lang: Lang, url: &str, err: &str) -> Option<&'static str> {
             .any(|m| e.contains(m))
     {
         return Some(i18n::t(lang, "err.instagram_galdl_viejo"));
+    }
+    // X. Los textos son los de `extractor/twitter.py` de gallery-dl 1.32.17.
+    if let Some(host) = host_of(&u) {
+        if es_x(&host) {
+            // Cuenta protegida o bloqueo: no es la sesión ni la versión.
+            if e.contains("tweets are protected") {
+                return Some(i18n::t(lang, "err.x_protegida"));
+            }
+            if e.contains("temporarily locked") || e.contains("blocked your account") {
+                return Some(i18n::t(lang, "err.x_bloqueada"));
+            }
+            // Sin sesión o con una que X ya no acepta.
+            if e.contains("authenticated cookies")
+                || e.contains("could not authenticate")
+                || e.contains("auth_token")
+                || e.contains("login page")
+                || e.contains("401")
+            {
+                return Some(i18n::t(lang, "err.x_sesion"));
+            }
+            // X cambia sus consultas y la clave de cada petición cada pocas
+            // semanas: gallery-dl 1.32.12 arregló la extracción de la clave
+            // (`ondemand.s.…a.js`) y la 1.32.15 detecta el salto al login.
+            if ["keyerror", "typeerror", "attributeerror", "transaction", "ondemand", "404 not found", "unsupported url"]
+                .iter()
+                .any(|m| e.contains(m))
+            {
+                return Some(i18n::t(lang, "err.x_galdl_viejo"));
+            }
+        }
     }
     // UNA COOKIE CADUCADA NO ES UNA COOKIE QUE FALTA.
     //
@@ -12990,9 +13144,20 @@ impl App {
                 // para las colecciones de Patreon, que fallan por otra cosa.
                 // Mandar a revisar las cookies a quien las tiene bien es
                 // gastarle el tiempo, que es lo que este proyecto persigue.
-                let es_ig = host_of(&self.profile_url.to_ascii_lowercase())
-                    .is_some_and(|h| host_matches(&h, "instagram.com"));
-                if es_ig {
+                let host_perfil = host_of(&self.profile_url.to_ascii_lowercase()).unwrap_or_default();
+                let es_ig = host_matches(&host_perfil, "instagram.com");
+                if es_x(&host_perfil) {
+                    if self.galdl_cmd.is_some() {
+                        self.pedir_ultima_galdl();
+                    }
+                    let texto = i18n::x_vacio(
+                        lang,
+                        self.galdl_version.as_deref(),
+                        self.galdl_ultima.as_deref(),
+                        self.galdl_desfasado(),
+                    );
+                    ui.label(RichText::new(texto).size(12.0).color(AMBER()));
+                } else if es_ig {
                     // Instagram vacío con código 0 es, casi siempre, versión.
                     // Se pide la última aquí, que es cuando hace falta saberla.
                     if self.galdl_cmd.is_some() {
@@ -16375,6 +16540,128 @@ mod tests {
         });
     }
 
+    /// El plazo del listado es de INACTIVIDAD. Con procesos reales que imitan
+    /// a gallery-dl: uno que tarda más que el plazo sin dejar de escribir
+    /// termina bien; uno callado se corta con `TimedOut`; uno que anuncia una
+    /// espera la sobrevive; y la parada sigue siendo `Interrupted`, que el
+    /// listado calla, a diferencia del plazo agotado, que ahora se dice.
+    #[cfg(unix)]
+    #[test]
+    fn el_plazo_del_listado_es_de_inactividad_y_respeta_las_esperas() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let sh = |guion: &str| {
+                let mut c = tokio::process::Command::new("sh");
+                c.args(["-c", guion]);
+                c
+            };
+            let corto = Duration::from_millis(1200);
+
+            // 1. Escribe cada 0,5 s durante ~2,5 s con un plazo de 1,2 s.
+            let mut lineas = 0;
+            let r = run_lineas_timeout(
+                sh("for i in 1 2 3 4 5; do echo \"[3,\\\"x$i\\\"]\"; sleep 0.5; done"),
+                corto,
+                corto,
+                None,
+                |_| lineas += 1,
+                |_| {},
+            )
+            .await;
+            assert!(r.is_ok(), "{r:?}");
+            assert_eq!(lineas, 5);
+
+            // 2. Callado más que el plazo: se corta, y se distingue de una parada.
+            let t0 = Instant::now();
+            let r = run_lineas_timeout(sh("sleep 5"), corto, corto, None, |_| {}, |_| {}).await;
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+            assert!(t0.elapsed() < Duration::from_secs(4), "{:?}", t0.elapsed());
+
+            // 3. Anuncia una espera por stderr y duerme más que el plazo normal.
+            let mut avisos = Vec::new();
+            let r = run_lineas_timeout(
+                sh("echo '[twitter][info] Waiting for 1 minutes until 13:45:12 (rate limit)' >&2; sleep 2; echo '[1]'"),
+                corto,
+                Duration::from_secs(5),
+                None,
+                |_| {},
+                |a| avisos.push(a.to_string()),
+            )
+            .await;
+            let (estado, stderr) = r.expect("la espera declarada no es inactividad");
+            assert!(estado.success());
+            assert!(stderr.contains("Waiting for 1 minutes"), "{stderr}");
+            assert_eq!(avisos.len(), 1);
+
+            // 4. Detener.
+            let parar = Arc::new(AtomicBool::new(false));
+            let p2 = parar.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                p2.store(true, Ordering::Relaxed);
+            });
+            let r = run_lineas_timeout(
+                sh("while true; do echo '[1]'; sleep 0.1; done"),
+                corto,
+                corto,
+                Some(parar),
+                |_| {},
+                |_| {},
+            )
+            .await;
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        });
+    }
+
+    /// Las esperas que gallery-dl anuncia no son inactividad, y su hora se
+    /// enseña tal cual. Formato de `extractor/common.py:wait`.
+    #[test]
+    fn las_esperas_de_gallery_dl_se_reconocen() {
+        let x = "[twitter][info] Waiting for 15 minutes until 13:45:12 (rate limit)";
+        let ig = "[instagram][info] Waiting for 1 minutes until 12:41:19 (429 Too Many Requests)";
+        assert!(es_espera_declarada(x));
+        assert!(es_espera_declarada(ig));
+        assert_eq!(hora_de_espera(x).as_deref(), Some("13:45:12"));
+        assert_eq!(hora_de_espera(ig).as_deref(), Some("12:41:19"));
+        assert!(!es_espera_declarada("[twitter][debug] Sleeping 0.50 seconds (request)"));
+        assert!(!es_espera_declarada("[instagram][error] HttpError: 401 Unauthorized"));
+    }
+
+    /// Cada fallo de X lleva al consejo que le toca, con los textos reales de
+    /// gallery-dl. Mandar a revisar la sesión a quien tiene una cuenta
+    /// protegida delante, o a actualizar a quien no tiene sesión, es tiempo
+    /// perdido.
+    #[test]
+    fn los_fallos_de_x_tienen_su_consejo() {
+        let u = "https://x.com/alguien";
+        let pista = |e: &str| galdl_hint(Lang::Es, u, e);
+        let es = |k: &'static str| Some(i18n::t(Lang::Es, k));
+        assert_eq!(
+            pista("[twitter][error] AuthRequired: authenticated cookies needed to access this timeline"),
+            es("err.x_sesion")
+        );
+        assert_eq!(pista("[twitter][error] AbortExtraction: 'Could not authenticate you'"), es("err.x_sesion"));
+        assert_eq!(pista("[twitter][error] AuthorizationError: alguien's Tweets are protected"), es("err.x_protegida"));
+        assert_eq!(pista("[twitter][error] AuthorizationError: Account temporarily locked"), es("err.x_bloqueada"));
+        assert_eq!(pista("[twitter][error] KeyError: 'data'"), es("err.x_galdl_viejo"));
+        assert_eq!(pista("[twitter][error] HttpError: '404 Not Found' for 'https://x.com/i/api/graphql/…'"), es("err.x_galdl_viejo"));
+        // Lo de X no se le dice a otro sitio, ni a un impostor.
+        assert_eq!(galdl_hint(Lang::Es, "https://www.instagram.com/a", "Could not authenticate you"), None);
+        assert_eq!(galdl_hint(Lang::Es, "https://x.com.atacante.net/a", "authenticated cookies needed"), None);
+    }
+
+    /// Instagram se lista con los vídeos como MP4 directo: el `ytdl:` que
+    /// gallery-dl usa por omisión no es descargable fuera de su proceso.
+    #[test]
+    fn instagram_se_lista_con_videos_directos() {
+        let o = galdl_opts_listado("https://www.instagram.com/alguien/");
+        assert!(o.iter().any(|a| a == "extractor.instagram.videos=merged"), "{o:?}");
+        // Solo al listar: descargando el perfil entero, gallery-dl sí tiene el
+        // manifiesto DASH y puede montar la mejor calidad.
+        assert!(!galdl_site_opts("https://www.instagram.com/alguien/").iter().any(|a| a.contains("videos=")));
+        assert!(galdl_opts_listado("https://instagram.com.atacante.example/a").is_empty());
+    }
+
     /// La comparación de versiones decide si se le dice a alguien «actualiza»
     /// cuando Instagram falla. Un falso positivo manda a hacer algo inútil; un
     /// falso negativo esconde la causa más probable.
@@ -16696,7 +16983,12 @@ mod tests {
         // Y no se le cuela a nadie más: X tiene los suyos, pero ninguno de
         // Weibo, e Instagram no tiene ninguno.
         assert!(!galdl_site_opts("https://x.com/alguien").iter().any(|a| a.contains("weibo")));
-        assert!(galdl_opts_listado("https://www.instagram.com/alguien").is_empty());
+        // Instagram lleva `videos=merged` al listar (ver
+        // `instagram_se_lista_con_videos_directos`), y nada más.
+        assert_eq!(
+            galdl_opts_listado("https://www.instagram.com/alguien"),
+            ["-o", "extractor.instagram.videos=merged"]
+        );
     }
 
     /// El espaciado no es el mismo para todos, y la diferencia está medida o

@@ -513,6 +513,22 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Instagram cambia su API cada pocas semanas y gallery-dl la sigue (seis arreglos de Instagram entre el 12 de septiembre y el 17 de octubre de 2026). Este error es típico de un gallery-dl viejo, no de las cookies: ve a Ajustes → Motores y pulsa «Actualizar a la última versión». Si persiste con el binario de hoy, entonces sí: revisa la sesión.",
             "Instagram changes its API every few weeks and gallery-dl keeps up (six Instagram fixes between 12 September and 17 October 2026). This error is typical of an outdated gallery-dl, not of cookies: go to Settings → Engines and press «Update to latest». If it persists with today's binary, then yes: check your session."
         ),
+        "err.x_sesion" => entry!(
+            "X no ve una sesión válida. gallery-dl necesita la cookie «auth_token» (y «ct0») del dominio .x.com: abre x.com —no twitter.com— en el navegador elegido en Ajustes y comprueba que sigues dentro. Si usas un cookies.txt, expórtalo de nuevo con x.com abierto; las cookies antiguas de twitter.com no valen, y una sesión cerrada o caducada da exactamente este error.",
+            "X does not see a valid session. gallery-dl needs the «auth_token» (and «ct0») cookie of the .x.com domain: open x.com —not twitter.com— in the browser selected in Settings and check you are still signed in. If you use a cookies.txt, export it again with x.com open; old twitter.com cookies do not count, and a signed-out or expired session gives exactly this error."
+        ),
+        "err.x_protegida" => entry!(
+            "Esta cuenta de X es privada (tuits protegidos). Solo se puede listar con una sesión de una cuenta que la siga y haya sido aceptada; no es un fallo de la aplicación ni de la versión.",
+            "This X account is private (protected Tweets). It can only be listed with the session of an account that follows it and was accepted; it is not an application or version problem."
+        ),
+        "err.x_bloqueada" => entry!(
+            "X ha bloqueado temporalmente tu cuenta o esta cuenta te tiene bloqueado. Ábrela en el navegador: X suele pedir una verificación para desbloquearla. Espera un rato antes de volver a listar; insistir alarga el bloqueo.",
+            "X has temporarily locked your account, or this account has blocked you. Open X in your browser: it usually asks for a verification to unlock it. Wait a while before listing again; insisting makes the lock longer."
+        ),
+        "err.x_galdl_viejo" => entry!(
+            "Este error es típico de un gallery-dl desactualizado, no de las cookies: X cambia sus consultas y la clave que exige en cada petición cada pocas semanas (gallery-dl 1.32.12 arregló esa clave y la 1.32.15 detecta el salto a la página de login). Ve a Ajustes → Motores, mira tu versión y pulsa «Actualizar a la última versión».",
+            "This error is typical of an outdated gallery-dl, not of cookies: X changes its queries and the key it requires on every request every few weeks (gallery-dl 1.32.12 fixed that key and 1.32.15 detects the redirect to the login page). Go to Settings → Engines, check your version and press «Update to latest»."
+        ),
         "err.instagram_login" => entry!(
             "Instagram exige sesión para listar el perfil entero: activa las cookies en Ajustes \
              (Firefox, o un archivo cookies.txt) y pulsa Reintentar",
@@ -1193,6 +1209,73 @@ pub fn instagram_vacio(lang: Lang, actual: Option<&str>, ultima: Option<&str>, d
                 format!("\nTu gallery-dl es la {a}. Si es anterior a la 1.32.17, actualízalo en Ajustes → Motores antes de revisar la sesión.")
             } else {
                 format!("\nYour gallery-dl is {a}. If it is older than 1.32.17, update it in Settings → Engines before checking the session.")
+            }
+        }
+        _ => String::new(),
+    };
+    format!("{causa}{version}")
+}
+
+/// Aviso sobre la rejilla mientras gallery-dl espera por límite de peticiones.
+pub fn galdl_espera(lang: Lang, hora: &str) -> String {
+    let hasta = if hora.is_empty() { String::new() } else { format!(" ({hora})") };
+    match lang {
+        Lang::Es => format!(
+            "⏳ El sitio ha limitado las peticiones y gallery-dl espera hasta que se abra la ventana{hasta}; después sigue solo. Lo que ya ves se puede encolar mientras tanto. «Detener» corta la espera."
+        ),
+        Lang::En => format!(
+            "⏳ The site rate-limited the requests and gallery-dl is waiting for the window to reopen{hasta}; it then carries on by itself. What you see can be queued meanwhile. «Stop» ends the wait."
+        ),
+    }
+}
+
+/// El listado se cortó por inactividad.
+pub fn listado_cortado(lang: Lang, minutos: u64) -> String {
+    match lang {
+        Lang::Es => format!(
+            "⚠ El listado se ha cortado: gallery-dl pasó {minutos} minutos sin entregar nada ni anunciar ninguna espera. Lo que ya aparece en la rejilla es válido y se puede encolar; el resto del perfil no se ha listado. Vuelve a analizar más tarde, o pega la URL en Descargas para bajar el perfil entero."
+        ),
+        Lang::En => format!(
+            "⚠ The listing was cut short: gallery-dl spent {minutos} minutes without delivering anything or announcing a wait. What is already in the grid is valid and can be queued; the rest of the profile was not listed. Analyze again later, or paste the URL into Downloads to fetch the whole profile."
+        ),
+    }
+}
+
+/// gallery-dl entregó parte del perfil y terminó con error.
+pub fn listado_incompleto(lang: Lang, ultima: &str, pista: &str) -> String {
+    let ultima: String = ultima.chars().take(220).collect();
+    let pista = if pista.is_empty() { String::new() } else { format!("\n{pista}") };
+    match lang {
+        Lang::Es => format!(
+            "⚠ La lista puede estar INCOMPLETA: gallery-dl terminó con error después de entregar lo que ves. Lo listado es válido y se puede encolar.\nÚltimo mensaje: {ultima}{pista}"
+        ),
+        Lang::En => format!(
+            "⚠ The list may be INCOMPLETE: gallery-dl ended with an error after delivering what you see. What is listed is valid and can be queued.\nLast message: {ultima}{pista}"
+        ),
+    }
+}
+
+/// X devolvió una lista vacía sin error.
+pub fn x_vacio(lang: Lang, actual: Option<&str>, ultima: Option<&str>, desfasado: bool) -> String {
+    let es = lang == Lang::Es;
+    let causa = if es {
+        "gallery-dl no devolvió nada y terminó sin error. En X tiene tres causas posibles: el perfil no tiene imágenes ni vídeos propios (solo texto o solo retuits), gallery-dl está desactualizado —X cambia sus consultas cada pocas semanas—, o la sesión no es de x.com. Sin sesión, las versiones actuales no devuelven una lista vacía: dicen «authenticated cookies needed»."
+    } else {
+        "gallery-dl returned nothing and exited without an error. On X there are three possible causes: the profile has no images or videos of its own (text or retweets only), gallery-dl is outdated —X changes its queries every few weeks— or the session is not an x.com one. Without a session, current versions do not return an empty list: they say «authenticated cookies needed»."
+    };
+    let version = match (actual, ultima) {
+        (Some(a), Some(u)) if desfasado => {
+            if es {
+                format!("\n⚠ Tu gallery-dl es la {a} y la última es la {u}: actualízalo en Ajustes → Motores y vuelve a analizar.")
+            } else {
+                format!("\n⚠ Your gallery-dl is {a} and the latest is {u}: update it in Settings → Engines and analyze again.")
+            }
+        }
+        (Some(a), _) => {
+            if es {
+                format!("\nTu gallery-dl es la {a}. Si el perfil sí tiene imágenes, abre x.com en el navegador elegido en Ajustes y comprueba que la sesión sigue iniciada.")
+            } else {
+                format!("\nYour gallery-dl is {a}. If the profile does have images, open x.com in the browser selected in Settings and check you are still signed in.")
             }
         }
         _ => String::new(),

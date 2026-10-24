@@ -320,6 +320,22 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
         if url.is_empty() {
             continue;
         }
+        // `ytdl:…` NO ES UNA URL. Es lo que gallery-dl pone en los vídeos de
+        // Instagram con manifiesto DASH (y en X con `videos=ytdl`): un aviso
+        // para su propio descargador, que solo funciona dentro del mismo
+        // proceso. Se cambia por el enlace directo que viaja en los metadatos;
+        // si no lo hay, la ficha no se ofrece, porque encolarla sería encolar
+        // un fallo. El listado ya pide `videos=merged` para que no ocurra.
+        let directa;
+        let url = if url.starts_with("ytdl:") {
+            directa = text(meta, &["video_url", "audio_url"]);
+            if !directa.starts_with("http") {
+                continue;
+            }
+            directa.as_str()
+        } else {
+            url
+        };
 
         // PORTADA DE UN VÍDEO DE X, no un archivo suelto.
         //
@@ -367,18 +383,40 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
             // extractores la dan plana y siguen entrando por la segunda vía.
             width: {
                 let w = num3(meta, ["file", "metadata", "dimensions"], "w");
-                if w > 0 { w as u32 } else { num(meta, &["width", "image_width"]) as u32 }
+                if let Some((w, _)) = dims_de_video_x(url) {
+                    w
+                } else if w > 0 {
+                    w as u32
+                } else {
+                    num(meta, &["width", "image_width"]) as u32
+                }
             },
             height: {
                 let h = num3(meta, ["file", "metadata", "dimensions"], "h");
-                if h > 0 { h as u32 } else { num(meta, &["height", "image_height"]) as u32 }
+                if let Some((_, h)) = dims_de_video_x(url) {
+                    h
+                } else if h > 0 {
+                    h as u32
+                } else {
+                    num(meta, &["height", "image_height"]) as u32
+                }
             },
             filesize: num(meta, &["filesize", "size", "file_size"]),
             is_video,
-            post_id: text(
-                meta,
-                &["post_shortcode", "shortcode", "post_id", "pid", "id", "status_id"],
-            ),
+            post_id: {
+                let t = text(meta, &["post_shortcode", "shortcode", "post_id", "pid", "id", "status_id"]);
+                // X da el identificador del tuit como NÚMERO en `tweet_id`, y
+                // `text` solo lee cadenas: se perdía, y el nombre del archivo
+                // llevaba un hash en vez del número del tuit.
+                if t.is_empty() {
+                    match num(meta, &["tweet_id"]) {
+                        0 => t,
+                        id => id.to_string(),
+                    }
+                } else {
+                    t
+                }
+            },
             index_in_post: index,
             count_in_post: count.max(1),
             author: text(meta, &["username", "owner", "screen_name", "nick", "user"]),
@@ -452,6 +490,27 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
     }
 
     Ok(Listing { items: out, queued })
+}
+
+/// Resolución de un vídeo de X sacada de SU URL: `…/vid/avc1/1920x1080/….mp4`.
+///
+/// El metadato `width`/`height` de gallery-dl es el del ORIGINAL subido, y el
+/// archivo que entrega es la variante de mayor bitrate, que a menudo es más
+/// pequeña. Medido en un perfil real: 135 de 262 vídeos decían 3840×2160
+/// cuando el archivo era de 1920×1080. La rejilla enseñaba una resolución
+/// que nadie iba a recibir. La de la URL es la del archivo.
+fn dims_de_video_x(url: &str) -> Option<(u32, u32)> {
+    let resto = url.split_once("://")?.1;
+    let (host, ruta) = resto.split_once('/')?;
+    if host != "video.twimg.com" {
+        return None;
+    }
+    let ruta = ruta.split(['?', '#']).next()?;
+    ruta.split('/').find_map(|seg| {
+        let (w, h) = seg.split_once('x')?;
+        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+        (w > 0 && h > 0).then_some((w, h))
+    })
 }
 
 /// URL de la PUBLICACIÓN, que es la red de seguridad cuando el enlace directo
@@ -556,6 +615,89 @@ pub fn is_browsable(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Herramienta de diagnóstico: analiza un volcado REAL de `gallery-dl -j -o
+    /// output.jsonl=true` y resume lo que vería la rejilla. No corre en la
+    /// tanda normal; se lanza con
+    /// `TD_LISTADO=/ruta/volcado.jsonl cargo test -- --ignored volcado_real --nocapture`.
+    #[test]
+    #[ignore]
+    fn volcado_real_de_gallery_dl() {
+        let Ok(ruta) = std::env::var("TD_LISTADO") else {
+            eprintln!("sin TD_LISTADO: nada que analizar");
+            return;
+        };
+        let txt = std::fs::read_to_string(&ruta).expect("volcado");
+        let lineas: Vec<&str> = txt.lines().filter(|l| !l.trim().is_empty()).collect();
+        let l = parse_listing(&format!("[{}]", lineas.join(","))).expect("se entiende");
+        let videos = l.items.iter().filter(|i| i.is_video).count();
+        let sin_portada = l.items.iter().filter(|i| i.is_video && i.thumb_url.is_empty()).count();
+        let sin_dims = l.items.iter().filter(|i| i.width == 0 || i.height == 0).count();
+        let sin_post = l.items.iter().filter(|i| i.post_id.is_empty()).count();
+        let ytdl = l.items.iter().filter(|i| !i.url.starts_with("http")).count();
+        eprintln!(
+            "líneas {} → fichas {} (vídeos {videos}, sin portada {sin_portada}), sin dimensiones {sin_dims}, sin publicación {sin_post}, URLs no http {ytdl}, colas {:?}",
+            lineas.len(),
+            l.items.len(),
+            l.queued
+        );
+        assert_eq!(ytdl, 0, "ninguna ficha puede llevar una URL que no sea http");
+    }
+
+    /// Con una entrada real de X (perfil público, 24 de octubre de 2026): la
+    /// resolución sale de la URL del archivo y el identificador del tuit
+    /// sobrevive aunque sea un número.
+    #[test]
+    fn los_videos_de_x_dicen_la_resolucion_del_archivo() {
+        let j = r#"[
+            [3, "https://video.twimg.com/amplify_video/2113776813121941504/vid/avc1/1920x1080/oa29OYgVBG7qAyEB.mp4?tag=16",
+             {"category":"twitter","type":"video","extension":"mp4","width":3840,"height":2160,
+              "tweet_id":2113776971603689874,"num":1,"count":2,"filename":"oa29OYgVBG7qAyEB",
+              "user":{"name":"NASA"}}],
+            [3, "https://pbs.twimg.com/media/HVWk812WIAAg_hz?format=jpg&name=orig",
+             {"category":"twitter","type":"preview","extension":"jpg"}],
+            [3, "https://pbs.twimg.com/media/HVQq8KgXkAET_oY?format=jpg&name=orig",
+             {"category":"twitter","type":"photo","extension":"jpg","width":1920,"height":1280,
+              "tweet_id":2113776971603689874,"num":2,"count":2}]
+        ]"#;
+        let l = parse_listing(j).unwrap();
+        assert_eq!(l.items.len(), 2, "la portada se empareja con el vídeo, no es una ficha");
+        let v = &l.items[0];
+        assert_eq!((v.width, v.height), (1920, 1080));
+        assert_eq!(v.post_id, "2113776971603689874");
+        assert_eq!(v.thumb_url, "https://pbs.twimg.com/media/HVWk812WIAAg_hz?format=jpg&name=orig");
+        // Las fotos conservan las suyas.
+        assert_eq!((l.items[1].width, l.items[1].height), (1920, 1280));
+
+        assert_eq!(dims_de_video_x("https://video.twimg.com/tweet_video/HQQ2cXIW4AATehj.mp4"), None);
+        assert_eq!(dims_de_video_x("https://otro.example/vid/avc1/1920x1080/a.mp4"), None);
+    }
+
+    /// Un vídeo de Instagram que llega como `ytdl:` se cambia por su MP4
+    /// directo; uno que no trae enlace directo no se ofrece.
+    #[test]
+    fn los_videos_ytdl_se_cambian_por_su_enlace_directo() {
+        let j = r#"[
+            [3, "ytdl:https://www.instagram.com/p/ABC/1.mp4",
+             {"category":"instagram","extension":"mp4","num":1,"count":2,
+              "post_url":"https://www.instagram.com/p/ABC/",
+              "video_url":"https://scontent.cdninstagram.com/v/abc.mp4?oe=1",
+              "display_url":"https://scontent.cdninstagram.com/v/abc.jpg"}],
+            [3, "ytdl:https://www.instagram.com/p/ABC/2.mp4",
+             {"category":"instagram","extension":"mp4","num":2,"count":2}],
+            [3, "https://scontent.cdninstagram.com/v/foto.jpg",
+             {"category":"instagram","extension":"jpg","num":1,"count":1}]
+        ]"#;
+        let l = parse_listing(j).unwrap();
+        let urls: Vec<&str> = l.items.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://scontent.cdninstagram.com/v/abc.mp4?oe=1", "https://scontent.cdninstagram.com/v/foto.jpg"]
+        );
+        assert!(l.items[0].is_video);
+        assert_eq!(l.items[0].post_url, "https://www.instagram.com/p/ABC/");
+        assert_eq!(l.items[0].thumb_url, "https://scontent.cdninstagram.com/v/abc.jpg");
+    }
 
     #[test]
     fn se_exploran_los_sitios_con_cdn_publico() {

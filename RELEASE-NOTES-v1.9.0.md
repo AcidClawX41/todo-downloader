@@ -218,6 +218,53 @@ writes the file; yt-dlp fails to resolve, exits 1, and writes it anyway. Both
 verified. The temporary folder is private (`0700`) on Linux and macOS, since
 yt-dlp dumps the whole jar for an instant before it is filtered.
 
+### Instagram and X: listings that stopped, videos that could not download
+
+Reviewed against gallery-dl's current extractors and a real X listing
+(1722 lines from a public profile).
+
+- **Listings were cut at five minutes, silently.** The limit was total, from
+  start-up, even while gallery-dl was delivering results; a large Instagram
+  profile (6–12 s between requests) or X profile was cut halfway, and because
+  the cut was reported like a user «Stop», nothing was said and the «fetching
+  more» spinner kept turning forever. It is now an *inactivity* limit, counted
+  from the last line on stdout or stderr. A timeout is reported, and what was
+  already listed stays in the grid.
+- **Rate-limit waits are shown, not mistaken for a hang.** When X or Instagram
+  limit requests, gallery-dl announces «Waiting for 15 minutes until 13:45:12»
+  and sleeps. The application now shows that wait above the grid, allows it
+  (up to 20 minutes) instead of killing the listing, and removes the notice
+  when results resume.
+- **A list cut short by an error says so.** If gallery-dl ends with an error
+  after delivering part of a profile — X's «Unable to retrieve Tweets»,
+  Instagram's 401 — the banner says the list may be incomplete, with the last
+  message and the matching advice. Before, half a profile looked like all of
+  it.
+- **Instagram videos are listed as direct MP4s.** By default gallery-dl hands
+  every DASH video (nearly all reels) over as `ytdl:<post>/<n>.mp4`, a token
+  for its own downloader that means nothing outside that process. The grid
+  queued it as is, and the download went to gallery-dl and yt-dlp as if it
+  were a post. Listings now ask for `videos=merged` (the progressive MP4, with
+  audio, and its real size), and the parser replaces any `ytdl:` entry with
+  its direct link or leaves it out. Whole-profile downloads from Downloads are
+  unchanged: there gallery-dl has the manifest and its bundled yt-dlp can
+  merge the best quality — verified that the binary the app installs includes
+  it.
+- **X advice that matches the actual error**, with gallery-dl's own messages:
+  «authenticated cookies needed» and «Could not authenticate you» (session:
+  the `auth_token` cookie of `.x.com`; old `twitter.com` cookies do not
+  count), protected accounts, locked accounts, and the errors typical of an
+  outdated gallery-dl (1.32.12 fixed X's per-request key, 1.32.15 detects the
+  login redirect). The site advice now also reaches **listings**; it used to
+  be applied only to downloads.
+- **X video resolution is the file's**: gallery-dl reports the size of the
+  uploaded original, and the file it delivers is often smaller — 135 of 262
+  videos in the sample said 3840×2160 for a 1920×1080 file. The size now comes
+  from the file URL. X's tweet id, a number, is kept as the post id, so file
+  names carry it instead of a hash.
+- An empty X listing explains its three possible causes (no media of its own,
+  outdated gallery-dl, no x.com session) with the version numbers.
+
 ### Found in an independent review of all the new code
 
 - **Patreon collections and creators with more than 100 posts showed only the
