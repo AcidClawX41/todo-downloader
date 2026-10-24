@@ -12591,7 +12591,7 @@ fn nav_item(ui: &mut egui::Ui, selected: bool, icon: &str, label: &str, badge: u
     let btn = egui::Button::new(rt)
         .fill(if selected { ACCENT().gamma_multiply(0.25) } else { Color32::TRANSPARENT })
         .rounding(Rounding::same(8.0))
-        .min_size(egui::vec2(176.0, 36.0));
+        .min_size(egui::vec2(176.0, 34.0));
     let resp = ui.add(btn);
     gloss_paint(ui, &resp);
     resp.clicked()
@@ -12720,111 +12720,133 @@ impl eframe::App for App {
                     .inner_margin(Margin::symmetric(16.0, 18.0)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    egui::Frame::none()
-                        .fill(ACCENT())
-                        .rounding(Rounding::same(10.0))
-                        .inner_margin(Margin::symmetric(9.0, 5.0))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new("⬇").size(18.0).color(Color32::WHITE));
-                        });
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new("Todo").size(16.0).strong().color(Color32::WHITE));
-                        ui.label(RichText::new("Downloader").size(16.0).strong().color(CYAN()));
-                    });
-                });
-                ui.add_space(24.0);
-
                 let lang = self.settings.lang;
-                if nav_item(ui, self.view == View::Downloads, "📥", t(lang, "nav.downloads"), n_queue + n_active) {
-                    self.view = View::Downloads;
-                }
-                if nav_item(ui, self.view == View::Profile, "🔍", t(lang, "nav.profile"), self.profile_entries.len()) {
-                    self.view = View::Profile;
-                }
-                if nav_item(ui, self.view == View::Capture, "📡", t(lang, "nav.capture"), 0) {
-                    self.view = View::Capture;
-                }
-                if nav_item(ui, self.view == View::Artistas, "🎨", t(lang, "nav.artists"), self.art_lista.len()) {
-                    self.view = View::Artistas;
-                }
-                if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
-                    self.view = View::Booru;
-                }
-                if nav_item(ui, self.view == View::Kemono, "📂", t(lang, "nav.kemono"), self.kemono_resultados.len()) {
-                    self.view = View::Kemono;
-                }
-                if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
-                    self.view = View::Torrents;
-                }
-                if nav_item(ui, self.view == View::Done, "✅", t(lang, "nav.completed"), n_done) {
-                    self.view = View::Done;
-                }
-                if nav_item(ui, self.view == View::Failed, "⚠", t(lang, "nav.errors"), n_failed) {
-                    self.view = View::Failed;
-                }
-                ui.add_space(8.0);
-                if nav_item(ui, self.view == View::Settings, "⚙", t(lang, "nav.settings"), 0) {
-                    self.view = View::Settings;
-                }
-                // Justo debajo de Ajustes, con el corazón para que destaque
-                if nav_item(ui, self.view == View::Support, "❤", t(lang, "nav.tip"), 0) {
-                    if self.view != View::Support {
-                        self.tip_reload = true; // otro GIF en cada visita
-                    }
-                    self.view = View::Support;
-                }
 
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("By Eric V. Gramunt").size(11.5).color(MUTED()));
-                    ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED()));
-                    ui.add_space(6.0);
-                    match self.ytdlp_ok {
-                        Some(true) => ui.label(RichText::new(t(lang, "side.ytdlp_active")).size(11.5).color(GREEN())),
-                        Some(false) => ui
-                            .label(RichText::new(t(lang, "side.ytdlp_missing")).size(11.5).color(AMBER()))
-                            .on_hover_text(t(lang, "side.ytdlp_tip")),
-                        None => ui.label(RichText::new("● yt-dlp…").size(11.5).color(MUTED())),
-                    };
-                    if self.galdl_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.galdl_active")).size(11.5).color(GREEN()));
-                    } else {
-                        ui.label(RichText::new(t(lang, "side.galdl_missing")).size(11.5).color(AMBER()))
-                            .on_hover_text(t(lang, "side.galdl_tip"));
-                    }
-                    if self.ffmpeg_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.ffmpeg_active")).size(11.5).color(GREEN()));
-                    } else {
-                        ui.label(RichText::new(t(lang, "side.ffmpeg_missing")).size(11.5).color(AMBER()))
-                            .on_hover_text(t(lang, "side.ffmpeg_tip"));
-                    }
-                    // MEGA no necesita binario auxiliar: va compilado dentro.
-                    // Siempre activo, y se deja claro que es sin cuenta.
-                    ui.label(RichText::new(t(lang, "side.mega_active")).size(11.5).color(GREEN()))
-                        .on_hover_text(t(lang, "set.mega"));
-                    // cyberdrop-dl es opcional: solo se anuncia si está presente
-                    if self.cyberdrop_cmd.is_some() {
-                        ui.label(RichText::new(t(lang, "side.cyberdrop_active")).size(11.5).color(GREEN()));
-                    }
-                    if self.settings.clipboard_watch {
-                        ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN()));
-                    }
-                    // Estado real de las cookies: la app las desactiva sola si
-                    // resultan ilegibles, y sin este aviso no había forma de
-                    // saber que se estaba descargando sin sesión.
-                    if !cookie_args(&self.settings).is_empty() {
-                        ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN()));
-                    } else {
-                        ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()))
-                            .on_hover_ui(|ui| {
-                                // Sin `set_max_width` el tooltip sale en una
-                                // columna de una palabra, igual que el toast.
-                                ui.set_max_width(420.0);
-                                ui.label(t(lang, "side.cookies_off_tip"));
+                // ESTADO ABAJO, CON SU SITIO RESERVADO. Antes se pintaba de abajo
+                // arriba encima de lo que hubiera, y desde la pestaña Kemono la
+                // navegación ya no cabía a 700 px de alto —el tamaño con el que
+                // arranca la ventana—: «Ajustes» quedaba debajo de «sin
+                // cookies». Un panel inferior reserva su alto, y la navegación
+                // se desplaza si aun así no cabe (la ventana admite 520 px).
+                egui::TopBottomPanel::bottom("sidebar_estado")
+                    .frame(egui::Frame::none().inner_margin(Margin { top: 10.0, ..Default::default() }))
+                    .show_separator_line(false)
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        // Los motores, juntos en vez de uno por línea: verde si
+                        // está, ámbar si falta, y el porqué al pasar el ratón.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            let motor = |ui: &mut egui::Ui, nombre: &str, color: Color32, tip: &str| {
+                                ui.label(RichText::new(format!("● {nombre}")).size(11.5).color(color))
+                                    .on_hover_ui(|ui| {
+                                        ui.set_max_width(360.0);
+                                        ui.label(tip);
+                                    });
+                            };
+                            match self.ytdlp_ok {
+                                Some(true) => motor(ui, "yt-dlp", GREEN(), t(lang, "side.ytdlp_active")),
+                                Some(false) => motor(ui, "yt-dlp", AMBER(), t(lang, "side.ytdlp_tip")),
+                                None => motor(ui, "yt-dlp…", MUTED(), "yt-dlp"),
+                            }
+                            if self.galdl_cmd.is_some() {
+                                motor(ui, "gallery-dl", GREEN(), t(lang, "side.galdl_active"));
+                            } else {
+                                motor(ui, "gallery-dl", AMBER(), t(lang, "side.galdl_tip"));
+                            }
+                            if self.ffmpeg_cmd.is_some() {
+                                motor(ui, "ffmpeg", GREEN(), t(lang, "side.ffmpeg_active"));
+                            } else {
+                                motor(ui, "ffmpeg", AMBER(), t(lang, "side.ffmpeg_tip"));
+                            }
+                            // MEGA no necesita binario auxiliar: va compilado dentro.
+                            motor(ui, "MEGA", GREEN(), t(lang, "set.mega"));
+                            // cyberdrop-dl es opcional: solo se anuncia si está presente
+                            if self.cyberdrop_cmd.is_some() {
+                                motor(ui, "cyberdrop-dl", GREEN(), t(lang, "side.cyberdrop_active"));
+                            }
+                        });
+                        if self.settings.clipboard_watch {
+                            ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN()));
+                        }
+                        // Estado real de las cookies: la app las desactiva sola si
+                        // resultan ilegibles, y sin este aviso no había forma de
+                        // saber que se estaba descargando sin sesión.
+                        if !cookie_args(&self.settings).is_empty() {
+                            ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN()));
+                        } else {
+                            ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()))
+                                .on_hover_ui(|ui| {
+                                    // Sin `set_max_width` el tooltip sale en una
+                                    // columna de una palabra, igual que el toast.
+                                    ui.set_max_width(420.0);
+                                    ui.label(t(lang, "side.cookies_off_tip"));
+                                });
+                        }
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED()));
+                        ui.label(RichText::new("By Eric V. Gramunt").size(11.5).color(MUTED()));
+                    });
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            egui::Frame::none()
+                                .fill(ACCENT())
+                                .rounding(Rounding::same(10.0))
+                                .inner_margin(Margin::symmetric(9.0, 5.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("⬇").size(18.0).color(Color32::WHITE));
+                                });
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui.label(RichText::new("Todo").size(16.0).strong().color(Color32::WHITE));
+                                ui.label(RichText::new("Downloader").size(16.0).strong().color(CYAN()));
                             });
-                    }
-                });
+                        });
+                        ui.add_space(16.0);
+
+                        if nav_item(ui, self.view == View::Downloads, "📥", t(lang, "nav.downloads"), n_queue + n_active) {
+                            self.view = View::Downloads;
+                        }
+                        if nav_item(ui, self.view == View::Profile, "🔍", t(lang, "nav.profile"), self.profile_entries.len()) {
+                            self.view = View::Profile;
+                        }
+                        if nav_item(ui, self.view == View::Capture, "📡", t(lang, "nav.capture"), 0) {
+                            self.view = View::Capture;
+                        }
+                        if nav_item(ui, self.view == View::Artistas, "🎨", t(lang, "nav.artists"), self.art_lista.len()) {
+                            self.view = View::Artistas;
+                        }
+                        if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
+                            self.view = View::Booru;
+                        }
+                        if nav_item(ui, self.view == View::Kemono, "📂", t(lang, "nav.kemono"), self.kemono_resultados.len()) {
+                            self.view = View::Kemono;
+                        }
+                        if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
+                            self.view = View::Torrents;
+                        }
+                        if nav_item(ui, self.view == View::Done, "✅", t(lang, "nav.completed"), n_done) {
+                            self.view = View::Done;
+                        }
+                        if nav_item(ui, self.view == View::Failed, "⚠", t(lang, "nav.errors"), n_failed) {
+                            self.view = View::Failed;
+                        }
+                        ui.add_space(8.0);
+                        if nav_item(ui, self.view == View::Settings, "⚙", t(lang, "nav.settings"), 0) {
+                            self.view = View::Settings;
+                        }
+                        // Justo debajo de Ajustes, con el corazón para que destaque
+                        if nav_item(ui, self.view == View::Support, "❤", t(lang, "nav.tip"), 0) {
+                            if self.view != View::Support {
+                                self.tip_reload = true; // otro GIF en cada visita
+                            }
+                            self.view = View::Support;
+                        }
+                    });
             });
 
         // ---------------- Panel central ----------------
