@@ -1215,6 +1215,14 @@ pub fn threads_no_servida(lang: Lang) -> String {
     }
 }
 
+/// El perfil de Threads está tras el muro de inicio de sesión.
+pub fn threads_pide_sesion(lang: Lang) -> String {
+    match lang {
+        Lang::Es => "Threads no enseña este perfil a quien no ha iniciado sesión. Usa el capturador (pestaña Capturar → Threads): lee desde tu navegador, con tu sesión.".into(),
+        Lang::En => "Threads does not show this profile to visitors. Use the capturer (Capture tab → Threads): it reads from your browser, with your session.".into(),
+    }
+}
+
 /// Threads ha respondido con un error HTTP.
 pub fn threads_http(lang: Lang, codigo: u16) -> String {
     match (lang, codigo) {

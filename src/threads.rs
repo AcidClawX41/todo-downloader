@@ -164,6 +164,15 @@ pub fn leer_html(html: &str, destino: &Destino) -> Option<Lectura> {
     Some(lectura)
 }
 
+/// ¿La página es el muro de «inicia sesión» de Threads? Algunos perfiles no se
+/// enseñan a visitantes (medido: @nasawebb, @nasahubble y otros devuelven
+/// `BarcelonaLoginRoot` y ni una publicación, mientras @nasa sí se ve). Solo
+/// significa algo cuando NO ha salido ninguna publicación: una página normal
+/// también lleva su botón de «Log in».
+pub fn pide_sesion(html: &str) -> bool {
+    html.contains("BarcelonaLoginRoot")
+}
+
 /// Las URL nuevas —archivo y, si la tiene, su pista de audio— del mismo
 /// archivo en una lectura fresca de su post: para un enlace firmado que ha
 /// caducado.
@@ -616,6 +625,15 @@ mod tests {
         let solo_cuenta = "<html><script type=\"application/json\">{\"user\":{\"username\":\"nasa\"}}</script></html>";
         let l = leer_html(solo_cuenta, &Destino::Perfil { usuario: "nasa".into() }).unwrap();
         assert_eq!((l.items.len(), l.publicaciones), (0, 0));
+    }
+
+    /// El muro de inicio de sesión: ni publicaciones ni cuenta en la página.
+    #[test]
+    fn reconoce_el_muro_de_inicio_de_sesion() {
+        let muro = "<html><script>{\"__dr\":\"BarcelonaLoginRoot.entrypoint\"}</script></html>";
+        assert!(pide_sesion(muro));
+        assert!(leer_html(muro, &Destino::Perfil { usuario: "nasawebb".into() }).is_none());
+        assert!(!pide_sesion(&pagina("")));
     }
 
     #[test]

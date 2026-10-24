@@ -6195,7 +6195,14 @@ async fn threads_leer(client: &reqwest::Client, destino: &threads::Destino) -> R
         return Err(i18n::threads_http(i18n::lang(), estado));
     }
     let html = resp.text().await.map_err(|e| format!("Threads: {e}"))?;
-    threads::leer_html(&html, destino).ok_or_else(|| i18n::threads_no_servida(i18n::lang()))
+    match threads::leer_html(&html, destino) {
+        // Sin una sola publicación, el muro de «inicia sesión» lo explica: ese
+        // perfil no se enseña a visitantes, y el capturador sí puede leerlo.
+        Some(l) if l.publicaciones == 0 && threads::pide_sesion(&html) => Err(i18n::threads_pide_sesion(i18n::lang())),
+        Some(l) => Ok(l),
+        None if threads::pide_sesion(&html) => Err(i18n::threads_pide_sesion(i18n::lang())),
+        None => Err(i18n::threads_no_servida(i18n::lang())),
+    }
 }
 
 /// Lista un post o un perfil de Threads en la rejilla (ver `threads.rs`).
@@ -13398,7 +13405,10 @@ impl App {
                 ui.add_sized(
                     [420.0, 30.0],
                     egui::TextEdit::singleline(&mut self.profile_url)
-                        .hint_text("https://www.tiktok.com/@usuario  ·  space.bilibili.com/UID  ·  weibo.com/u/…"),
+                        .hint_text(msg_lang(
+                            "https://www.tiktok.com/@usuario  ·  threads.com/@usuario  ·  weibo.com/u/…",
+                            "https://www.tiktok.com/@user  ·  threads.com/@user  ·  weibo.com/u/…",
+                        )),
                 );
                 if soft_button(ui, t(lang, "btn.paste")).clicked() {
                     if let Ok(mut cb) = arboard::Clipboard::new() {
