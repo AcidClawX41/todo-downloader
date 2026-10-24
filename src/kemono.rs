@@ -341,6 +341,139 @@ pub fn es_archivo(url: &str) -> bool {
     ruta.starts_with("data/") || ruta.starts_with("thumbnail/")
 }
 
+/// ¿De qué sitio es un ARCHIVO? Admite subdominios (`n2.kemono.cr`,
+/// `img.coomer.st`), al contrario que `clasificar`, que solo reconoce las
+/// páginas del dominio principal.
+pub fn sitio_de_archivo(url: &str) -> Option<Sitio> {
+    let low = url.trim().to_ascii_lowercase();
+    let host = host_de(&low)?;
+    let es = |dominios: &[&str]| {
+        dominios
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+    };
+    if es(&["kemono.cr", "kemono.su", "kemono.st", "kemono.party"]) {
+        Some(Sitio::Kemono)
+    } else if es(&["coomer.st", "coomer.su", "coomer.cr", "coomer.party"]) {
+        Some(Sitio::Coomer)
+    } else {
+        None
+    }
+}
+
+/// Extensiones con vista previa en el servidor de miniaturas. Es el mismo
+/// criterio que usa gallery-dl (`util.EXTS_IMAGE`): un vídeo o un zip no
+/// tienen miniatura, y pedirla devolvería un 404.
+const CON_MINIATURA: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "avif", "bmp"];
+
+/// La vista previa de un archivo: `https://img.<sitio>/thumbnail/data/…`.
+///
+/// POR QUÉ EXISTE. Desde junio de 2026 los servidores de ficheros originales
+/// de Kemono y Coomer (`n1…n4.kemono.cr`, `n3.coomer.st`) no entregan nada:
+/// conexión cortada o `503 upstream connect error … connection timeout`.
+/// gallery-dl lo documenta (mikf/gallery-dl#9442: «it's currently impossible
+/// to download the actual files») y desde la 1.32.3 baja por defecto esta
+/// misma miniatura. Medido el 24 de octubre de 2026: el original sigue en
+/// 503 y la miniatura responde 200, un JPEG de 533×800 en Kemono y de 449×800
+/// en Coomer. No es el original; es lo único que hay mientras dure la avería.
+///
+/// `None` si no es un archivo del sitio o si no es una imagen.
+pub fn url_miniatura(url: &str) -> Option<String> {
+    let sitio = sitio_de_archivo(url)?;
+    let tras_esquema = url.trim().split_once("://")?.1;
+    let ruta = tras_esquema.split(['?', '#']).next()?;
+    let ruta = &ruta[ruta.find('/')?..];
+    let ruta = ruta.strip_prefix("/thumbnail").unwrap_or(ruta);
+    let ruta = ruta.strip_prefix("/data")?;
+    if !es_ruta_hash(ruta) || !CON_MINIATURA.contains(&extension_de(ruta).as_str()) {
+        return None;
+    }
+    Some(format!("{}/thumbnail/data{ruta}", sitio.img()))
+}
+
+/// Nombre con el que se guarda la vista previa: el del original, sin su
+/// extensión, con `_preview.jpg`. Que se vea en el nombre es la mitad del
+/// arreglo: un JPEG de 533 píxeles guardado como `….png` sería un fallo
+/// silencioso de los que este proyecto lleva tiempo erradicando.
+pub fn nombre_preview(nombre: &str) -> String {
+    let base = match nombre.rsplit_once('.') {
+        Some((b, e)) if !b.is_empty() && !e.is_empty() && e.len() <= 12 && !e.contains(['/', '\\']) => b,
+        _ => nombre,
+    };
+    format!("{base}_preview.jpg")
+}
+
+/// Cuánto se recuerda que los originales de un sitio no responden.
+///
+/// Diez minutos: con la avería activa, cada intento cuesta hasta 15 s de
+/// espera del servidor, y cuarenta archivos en cola eran diez minutos
+/// mirando filas al 0 %. Si el sitio se recupera, en diez minutos se vuelve
+/// a probar el original sin que nadie tenga que tocar nada.
+pub const CAIDA_SEGUNDOS: u64 = 10 * 60;
+
+/// Hasta cuándo (segundos de época) se dan por caídos los originales de cada
+/// sitio. 0 = no se sabe de ninguna caída. Atómico porque lo leen y escriben
+/// las tareas de descarga en paralelo.
+static CAIDOS_HASTA: [std::sync::atomic::AtomicU64; 2] =
+    [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+fn indice(sitio: Sitio) -> usize {
+    match sitio {
+        Sitio::Kemono => 0,
+        Sitio::Coomer => 1,
+    }
+}
+
+fn ahora() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Anota que los originales del sitio no responden, desde `ahora`.
+pub fn marcar_originales_caidos_en(sitio: Sitio, ahora: u64) {
+    CAIDOS_HASTA[indice(sitio)].store(ahora + CAIDA_SEGUNDOS, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// ¿Están dados por caídos los originales del sitio en `ahora`?
+pub fn originales_caidos_en(sitio: Sitio, ahora: u64) -> bool {
+    ahora < CAIDOS_HASTA[indice(sitio)].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Olvida una caída: el original acaba de bajar bien.
+pub fn marcar_originales_vivos(sitio: Sitio) {
+    CAIDOS_HASTA[indice(sitio)].store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn marcar_originales_caidos(sitio: Sitio) {
+    marcar_originales_caidos_en(sitio, ahora());
+}
+
+pub fn originales_caidos(sitio: Sitio) -> bool {
+    originales_caidos_en(sitio, ahora())
+}
+
+/// ¿Este error del original significa que el SERVIDOR no responde, y no que
+/// el archivo no exista o que se haya pedido demasiado deprisa?
+///
+/// Conexión cortada, timeout o 5xx: avería, y cuenta para el disyuntor. Un 404
+/// es de ese archivo concreto, y un 429 es ritmo: ninguno de los dos dice nada
+/// de los demás archivos de la cola.
+pub fn error_es_caida(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    if e.contains("http 4") {
+        return false;
+    }
+    e.contains("http 5")
+        || e.contains("error sending request")
+        || e.contains("connection")
+        || e.contains("timed out")
+        || e.contains("timeout")
+        || e.contains("dns")
+        || e.contains("reset")
+}
+
 /// Reconoce la URL. `None` si no es de ninguno de los dos sitios.
 ///
 /// Comparación por host, no por subcadena: `kemono.cr.atacante.net` no es
@@ -807,6 +940,82 @@ mod tests {
         assert!(!es_archivo("https://kemono.cr/patreon/user/135298579"));
         assert!(!es_archivo("https://kemono.cr.atacante.net/data/x.png"));
         assert!(!es_archivo("https://ejemplo.com/data/x.png"));
+    }
+
+    #[test]
+    fn la_vista_previa_se_deriva_del_archivo_y_solo_para_imagenes() {
+        let h = "/c8/90/c890722a0ddf757cc84a8bc13002464557738cd70cb30079140344d4e9384cbe";
+        // Desde la portada, desde el servidor de ficheros y desde un dominio viejo.
+        for u in [
+            format!("https://kemono.cr/data{h}.png"),
+            format!("https://n2.kemono.cr/data{h}.png?f=5-2-2025-1.png"),
+            format!("https://kemono.su/data{h}.png"),
+        ] {
+            assert_eq!(
+                url_miniatura(&u).as_deref(),
+                Some(format!("https://img.kemono.cr/thumbnail/data{h}.png").as_str()),
+                "{u}"
+            );
+        }
+        assert_eq!(
+            url_miniatura(&format!("https://n3.coomer.st/data{h}.jpg")).as_deref(),
+            Some(format!("https://img.coomer.st/thumbnail/data{h}.jpg").as_str())
+        );
+        // Una miniatura ya es una miniatura: no se dobla el prefijo.
+        assert_eq!(
+            url_miniatura(&format!("https://img.kemono.cr/thumbnail/data{h}.png")).as_deref(),
+            Some(format!("https://img.kemono.cr/thumbnail/data{h}.png").as_str())
+        );
+        // Sin miniatura: vídeo, zip, ruta que no es hash, otro sitio, página.
+        assert!(url_miniatura(&format!("https://kemono.cr/data{h}.mp4")).is_none());
+        assert!(url_miniatura(&format!("https://kemono.cr/data{h}.zip")).is_none());
+        assert!(url_miniatura("https://kemono.cr/data/c8/90/corto.png").is_none());
+        assert!(url_miniatura(&format!("https://otro.example/data{h}.png")).is_none());
+        assert!(url_miniatura(&format!("https://kemono.cr.atacante.net/data{h}.png")).is_none());
+        assert!(url_miniatura("https://kemono.cr/patreon/user/1/post/2").is_none());
+
+        assert_eq!(sitio_de_archivo("https://n4.kemono.cr/data/x.png"), Some(Sitio::Kemono));
+        assert_eq!(sitio_de_archivo("https://img.coomer.st/thumbnail/x"), Some(Sitio::Coomer));
+        assert_eq!(sitio_de_archivo("https://notkemono.cr/data/x.png"), None);
+    }
+
+    #[test]
+    fn el_nombre_de_la_vista_previa_dice_lo_que_es() {
+        assert_eq!(
+            nombre_preview("Thebardspirit_121604542_5-2-2025-1.png"),
+            "Thebardspirit_121604542_5-2-2025-1_preview.jpg"
+        );
+        assert_eq!(nombre_preview("foto.JPEG"), "foto_preview.jpg");
+        assert_eq!(nombre_preview("sin_extension"), "sin_extension_preview.jpg");
+        assert_eq!(nombre_preview(".oculto"), ".oculto_preview.jpg");
+    }
+
+    #[test]
+    fn el_disyuntor_recuerda_la_caida_diez_minutos_y_por_sitio() {
+        // Coomer y no Kemono: los tests corren en paralelo y la descarga real
+        // usa el reloj; con un sitio que ningún otro test toca no se pisan.
+        let t0 = 1_800_000_000;
+        marcar_originales_vivos(Sitio::Coomer);
+        assert!(!originales_caidos_en(Sitio::Coomer, t0));
+        marcar_originales_caidos_en(Sitio::Coomer, t0);
+        assert!(originales_caidos_en(Sitio::Coomer, t0 + 1));
+        assert!(originales_caidos_en(Sitio::Coomer, t0 + CAIDA_SEGUNDOS - 1));
+        assert!(!originales_caidos_en(Sitio::Coomer, t0 + CAIDA_SEGUNDOS));
+        marcar_originales_vivos(Sitio::Coomer);
+        assert!(!originales_caidos_en(Sitio::Coomer, t0 + 1));
+
+        // Qué cuenta como caída y qué no.
+        for e in [
+            "HTTP 503",
+            "error sending request for url (https://n1.kemono.cr/data/…)",
+            "operation timed out",
+            "connection reset by peer",
+        ] {
+            assert!(error_es_caida(e), "{e}");
+        }
+        for e in ["HTTP 404", "HTTP 429", "HTTP 403", ""] {
+            assert!(!error_es_caida(e), "{e}");
+        }
     }
 
     #[test]

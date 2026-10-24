@@ -594,12 +594,21 @@ enum Ev {
     /// (id, nº de archivos completados, nombre del que acaba de escribirse)
     GalFiles(u64, u64, String),
     ErrorDetail(u64, String),
+    /// La descarga se guarda con otro nombre del que se encoló: la vista
+    /// previa de Kemono (`…_preview.jpg`) en lugar del original, o al revés.
+    Renamed(u64, String),
+    /// Aviso pasajero generado fuera de la interfaz.
+    Toast(String),
     CookieFallback,
     DisableCookies,
     YtDlp(Option<String>),
     YtDlpProgress(f32),
     YtDlpError(String),
     GalDl(Option<String>),
+    /// Lo que contesta `gallery-dl --version` (p. ej. «1.32.17»).
+    GalDlVersion(Option<String>),
+    /// Última versión publicada de gallery-dl, sin la «v».
+    GalDlUltima(Option<String>),
     GalDlProgress(f32),
     GalDlError(String),
     Ffmpeg(Option<String>),
@@ -1378,6 +1387,14 @@ struct Settings {
     /// resolutor descarta los destinos IPv6 cuando la máquina no tiene una
     /// dirección IPv6 global.
     forzar_ipv4: bool,
+    /// Kemono/Coomer: si el archivo original no llega, guardar la vista previa
+    /// (JPEG de unos 533×800) con `_preview` en el nombre.
+    ///
+    /// Encendido por omisión. Desde junio de 2026 los servidores de originales
+    /// de los dos sitios no entregan nada (ver `kemono::url_miniatura`); con
+    /// esto apagado, una cola de Kemono es una lista de errores. Quien quiera
+    /// originales o nada, lo apaga.
+    kemono_preview: bool,
     /// Credenciales de boorus, por clave de extractor.
     ///
     /// Antes eran UN par global, porque solo Gelbooru las pedía. Desde el
@@ -1463,6 +1480,7 @@ impl Default for Settings {
             // Apagado por omisión: quien SÍ tenga IPv6 no debe perderlo por
             // un problema que no tiene.
             forzar_ipv4: false,
+            kemono_preview: true,
             booru_creds: std::collections::BTreeMap::new(),
             booru_user: String::new(),
             booru_key: String::new(),
@@ -1561,16 +1579,8 @@ fn cookie_descarga(s: &Settings, url: &str) -> String {
 /// contesta directamente con el archivo (sin 302), se devuelve la URL tal
 /// cual. Si contesta otra cosa, `None`: el camino normal sigue como antes.
 async fn kemono_resolver_archivo(url: &str) -> Option<(String, String)> {
-    static SIN_REDIR: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let cliente = SIN_REDIR.get_or_init(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(UA)
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest client")
-    });
-    let req = cliente.get(url).header(reqwest::header::REFERER, referer_for(url));
+    let req = cliente_sin_redireccion()
+        .get(url).header(reqwest::header::REFERER, referer_for(url));
     let r = tokio::time::timeout(Duration::from_secs(30), req.send()).await.ok()?.ok()?;
     let cookies: Vec<String> = r
         .headers()
@@ -1598,6 +1608,183 @@ async fn kemono_resolver_archivo(url: &str) -> Option<(String, String)> {
         return Some((url.to_string(), cookie));
     }
     None
+}
+
+/// Descarga un archivo de Kemono/Coomer.
+///
+/// 1. EL ORIGINAL, salvo que el disyuntor diga que los servidores de ficheros
+///    del sitio están caídos (`kemono::originales_caidos`). Con su
+///    redirección y sus cookies resueltas a mano, y DOS intentos, no tres: con
+///    la avería activa cada intento cuesta hasta 15 s, y el tercero no ha
+///    servido nunca para nada.
+/// 2. Si falla por caída del servidor, se ARMA EL DISYUNTOR: los demás
+///    archivos de la cola van directos al paso 3 durante diez minutos, en vez
+///    de esperar cada uno su propio timeout.
+/// 3. LA VISTA PREVIA, si el ajuste está encendido y el archivo es una imagen.
+///    Se guarda con `_preview.jpg` en el nombre, la fila se renombra para que
+///    se vea, y se avisa una vez por sesión.
+///
+/// Nunca cae a gallery-dl por la página: para Kemono la página es el post
+/// entero, y cuarenta filas del mismo post eran cuarenta descargas del post
+/// completo, en paralelo y con otros nombres. Y sus enlaces no caducan: no
+/// hay «enlace nuevo» que pedir.
+async fn run_kemono_archivo(client: &reqwest::Client, spec: DlSpec, tx: &UnboundedSender<Ev>) {
+    static AVISADO: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+    let Some(sitio) = kemono::sitio_de_archivo(&spec.url) else {
+        let _ = tx.send(Ev::Status(spec.id, Status::Error("Kemono: URL".into())));
+        return;
+    };
+    let url_original = spec.url.clone();
+
+    // Si la fila ya se había renombrado a vista previa (un reintento), el
+    // original vuelve a su nombre: `…_preview.jpg` → `….png`.
+    let nombre_actual = spec.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext_original = url_extension(&url_original).unwrap_or_else(|| "bin".into());
+    let nombre_original = match nombre_actual.strip_suffix("_preview.jpg") {
+        Some(base) => format!("{base}.{ext_original}"),
+        None => nombre_actual.clone(),
+    };
+    let dir = spec.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let ruta_original = dir.join(&nombre_original);
+    if nombre_original != nombre_actual {
+        let _ = tx.send(Ev::Renamed(spec.id, nombre_original.clone()));
+    }
+
+    let _ = tx.send(Ev::Status(spec.id, Status::Resolving));
+    let mut ultimo_error = String::new();
+
+    if kemono::originales_caidos(sitio) {
+        ultimo_error = msg_lang(
+            "los servidores de originales no respondían hace un momento (se reintenta solo a los diez minutos)",
+            "the original-file servers were not answering a moment ago (retried automatically after ten minutes)",
+        )
+        .into();
+    } else {
+        let mut s = DlSpec { path: ruta_original.clone(), ..spec.clone() };
+        if let Some((destino, cookie)) = kemono_resolver_archivo(&url_original).await {
+            s.url = destino;
+            if !cookie.is_empty() {
+                s.cookie = cookie;
+            }
+        }
+        let _ = tx.send(Ev::Status(spec.id, Status::Downloading));
+        for intento in 1..=2u64 {
+            match try_http(client, &s, tx).await {
+                Ok(HttpOutcome::Done) => {
+                    kemono::marcar_originales_vivos(sitio);
+                    let _ = tx.send(Ev::Status(spec.id, Status::Done));
+                    return;
+                }
+                Ok(HttpOutcome::Cancelled) => {
+                    let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+                    return;
+                }
+                // 403/404/410: de ESE archivo. Reintentarlo no cambia nada.
+                Ok(HttpOutcome::Expired(code)) => {
+                    ultimo_error = format!("HTTP {code}");
+                    break;
+                }
+                Err(e) => {
+                    ultimo_error = e.to_string();
+                    if intento < 2 {
+                        let ms = if ultimo_error.contains("429") { 8000 } else { 3000 };
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                    }
+                }
+            }
+        }
+        if kemono::error_es_caida(&ultimo_error) {
+            kemono::marcar_originales_caidos(sitio);
+        }
+    }
+
+    // --- La vista previa ---
+    if spec.kemono_preview {
+        if let Some(miniatura) = kemono::url_miniatura(&url_original) {
+            let nombre_prev = kemono::nombre_preview(&nombre_original);
+            let ruta_prev = dir.join(&nombre_prev);
+            // Lo que el original dejara a medias no sirve para nada ahora y
+            // ocupa sitio con un nombre que parece válido.
+            let parte = PathBuf::from(format!("{}.part", ruta_original.display()));
+            let _ = tokio::fs::remove_file(ruta_estado(&parte)).await;
+            let _ = tokio::fs::remove_file(&parte).await;
+
+            let _ = tx.send(Ev::Renamed(spec.id, nombre_prev.clone()));
+            let _ = tx.send(Ev::Status(spec.id, Status::Downloading));
+            let s = DlSpec {
+                url: miniatura,
+                page_url: String::new(),
+                path: ruta_prev,
+                cookie: String::new(),
+                conexiones: 1,
+                ..spec.clone()
+            };
+            let mut error_prev = String::new();
+            for intento in 1..=MAX_RETRIES as u64 {
+                match try_http(client, &s, tx).await {
+                    Ok(HttpOutcome::Done) => {
+                        let _ = tx.send(Ev::Status(spec.id, Status::Done));
+                        if !AVISADO[if sitio == kemono::Sitio::Kemono { 0 } else { 1 }].swap(true, Ordering::Relaxed) {
+                            let _ = tx.send(Ev::Toast(i18n::kemono_previews(i18n::lang(), sitio.nombre())));
+                        }
+                        return;
+                    }
+                    Ok(HttpOutcome::Cancelled) => {
+                        let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+                        return;
+                    }
+                    Ok(HttpOutcome::Expired(code)) => {
+                        error_prev = format!("HTTP {code}");
+                        break;
+                    }
+                    Err(e) => {
+                        error_prev = e.to_string();
+                        if intento < MAX_RETRIES as u64 {
+                            tokio::time::sleep(Duration::from_millis(1500 * intento)).await;
+                        }
+                    }
+                }
+            }
+            ultimo_error = format!("{ultimo_error}\n{} {error_prev}", msg_lang("Vista previa:", "Preview:"));
+        }
+    }
+
+    let _ = tx.send(Ev::ErrorDetail(
+        spec.id,
+        format!("{ultimo_error}\n\n{}", i18n::t(i18n::lang(), "kemono.error_archivo")),
+    ));
+    let resumen: String = ultimo_error.lines().next().unwrap_or("").chars().take(60).collect();
+    let _ = tx.send(Ev::Status(spec.id, Status::Error(resumen)));
+}
+
+/// ¿Entrega ahora mismo el sitio sus archivos originales?
+///
+/// Se pregunta con UNO solo —el primero que sea imagen— y un byte
+/// (`Range: bytes=0-0`), con plazo corto. Lo usa el listado para avisar
+/// ANTES de encolar, y su respuesta arma o desarma el disyuntor, así que la
+/// cola que venga detrás no tiene que volver a descubrirlo archivo a archivo.
+async fn kemono_sondear_originales(client: &reqwest::Client, url: &str) -> bool {
+    let Some(sitio) = kemono::sitio_de_archivo(url) else { return true };
+    let prueba = async {
+        let (destino, cookie) = kemono_resolver_archivo(url).await?;
+        let mut req = client
+            .get(&destino)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .header(reqwest::header::REFERER, referer_for(url));
+        if !cookie.is_empty() {
+            req = req.header(reqwest::header::COOKIE, cookie);
+        }
+        let r = req.send().await.ok()?;
+        Some(r.status().is_success())
+    };
+    let vivo = matches!(tokio::time::timeout(Duration::from_secs(20), prueba).await, Ok(Some(true)));
+    if vivo {
+        kemono::marcar_originales_vivos(sitio);
+    } else {
+        kemono::marcar_originales_caidos(sitio);
+    }
+    vivo
 }
 
 /// Rutas de gallery-dl y yt-dlp tal como se detectaron, para quien no tiene
@@ -1648,22 +1835,26 @@ fn spec_navegador_galdl(nav: &str, dominio: &str) -> String {
 /// CÓMO. gallery-dl tiene `--cookies-export FILE`, que al terminar un trabajo
 /// vuelca el tarro de la sesión en formato Netscape, y `--cookies-from-browser
 /// chrome/.dominio`, que carga del navegador SOLO ese dominio. El «trabajo» es
-/// un enlace directo a una imagen que no existe, con `--no-download`: su
-/// extractor `directlink` no toca la red, y lo único que ocurre es cargar las
-/// cookies y escribirlas. Si eso no da nada, yt-dlp con `--cookies-from-browser
-/// --cookies FILE --simulate` hace lo mismo, sin filtro de dominio; se filtra
-/// aquí al leer.
+/// `SESION_URL_FICTICIA`, un enlace directo en un dominio que no existe, con
+/// `--no-download`: no sale ninguna petición, y lo único que ocurre es cargar
+/// las cookies y escribirlas. Si eso no da nada, yt-dlp con
+/// `--cookies-from-browser --cookies FILE --simulate` hace lo mismo, sin
+/// filtro de dominio; se filtra aquí al leer, y por eso la carpeta temporal
+/// es privada (0700 en Linux y macOS).
 ///
 /// El archivo vive lo que dura la lectura y luego se borra; lo que se guarda
 /// es la cabecera `Cookie` en memoria, media hora, para que en macOS el
 /// permiso del Llavero —que `security` pide por cada proceso— no salte en
 /// cada página. Un fallo se recuerda dos minutos por el mismo motivo.
 ///
-/// NO SE HA PODIDO PROBAR DE PUNTA A PUNTA: donde se escribió esto no hay
-/// navegador ni llavero. Las dos opciones de gallery-dl están leídas en su
-/// código (`option.py`, `job.py:handle_finalize` → `cookies_store`), y la de
-/// yt-dlp es la forma documentada de exportar un tarro. Si falla, el
-/// listador cae a «sin sesión» como antes, nunca a un error nuevo.
+/// QUÉ ESTÁ PROBADO Y QUÉ NO. Probado, con gallery-dl 1.32.17 y yt-dlp
+/// 2026.10.21 y un `cookies.txt` de entrada: los dos escriben el archivo de
+/// salida con estos mismos argumentos. Esa prueba destapó que la URL
+/// ficticia original la reclamaba el extractor de Patreon y no exportaba nada
+/// (ver `SESION_URL_FICTICIA`). Sin probar: la lectura del NAVEGADOR en sí,
+/// porque donde se escribió esto no hay navegador ni llavero; esa parte es
+/// código de gallery-dl y yt-dlp, no de aquí. Si falla, el listador cae a
+/// «sin sesión» como antes, nunca a un error nuevo.
 async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
     /// Por clave `navegador|dominio`: cuándo se obtuvo y qué (o nada).
     type Cache = std::collections::HashMap<String, (Instant, Option<String>)>;
@@ -1680,6 +1871,13 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
     let (galdl, ytdlp) = MOTORES.lock().map(|m| m.clone()).unwrap_or((None, None));
     let dir = ytdlp_dir().join("sesion-tmp");
     let _ = tokio::fs::create_dir_all(&dir).await;
+    // yt-dlp vuelca TODO el tarro del navegador, un instante, antes de que se
+    // filtre y se borre. Que nadie más del sistema pueda leerlo entretanto.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await;
+    }
     let tmp = dir.join(format!("{}-{}.txt", dominio.trim_start_matches('.'), std::process::id()));
     let tmp_s = tmp.to_string_lossy().into_owned();
     let dir_s = dir.to_string_lossy().into_owned();
@@ -1717,7 +1915,7 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
             "-D".into(),
             dir_s.clone(),
             "--".into(),
-            format!("https://{}/todo-downloader-sesion.png", dominio.trim_start_matches('.')),
+            SESION_URL_FICTICIA.to_string(),
         ];
         ejecutar(g, &args).await;
         resultado = leer(&tmp, dominio).await;
@@ -1734,7 +1932,7 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
                 "--no-warnings".into(),
                 "--ignore-errors".into(),
                 "--".into(),
-                format!("https://{}/", dominio.trim_start_matches('.')),
+                SESION_URL_FICTICIA.to_string(),
             ];
             ejecutar(y, &args).await;
             resultado = leer(&tmp, dominio).await;
@@ -1746,6 +1944,25 @@ async fn cookies_por_motor(nav: &str, dominio: &str) -> Option<String> {
     }
     resultado
 }
+
+/// URL que se le da a gallery-dl y a yt-dlp cuando solo se quiere que
+/// carguen las cookies del navegador y las vuelquen a un archivo.
+///
+/// NO PUEDE SER DEL SITIO, y esto ya falló una vez. Se usaba
+/// `https://patreon.com/todo-downloader-sesion.png`, pensando que la
+/// atendería el extractor genérico de enlaces directos. No: la reclama el
+/// extractor de PATREON —su patrón de creador acepta `patreon.com/<lo que
+/// sea>`—, que intenta abrir esa «página de creador», choca con el desafío
+/// de Cloudflare y termina con error SIN exportar nada. Comprobado con
+/// gallery-dl 1.32.17: `ChallengeError … exit=8`, y ningún archivo.
+///
+/// `.invalid` es un dominio reservado (RFC 2606) que nunca resuelve, así que
+/// ningún extractor lo reclama y no sale ni una petición a ningún sitio. Las
+/// cookies se acotan al dominio por la especificación del navegador
+/// (`chrome/.patreon.com`), no por la URL. Comprobado con las dos
+/// herramientas: gallery-dl con `--no-download` sale con 0 y escribe el
+/// archivo; yt-dlp falla al resolver, sale con 1, y aun así lo reescribe.
+const SESION_URL_FICTICIA: &str = "https://todo-downloader.invalid/sesion.png";
 
 /// Cabecera `Cookie` de un dominio para un motor NATIVO, por el camino que el
 /// usuario tenga configurado, en este orden:
@@ -2107,6 +2324,15 @@ struct App {
     /// sistema o no se puede saber. Instagram cambia su API cada pocas
     /// semanas, así que un binario viejo es la primera sospecha.
     galdl_edad_dias: Option<u64>,
+    /// Versión del gallery-dl en uso, y la última publicada. Instagram cambia
+    /// su API cada pocas semanas: saber si se va por detrás es lo primero que
+    /// hay que mirar cuando falla.
+    galdl_version: Option<String>,
+    galdl_ultima: Option<String>,
+    /// Ya se preguntó a GitHub en esta sesión. Se pregunta UNA vez, y solo
+    /// cuando hace falta (Ajustes abierto, o Instagram vacío): la aplicación
+    /// no hace peticiones que nadie le ha pedido al arrancar.
+    galdl_ultima_pedida: bool,
     galdl_installing: bool,
     galdl_progress: f32,
     ffmpeg_cmd: Option<String>,
@@ -2375,7 +2601,14 @@ impl App {
         );
         let mut cb = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(15));
+            .connect_timeout(Duration::from_secs(15))
+            // PLAZO POR LECTURA, no total: se reinicia con cada trozo que
+            // llega, así que no corta una descarga grande y lenta. Lo que sí
+            // corta es un servidor que acepta la conexión y luego no manda
+            // nada. Sin esto, `send()` esperaba indefinidamente las cabeceras
+            // de los servidores de Kemono y las filas se quedaban al 0 %
+            // «Descargando» para siempre, sin error y sin reintento.
+            .read_timeout(Duration::from_secs(60));
         if settings.forzar_ipv4 {
             // Atarse a la dirección IPv4 comodín obliga a un zócalo IPv4, con
             // lo que las direcciones IPv6 del sitio ni se intentan.
@@ -2436,6 +2669,9 @@ impl App {
             galdl_cmd: None,
             galdl_installing: false,
             galdl_edad_dias: None,
+            galdl_version: None,
+            galdl_ultima: None,
+            galdl_ultima_pedida: false,
             galdl_progress: 0.0,
             ffmpeg_cmd: None,
             ffmpeg_installing: false,
@@ -3270,6 +3506,27 @@ impl App {
         self.gallery_epoch += 1;
     }
 
+    /// Pregunta UNA vez por sesión cuál es la última versión de gallery-dl.
+    fn pedir_ultima_galdl(&mut self) {
+        if self.galdl_ultima_pedida {
+            return;
+        }
+        self.galdl_ultima_pedida = true;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let _ = tx.send(Ev::GalDlUltima(galdl_ultima_publicada(&client).await));
+        });
+    }
+
+    /// ¿Va el gallery-dl en uso por detrás de la última versión publicada?
+    fn galdl_desfasado(&self) -> bool {
+        match (&self.galdl_version, &self.galdl_ultima) {
+            (Some(a), Some(u)) => version_anterior(a, u),
+            _ => false,
+        }
+    }
+
     fn toast(&mut self, msg: impl Into<String>) {
         self.toast = msg.into();
         self.toast_until = Some(Instant::now() + Duration::from_secs(4));
@@ -3688,6 +3945,7 @@ impl App {
                 if es_hf && !t.is_empty() { format!("Bearer {t}") } else { String::new() }
             },
             conexiones: self.settings.http_conexiones,
+            kemono_preview: self.settings.kemono_preview,
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
@@ -3833,6 +4091,12 @@ impl App {
                         self.rows[i].error_full = detail;
                     }
                 }
+                Ev::Renamed(id, nombre) => {
+                    if let Some(i) = self.idx(id) {
+                        self.rows[i].filename = nombre;
+                    }
+                }
+                Ev::Toast(msg) => self.toast(msg),
                 Ev::CookieFallback => {
                     let msg = t(self.settings.lang, "toast.cookie_fallback");
                     self.toast(msg);
@@ -3876,9 +4140,18 @@ impl App {
                     if let Ok(mut m) = MOTORES.lock() {
                         m.0 = cmd.clone();
                     }
+                    self.galdl_version = None;
+                    if let Some(c) = cmd.clone() {
+                        let tx = self.tx.clone();
+                        self.rt.spawn(async move {
+                            let _ = tx.send(Ev::GalDlVersion(galdl_version_de(&c).await));
+                        });
+                    }
                     self.galdl_cmd = cmd;
                     self.galdl_installing = false;
                 }
+                Ev::GalDlVersion(v) => self.galdl_version = v,
+                Ev::GalDlUltima(v) => self.galdl_ultima = v,
                 Ev::GalDlProgress(p) => {
                     self.galdl_installing = true;
                     self.galdl_progress = p;
@@ -4285,6 +4558,9 @@ struct DlSpec {
     /// una descarga en marcha no cambia de estrategia a mitad porque el
     /// usuario haya movido el deslizador.
     conexiones: u8,
+    /// Ver `Settings::kemono_preview`. Viaja en el spec por el mismo motivo
+    /// que `conexiones`: una descarga en marcha no cambia de criterio a mitad.
+    kemono_preview: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4349,18 +4625,12 @@ async fn download_task(
     let mut last_err = String::new();
     let mut expired = false;
 
-    // Kemono/Coomer: la redirección y sus cookies de DDoS-Guard, a mano (ver
-    // `kemono_resolver_archivo`). El `spec` pasa a apuntar al servidor de
-    // ficheros con la cookie puesta; `try_http` y el sondeo la mandan solos.
-    let mut spec = spec;
-    let es_kemono = kemono::es_archivo(&spec.url);
-    if es_kemono {
-        if let Some((destino, cookie)) = kemono_resolver_archivo(&spec.url).await {
-            spec.url = destino;
-            if !cookie.is_empty() {
-                spec.cookie = cookie;
-            }
-        }
+    // Kemono/Coomer van por su propio camino: original con su redirección y
+    // sus cookies, disyuntor de caídas y vista previa de respaldo. Ver
+    // `run_kemono_archivo`.
+    if kemono::es_archivo(&spec.url) {
+        run_kemono_archivo(&client, spec, &tx).await;
+        return;
     }
 
     // Variantes de calidad: se intenta primero el original sin procesar
@@ -4405,29 +4675,6 @@ async fn download_task(
         if !is_last {
             continue;
         }
-    }
-
-    // UN ARCHIVO DE KEMONO NO SE REINTENTA POR LA PÁGINA DEL POST. Sus enlaces
-    // no caducan —la ruta es el hash del contenido—, así que un 403 o un 404
-    // es definitivo y no hay enlace nuevo que pedir. Y el respaldo general
-    // habría lanzado gallery-dl sobre el POST ENTERO: cuarenta filas de un
-    // mismo post son cuarenta descargas del post completo, con otro nombre de
-    // archivo y en paralelo. Se vio en uso: la carpeta llena de archivos de
-    // gallery-dl mientras las filas seguían a cero.
-    if es_kemono {
-        let _ = tx.send(Ev::ErrorDetail(
-            spec.id,
-            format!(
-                "{}\n{}",
-                last_err,
-                msg_lang(
-                    "Kemono: el servidor de ficheros no entregó el archivo. Sus enlaces no caducan, así que no se reintenta por la página; pulsa Reintentar más tarde (el servidor limita conexiones por dirección).",
-                    "Kemono: the file server did not deliver the file. Its links do not expire, so there is no page retry; press Retry later (the server limits connections per address)."
-                )
-            ),
-        ));
-        let _ = tx.send(Ev::Status(spec.id, Status::Error(last_err.chars().take(60).collect())));
-        return;
     }
 
     // Respaldo por URL de página, SOLO si algún motor la soporta.
@@ -5672,6 +5919,9 @@ async fn browse_kemono(
         return;
     }
 
+    // El aviso que ya se ha enseñado sobre la rejilla, para AMPLIARLO si el
+    // sondeo de originales sale mal en vez de sustituirlo.
+    let mut aviso_previo = String::new();
     let resultado = match &destino {
         kemono::Destino::Post { .. } => {
             let api = destino.api_post().unwrap_or_default();
@@ -5681,18 +5931,16 @@ async fn browse_kemono(
             let api = destino.api_posts(pagina).unwrap_or_default();
             let r = kemono_get(&client, &api).await.and_then(|t| kemono::items_de_listado(&t, sitio, &autor));
             if let (Ok(items), Some(p)) = (&r, &perfil) {
-                let _ = tx.send(Ev::GalleryNotice(
-                    i18n::kemono_resumen(
-                        i18n::lang(),
-                        sitio.nombre(),
-                        &autor,
-                        p.post_count,
-                        pagina,
-                        items.iter().map(|i| i.post_id.as_str()).collect::<std::collections::HashSet<_>>().len(),
-                        !q.is_empty() || !tag.is_empty(),
-                    ),
-                    epoch,
-                ));
+                aviso_previo = i18n::kemono_resumen(
+                    i18n::lang(),
+                    sitio.nombre(),
+                    &autor,
+                    p.post_count,
+                    pagina,
+                    items.iter().map(|i| i.post_id.as_str()).collect::<std::collections::HashSet<_>>().len(),
+                    !q.is_empty() || !tag.is_empty(),
+                );
+                let _ = tx.send(Ev::GalleryNotice(aviso_previo.clone(), epoch));
             }
             r
         }
@@ -5700,7 +5948,23 @@ async fn browse_kemono(
     };
     match resultado {
         Ok(items) => {
+            // La primera imagen sirve de sonda. Se toma ANTES de mover la
+            // lista, y la rejilla se pinta ya: el sondeo puede tardar.
+            let sonda = items
+                .iter()
+                .find(|i| kemono::url_miniatura(&i.url).is_some())
+                .map(|i| i.url.clone());
             let _ = tx.send(Ev::GalleryResults(items, pagina, epoch));
+            if let Some(u) = sonda {
+                if !cancelar.load(Ordering::Relaxed) && !kemono_sondear_originales(&client, &u).await {
+                    let mut aviso = aviso_previo.clone();
+                    if !aviso.is_empty() {
+                        aviso.push('\n');
+                    }
+                    aviso.push_str(&i18n::kemono_caido(i18n::lang(), sitio.nombre()));
+                    let _ = tx.send(Ev::GalleryNotice(aviso, epoch));
+                }
+            }
         }
         Err(e) => {
             let _ = tx.send(Ev::GalleryError(format!("{}: {e}", sitio.nombre()), epoch));
@@ -10541,6 +10805,100 @@ fn spawn_galdl_check(tx: UnboundedSender<Ev>) {
     });
 }
 
+/// Versión de un gallery-dl: la primera línea de `--version`.
+async fn galdl_version_de(programa: &str) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(programa);
+    cmd.arg("--version").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    utf8_env(&mut cmd);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = tokio::time::timeout(Duration::from_secs(30), cmd.output()).await.ok()?.ok()?;
+    let v = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    (!v.is_empty() && version_numeros(&v).is_some()).then_some(v)
+}
+
+/// Última versión publicada de gallery-dl, de la API de GitHub.
+///
+/// De `mikf/gallery-dl` y no de `gdl-org/builds`, que es de donde se baja el
+/// binario: el número que importa es el de la versión del código, y es el que
+/// aparece en el registro de cambios cuando se busca un arreglo.
+async fn galdl_ultima_publicada(client: &reqwest::Client) -> Option<String> {
+    // 1. La API. Anónima permite 60 peticiones por hora y por dirección, y
+    //    detrás de una red compartida eso se agota.
+    let api = async {
+        let r = client
+            .get("https://api.github.com/repos/mikf/gallery-dl/releases/latest")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = r.json().await.ok()?;
+        let tag = v.get("tag_name")?.as_str()?.trim().trim_start_matches('v').to_string();
+        version_numeros(&tag).map(|_| tag)
+    };
+    if let Ok(Some(v)) = tokio::time::timeout(Duration::from_secs(20), api).await {
+        return Some(v);
+    }
+    // 2. La redirección de la web, que no tiene ese límite: `/releases/latest`
+    //    responde 302 hacia `/releases/tag/v1.32.17`.
+    let web = async {
+        let r = cliente_sin_redireccion()
+            .get("https://github.com/mikf/gallery-dl/releases/latest")
+            .send()
+            .await
+            .ok()?;
+        version_de_location(r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?)
+    };
+    tokio::time::timeout(Duration::from_secs(20), web).await.ok().flatten()
+}
+
+/// `…/releases/tag/v1.32.17` → «1.32.17».
+fn version_de_location(location: &str) -> Option<String> {
+    let tag = location.trim().trim_end_matches('/').rsplit("/tag/").next()?;
+    let tag = tag.trim_start_matches('v');
+    (location.contains("/tag/") && version_numeros(tag).is_some()).then(|| tag.to_string())
+}
+
+/// Cliente que NO sigue redirecciones, compartido. Lo usan quienes necesitan
+/// leer el `Location` o las cookies de una respuesta 302 antes de seguirla.
+fn cliente_sin_redireccion() -> &'static reqwest::Client {
+    static CLIENTE: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENTE.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(UA)
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest client")
+    })
+}
+
+/// «1.32.17», «v1.32.13-dev» o «1.32.17\n» → (1, 32, 17).
+fn version_numeros(v: &str) -> Option<(u32, u32, u32)> {
+    let v = v.trim().trim_start_matches('v');
+    let v = v.split(|c: char| !(c.is_ascii_digit() || c == '.')).next()?;
+    let mut it = v.split('.').map(|p| p.parse::<u32>());
+    let a = it.next()?.ok()?;
+    let b = it.next()?.ok()?;
+    let c = it.next().unwrap_or(Ok(0)).ok()?;
+    Some((a, b, c))
+}
+
+/// ¿`actual` es anterior a `ultima`? Si alguna no se entiende, `false`: mejor
+/// no avisar que avisar en falso.
+fn version_anterior(actual: &str, ultima: &str) -> bool {
+    match (version_numeros(actual), version_numeros(ultima)) {
+        (Some(a), Some(u)) => a < u,
+        _ => false,
+    }
+}
+
 /// Verificación post-descarga: el binario debe responder a --version.
 /// Si no, se elimina (protección frente a descargas corruptas o manipuladas).
 async fn verify_tool(path: &PathBuf) -> bool {
@@ -12510,12 +12868,29 @@ impl App {
                 // para las colecciones de Patreon, que fallan por otra cosa.
                 // Mandar a revisar las cookies a quien las tiene bien es
                 // gastarle el tiempo, que es lo que este proyecto persigue.
-                let clave = if es_patreon(&self.profile_url) {
-                    "gal.empty_patreon_col"
+                let es_ig = host_of(&self.profile_url.to_ascii_lowercase())
+                    .is_some_and(|h| host_matches(&h, "instagram.com"));
+                if es_ig {
+                    // Instagram vacío con código 0 es, casi siempre, versión.
+                    // Se pide la última aquí, que es cuando hace falta saberla.
+                    if self.galdl_cmd.is_some() {
+                        self.pedir_ultima_galdl();
+                    }
+                    let texto = i18n::instagram_vacio(
+                        lang,
+                        self.galdl_version.as_deref(),
+                        self.galdl_ultima.as_deref(),
+                        self.galdl_desfasado(),
+                    );
+                    ui.label(RichText::new(texto).size(12.0).color(AMBER()));
                 } else {
-                    "gal.empty"
-                };
-                ui.label(RichText::new(t(lang, clave)).size(12.0).color(AMBER()));
+                    let clave = if es_patreon(&self.profile_url) {
+                        "gal.empty_patreon_col"
+                    } else {
+                        "gal.empty"
+                    };
+                    ui.label(RichText::new(t(lang, clave)).size(12.0).color(AMBER()));
+                }
                 // MISMO BOTÓN QUE EN EL BUSCADOR DE BOORUS, y por el mismo
                 // motivo: `PatreonPostExtractor` hace `self.log.debug(bootstrap)`
                 // y luego `return ()` cuando la página no trae la clave que
@@ -14512,6 +14887,10 @@ impl App {
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.lang;
+        // Aquí sí: quien abre Ajustes está mirando sus motores.
+        if self.galdl_cmd.is_some() {
+            self.pedir_ultima_galdl();
+        }
         ui.label(RichText::new(t(lang, "set.title")).size(24.0).strong().color(Color32::WHITE));
         ui.add_space(16.0);
 
@@ -14898,6 +15277,14 @@ impl App {
             } else if let Some(cmd) = self.galdl_cmd.clone() {
                 ui.label(RichText::new(t(lang, "eng.galdl_ok")).color(GREEN()));
                 ui.label(RichText::new(cmd).size(11.5).color(MUTED()));
+                if let Some(v) = &self.galdl_version {
+                    let (texto, color) = if self.galdl_desfasado() {
+                        (i18n::galdl_version(lang, v, self.galdl_ultima.as_deref(), true), AMBER())
+                    } else {
+                        (i18n::galdl_version(lang, v, self.galdl_ultima.as_deref(), false), MUTED())
+                    };
+                    ui.label(RichText::new(texto).size(11.5).color(color));
+                }
                 if let Some(dias) = self.galdl_edad_dias {
                     // Más de tres semanas es más de dos versiones de gallery-dl,
                     // que sale cada semana. Con Instagram eso es la diferencia
@@ -15047,6 +15434,16 @@ impl App {
                 self.toast(t(lang, "set.ipv4_reinicio"));
             }
             ui.label(RichText::new(t(lang, "set.ipv4_note")).size(11.5).color(MUTED()));
+        });
+        ui.add_space(12.0);
+
+        // ---- Kemono / Coomer ----
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width().min(640.0));
+            ui.label(RichText::new("KEMONO / COOMER").size(11.0).color(MUTED()).strong());
+            ui.add_space(4.0);
+            ui.checkbox(&mut self.settings.kemono_preview, t(lang, "set.kemono_preview"));
+            ui.label(RichText::new(t(lang, "set.kemono_preview_note")).size(11.5).color(MUTED()));
         });
         ui.add_space(12.0);
 
@@ -15681,6 +16078,20 @@ mod tests {
     /// La especificación de navegador de gallery-dl lleva el dominio justo
     /// detrás del nombre, antes del llavero y del perfil. Ponerlo en otro
     /// sitio exporta la sesión entera o no exporta nada.
+    /// La URL ficticia del puente de cookies no puede ser de ningún sitio con
+    /// extractor propio: con la de Patreon, gallery-dl abría su página y no
+    /// exportaba nada.
+    #[test]
+    fn la_url_del_puente_de_cookies_no_es_de_ningun_sitio() {
+        let host = host_of(SESION_URL_FICTICIA).unwrap();
+        assert!(host.ends_with(".invalid"), "{host}");
+        assert!(!is_gallery_site(SESION_URL_FICTICIA));
+        assert!(kemono::sitio_de_archivo(SESION_URL_FICTICIA).is_none());
+        // Termina en una extensión de imagen: es lo que hace que la atienda el
+        // extractor de enlaces directos de gallery-dl y no ninguno de sitio.
+        assert!(SESION_URL_FICTICIA.ends_with(".png"));
+    }
+
     #[test]
     fn el_navegador_se_acota_al_dominio_para_gallery_dl() {
         assert_eq!(spec_navegador_galdl("chrome", "patreon.com"), "chrome/.patreon.com");
@@ -15722,6 +16133,138 @@ mod tests {
             assert!(cookie.contains("__ddg"), "{cookie}");
             assert!(kemono::es_archivo(&destino), "el servidor final también es del sitio: {destino}");
         });
+    }
+
+    /// DE PUNTA A PUNTA, en vivo: la ruta de descarga de Kemono con los
+    /// originales caídos. Reproduce el fallo visto en uso («error sending
+    /// request» contra `n1.kemono.cr`) y comprueba lo que tiene que pasar
+    /// después: la fila se renombra a `…_preview.jpg`, el archivo es un JPEG
+    /// de verdad, el disyuntor queda armado y la SEGUNDA descarga ya no espera
+    /// al servidor muerto. `cargo test -- --ignored kemono_descarga`.
+    #[test]
+    #[ignore]
+    fn kemono_descarga_en_vivo_con_originales_caidos() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("td-kemono-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let client = reqwest::Client::builder()
+                .user_agent(UA)
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(60))
+                .build()
+                .unwrap();
+            let spec = |id: u64, hash: &str, nombre: &str| DlSpec {
+                id,
+                url: format!("https://kemono.cr/data/{}/{}/{hash}.png", &hash[..2], &hash[2..4]),
+                page_url: "https://kemono.cr/patreon/user/135298579/post/121604542".into(),
+                path: dir.join(nombre),
+                engine: Engine::Http,
+                extra_args: Vec::new(),
+                ffmpeg: None,
+                prefer_bitrate: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                lang: Lang::Es,
+                cookie: String::new(),
+                auth: String::new(),
+                conexiones: 1,
+                kemono_preview: true,
+            };
+            kemono::marcar_originales_vivos(kemono::Sitio::Kemono);
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let t0 = Instant::now();
+            run_kemono_archivo(
+                &client,
+                spec(1, "c890722a0ddf757cc84a8bc13002464557738cd70cb30079140344d4e9384cbe", "TB_121604542_5-2-2025-1.png"),
+                &tx,
+            )
+            .await;
+            let primera = t0.elapsed();
+            drop(tx);
+            let mut renombrada = String::new();
+            let mut final_ok = false;
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    Ev::Renamed(1, n) => renombrada = n,
+                    Ev::Status(1, Status::Done) => final_ok = true,
+                    Ev::Status(1, Status::Error(e)) => panic!("terminó en error: {e}"),
+                    _ => {}
+                }
+            }
+            let ruta = dir.join("TB_121604542_5-2-2025-1_preview.jpg");
+            let bytes = std::fs::read(&ruta).unwrap_or_default();
+            // Si algún día el original vuelve, esto bajaría el PNG: también vale.
+            let original = dir.join("TB_121604542_5-2-2025-1.png");
+            if original.exists() {
+                eprintln!("el original respondió: la avería parece resuelta");
+                return;
+            }
+            assert!(final_ok, "la fila no terminó");
+            assert_eq!(renombrada, "TB_121604542_5-2-2025-1_preview.jpg");
+            assert!(bytes.starts_with(&[0xFF, 0xD8]), "no es un JPEG: {} bytes", bytes.len());
+            assert!(kemono::originales_caidos(kemono::Sitio::Kemono), "el disyuntor debería estar armado");
+
+            // La segunda ya no pregunta al servidor muerto.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let t1 = Instant::now();
+            run_kemono_archivo(
+                &client,
+                spec(2, "b0f50af30b803a30d0f88e011fc660d4f23d6240fa30fa12e3050b9218409dcb", "TB_121604542_5-2-2025-2.png"),
+                &tx,
+            )
+            .await;
+            let segunda = t1.elapsed();
+            drop(tx);
+            let mut ok2 = false;
+            while let Some(ev) = rx.recv().await {
+                if let Ev::Status(2, Status::Done) = ev {
+                    ok2 = true;
+                }
+            }
+            assert!(ok2);
+            assert!(dir.join("TB_121604542_5-2-2025-2_preview.jpg").exists());
+            eprintln!("primera: {primera:?}, segunda: {segunda:?}");
+            assert!(segunda < primera, "la segunda debería saltarse el original");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// La comparación de versiones decide si se le dice a alguien «actualiza»
+    /// cuando Instagram falla. Un falso positivo manda a hacer algo inútil; un
+    /// falso negativo esconde la causa más probable.
+    #[test]
+    fn las_versiones_de_gallery_dl_se_comparan_bien() {
+        assert_eq!(version_numeros("1.32.17"), Some((1, 32, 17)));
+        assert_eq!(version_numeros("v1.32.17"), Some((1, 32, 17)));
+        assert_eq!(version_numeros("1.32.13-dev\n"), Some((1, 32, 13)));
+        assert_eq!(version_numeros("1.33"), Some((1, 33, 0)));
+        assert_eq!(version_numeros("gallery-dl"), None);
+        assert_eq!(version_numeros(""), None);
+
+        assert!(version_anterior("1.32.12", "1.32.17"));
+        // 1.32.9 es ANTERIOR a 1.32.17: compararlas como texto diría lo contrario.
+        assert!(version_anterior("1.32.9", "1.32.17"));
+        assert!(version_anterior("1.31.10", "1.32.0"));
+        assert!(!version_anterior("1.32.17", "1.32.17"));
+        assert!(!version_anterior("1.33.0", "1.32.17"));
+        // Una de desarrollo con el mismo número no es «anterior».
+        assert!(!version_anterior("1.32.17-dev", "1.32.17"));
+        assert!(!version_anterior("raro", "1.32.17"));
+        // La compilación que instala el botón de actualizar es de desarrollo,
+        // con fecha. Tiene que leerse como 1.33.0, no como «no se entiende».
+        assert_eq!(version_numeros("1.33.0-dev:2026.10.24"), Some((1, 33, 0)));
+        assert!(!version_anterior("1.33.0-dev:2026.10.24", "1.32.17"));
+
+        // El respaldo por la redirección de la web.
+        assert_eq!(
+            version_de_location("https://github.com/mikf/gallery-dl/releases/tag/v1.32.17").as_deref(),
+            Some("1.32.17")
+        );
+        assert_eq!(version_de_location("/mikf/gallery-dl/releases/tag/v1.33.0/").as_deref(), Some("1.33.0"));
+        assert!(version_de_location("https://github.com/mikf/gallery-dl/releases").is_none());
+        assert!(version_de_location("https://github.com/login").is_none());
     }
 
     /// `/home` son TODAS las suscripciones a la vez: puede encolar cientos de

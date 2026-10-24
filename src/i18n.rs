@@ -683,10 +683,22 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "kemono.q_hint" => entry!("texto en el título o el cuerpo", "text in the title or body"),
         "kemono.tag_hint" => entry!("etiqueta", "tag"),
         "kemono.nota" => entry!(
-            "ℹ No hace falta cuenta ni cookies: la API es pública. El creador se abre en Perfil de 50 publicaciones en 50 («Cargar más» trae las siguientes), las más recientes primero. Para bajar un creador ENTERO sin elegir, pega su URL en Descargas: lo hace gallery-dl de una pasada. Los enlaces de archivo son hashes y no caducan.",
-            "ℹ No account or cookies needed: the API is public. The creator opens in Profile 50 posts at a time («Load more» fetches the next ones), newest first. To download a WHOLE creator without picking, paste their URL into Downloads: gallery-dl does it in one pass. File links are hashes and do not expire."
+            "ℹ No hace falta cuenta ni cookies: la API es pública. El creador se abre en Perfil de 50 publicaciones en 50 («Cargar más» trae las siguientes), las más recientes primero. Para bajar un creador ENTERO sin elegir, pega su URL en Descargas: lo hace gallery-dl de una pasada. Los enlaces de archivo son hashes y no caducan.\n⚠ Desde junio de 2026 los servidores de ARCHIVOS ORIGINALES de Kemono y Coomer no entregan nada (avería del sitio). Mientras dure, las imágenes se guardan como vista previa JPEG de unos 533×800 con «_preview» en el nombre (se puede apagar en Ajustes) y los vídeos fallan. Al listar se comprueba y se avisa.",
+            "ℹ No account or cookies needed: the API is public. The creator opens in Profile 50 posts at a time («Load more» fetches the next ones), newest first. To download a WHOLE creator without picking, paste their URL into Downloads: gallery-dl does it in one pass. File links are hashes and do not expire.\n⚠ Since June 2026 Kemono's and Coomer's ORIGINAL-FILE servers deliver nothing (a site outage). While it lasts, images are saved as a JPEG preview of about 533×800 with «_preview» in the name (can be turned off in Settings) and videos fail. Listing checks it and warns."
         ),
         "kemono.abrir" => entry!("Abrir en Perfil", "Open in Profile"),
+        "kemono.error_archivo" => entry!(
+            "Kemono/Coomer: el servidor de archivos originales no entregó el archivo. Desde junio de 2026 sus servidores de originales están averiados (lo documenta gallery-dl, mikf/gallery-dl#9442), y no es algo que se pueda arreglar desde aquí. Si es una imagen y tienes activada «Guardar la vista previa» en Ajustes, se guarda la versión reducida; los vídeos y los archivos comprimidos no tienen vista previa. Pulsa Reintentar más adelante: si el sitio se recupera, bajará el original.",
+            "Kemono/Coomer: the original-file server did not deliver the file. Since June 2026 their original-file servers have been broken (documented by gallery-dl, mikf/gallery-dl#9442), and it is not something that can be fixed from here. If it is an image and «Save the preview» is on in Settings, the reduced version is saved; videos and archives have no preview. Press Retry later: if the site recovers, the original will download."
+        ),
+        "set.kemono_preview" => entry!(
+            "Kemono/Coomer: si el original no llega, guardar la vista previa (JPEG reducido, con «_preview» en el nombre)",
+            "Kemono/Coomer: if the original does not arrive, save the preview (reduced JPEG, with «_preview» in the name)"
+        ),
+        "set.kemono_preview_note" => entry!(
+            "Desde junio de 2026 los servidores de archivos originales de Kemono y Coomer no entregan nada; solo responde el de miniaturas, con imágenes de unos 533×800. Con esto activado se guarda esa versión, nombrada para que no se confunda con el original. Apágalo si prefieres originales o nada. Vídeos y archivos comprimidos no tienen vista previa.",
+            "Since June 2026 Kemono's and Coomer's original-file servers deliver nothing; only the thumbnail server answers, with images of about 533×800. With this on, that version is saved, named so it cannot be mistaken for the original. Turn it off if you prefer originals or nothing. Videos and archives have no preview."
+        ),
         "kemono.sin_resultados" => entry!("Ningún creador con ese nombre en este sitio", "No creator by that name on this site"),
         "profile.kemono_note" => entry!(
             "ℹ Kemono/Coomer: se lista por su API pública, sin sesión, con las miniaturas del sitio. Llegan 50 publicaciones por tanda, las más recientes primero; «Cargar más» trae las siguientes. Las imágenes incrustadas en el texto de un post solo aparecen al abrir ese post suelto. Un servidor de Discord se pega en Descargas.",
@@ -1115,6 +1127,77 @@ pub fn galdl_edad(lang: Lang, dias: u64, viejo: bool) -> String {
         ),
         (Lang::En, false) => format!("Downloaded {dias} days ago."),
     }
+}
+
+/// Aviso sobre la rejilla cuando el sondeo de originales falla.
+pub fn kemono_caido(lang: Lang, sitio: &str) -> String {
+    match lang {
+        Lang::Es => format!(
+            "⚠ Los servidores de archivos originales de {sitio} no responden ahora mismo (avería del sitio desde junio de 2026). Lo que encoles se bajará como vista previa JPEG de unos 533×800, con «_preview» en el nombre, si esa opción está activa en Ajustes. Los vídeos y los archivos comprimidos fallarán hasta que el sitio se recupere."
+        ),
+        Lang::En => format!(
+            "⚠ {sitio}'s original-file servers are not answering right now (a site outage since June 2026). Whatever you queue will be saved as a JPEG preview of about 533×800, with «_preview» in the name, if that option is on in Settings. Videos and archives will fail until the site recovers."
+        ),
+    }
+}
+
+/// Aviso pasajero la primera vez que se guarda una vista previa.
+pub fn kemono_previews(lang: Lang, sitio: &str) -> String {
+    match lang {
+        Lang::Es => format!("{sitio}: originales caídos; guardando vistas previas (…_preview.jpg)"),
+        Lang::En => format!("{sitio}: originals down; saving previews (…_preview.jpg)"),
+    }
+}
+
+/// Línea de versión de gallery-dl en Ajustes.
+pub fn galdl_version(lang: Lang, actual: &str, ultima: Option<&str>, desfasado: bool) -> String {
+    match (lang, ultima, desfasado) {
+        (Lang::Es, Some(u), true) => format!(
+            "⚠ Versión {actual}; la última es la {u}. Instagram y otros sitios cambian a menudo y los arreglos llegan en las versiones nuevas: pulsa «Actualizar a la última versión»."
+        ),
+        (Lang::Es, Some(u), false) => format!("Versión {actual} (la última publicada es la {u})."),
+        (Lang::Es, None, _) => format!("Versión {actual}."),
+        (Lang::En, Some(u), true) => format!(
+            "⚠ Version {actual}; the latest is {u}. Instagram and other sites change often and the fixes ship in new versions: press «Update to latest»."
+        ),
+        (Lang::En, Some(u), false) => format!("Version {actual} (the latest release is {u})."),
+        (Lang::En, None, _) => format!("Version {actual}."),
+    }
+}
+
+/// Instagram devolvió una lista vacía sin error.
+pub fn instagram_vacio(lang: Lang, actual: Option<&str>, ultima: Option<&str>, desfasado: bool) -> String {
+    let es = lang == Lang::Es;
+    let causa = if es {
+        "gallery-dl no devolvió nada y terminó sin error. Con Instagram eso suele ser VERSIÓN, no sesión: hasta la 1.32.17 (17 de octubre de 2026), gallery-dl salía así —lista vacía, código 0, sin mensaje— cuando Instagram rechazaba su consulta, y esa misma versión actualizó las consultas de perfil y de publicaciones."
+    } else {
+        "gallery-dl returned nothing and exited without an error. With Instagram that is usually the VERSION, not the session: up to 1.32.17 (17 October 2026), gallery-dl exited exactly like this — empty list, exit code 0, no message — when Instagram rejected its query, and that same release updated the profile and posts queries."
+    };
+    let version = match (actual, ultima) {
+        (Some(a), Some(u)) if desfasado => {
+            if es {
+                format!("\n⚠ Tu gallery-dl es la {a} y la última es la {u}: ve a Ajustes → Motores y pulsa «Actualizar a la última versión», y vuelve a analizar.")
+            } else {
+                format!("\n⚠ Your gallery-dl is {a} and the latest is {u}: go to Settings → Engines, press «Update to latest», and analyze again.")
+            }
+        }
+        (Some(a), Some(_)) => {
+            if es {
+                format!("\nTu gallery-dl ({a}) está al día, así que aquí sí toca mirar la sesión: abre Instagram en el navegador elegido en Ajustes y comprueba que sigue iniciada, o exporta un cookies.txt nuevo.")
+            } else {
+                format!("\nYour gallery-dl ({a}) is up to date, so here it is the session: open Instagram in the browser selected in Settings and check you are still logged in, or export a fresh cookies.txt.")
+            }
+        }
+        (Some(a), None) => {
+            if es {
+                format!("\nTu gallery-dl es la {a}. Si es anterior a la 1.32.17, actualízalo en Ajustes → Motores antes de revisar la sesión.")
+            } else {
+                format!("\nYour gallery-dl is {a}. If it is older than 1.32.17, update it in Settings → Engines before checking the session.")
+            }
+        }
+        _ => String::new(),
+    };
+    format!("{causa}{version}")
 }
 
 pub fn kemono_encontrados(lang: Lang, n: usize) -> String {

@@ -135,42 +135,88 @@ with cookies or the network.
 - *Settings → Engines* shows **how many days old** the bundled gallery-dl is,
   in amber past three weeks (more than two gallery-dl releases).
 
-## Hotfix, same day: Kemono files that stayed at 0 %
+## Hotfix: Kemono and Coomer downloads, and Instagram's silent empty list
 
-Found in use within the hour: forty files queued from a Kemono post, all at
-0 % with no size, while the download folder filled up with files named by
-gallery-dl.
+Found in use within the hour of release, and corrected twice — the first
+diagnosis was wrong, and the record keeps both.
 
-`kemono.cr/data/<hash>.png` does not serve the file. It answers `302` to the
-file server on duty (`n2.kemono.cr`) and, in that same reply, sets four
-DDoS-Guard cookies for `.kemono.cr`. A browser follows the redirect with
-those cookies; so does gallery-dl, whose `requests.Session` has a cookie jar.
-The application's `reqwest` client has no jar: it followed the redirect
-without them and the file server left the connection waiting.
+### Kemono and Coomer files that never arrived
 
-Then the second problem. After three failed attempts, the generic fallback
-re-resolves a file through its **page URL** with gallery-dl, and for Kemono
-the page is the whole post: forty queued files became forty downloads of the
-complete post, in parallel, under gallery-dl's own file names.
+Forty files queued from a Kemono post stayed at 0 % with no size; after a
+first fix they failed with `error sending request for url
+(https://n1.kemono.cr/data/…)`.
 
-What changed:
+**The first diagnosis was wrong.** `kemono.cr/data/<hash>` answers `302` to
+a file server and sets DDoS-Guard cookies in that reply, and the native
+engine followed the redirect without them. That was fixed — the redirect is
+now resolved by hand with the cookies attached, as a browser does — but it
+was not the cause.
 
-- **The redirect is resolved by hand**: one request that does not follow
-  redirects, read `Location` and `Set-Cookie`, and download from the file
-  server with the `Cookie` header attached. Resume and the range probe go
-  through the same path. A live test (`cargo test -- --ignored kemono_redir`)
-  checks that the `302` still carries the `__ddg*` cookies.
-- **No page fallback for Kemono files.** Their links are content hashes and
-  never expire, so a `403` or `404` is final and is reported as such, with a
-  hint that the server limits connections per address. A `429` now waits
-  8 s × attempt instead of 1.2 s.
-- **File names**: a title that already is a file name (`8-2-2025-1.png`) is
-  not given its extension a second time.
-- **Status pill**: a native download waiting for the server reads
-  «connecting…», not «yt-dlp», a leftover label.
+**The cause is Kemono's, not ours.** Since June 2026 the original-file
+servers of both sites (`n1`–`n4.kemono.cr`, `n3.coomer.st`) do not deliver:
+connection reset, or `503 upstream connect error … connection timeout`.
+gallery-dl documents it ([mikf/gallery-dl#9442](https://github.com/mikf/gallery-dl/issues/9442):
+"it's currently impossible to download the actual files"), and since 1.32.3
+it downloads the **thumbnail** by default instead. Measured on 24 October
+2026: originals still `503`, `img.kemono.cr/thumbnail/data/…` answers `200`
+with a JPEG of 533×800 (449×800 on Coomer). The `.jpg` files gallery-dl left
+in the download folder were exactly those thumbnails.
 
-Kemono's file servers are slow on their own account and count connections per
-address; four parallel downloads is a reasonable setting there.
+What the application does now:
+
+- **Tries the original twice**, not three times, with the redirect and
+  cookies resolved by hand. If the original ever comes back, it downloads.
+- **Remembers the outage for ten minutes per site.** The first failure arms a
+  breaker, and the rest of the queue skips straight to the next step instead
+  of each file waiting out its own timeout. Measured: 21 s for the first file,
+  0.2 s for the second.
+- **Saves the preview** — `<name>_preview.jpg`, so a 533-pixel JPEG can never
+  be mistaken for the original — when *Settings → Kemono / Coomer* says so (on
+  by default). The queue row is renamed to match, and a notice says why, once
+  per session. Videos and archives have no preview and fail with an
+  explanation.
+- **Says it before you queue.** After listing a creator or a post, the grid
+  probes one file with a single byte; if the originals do not answer, the
+  banner says so and the breaker is already armed.
+- **Never falls back to the post page.** The generic retry used to re-resolve
+  a failed file through its page with gallery-dl, and for Kemono the page is
+  the whole post: forty queued files became forty downloads of the complete
+  post, in parallel, under other names.
+- A `429` now waits 8 s × attempt; names no longer end in `.png.png`; and a
+  native download waiting for the server reads «connecting…», not «yt-dlp».
+- The shared HTTP client now has a **read timeout** of 60 s, reset on every
+  chunk received. A server that accepted the connection and then sent nothing
+  used to leave a row at 0 % forever, with no error and no retry.
+
+### Instagram: an empty list with no error means "update gallery-dl"
+
+`gallery-dl -j … instagram.com/<user>/posts/` returned `[]` with exit code 0
+and an empty stderr, and the application said "usually a missing session".
+That is the exact symptom gallery-dl fixed in **1.32.17** (17 October 2026):
+"ensure non-zero exit status on GraphQL error", together with new profile and
+posts queries.
+
+- *Settings → Engines* now shows the gallery-dl **version** in use and the
+  latest one published, in amber when it is behind. The latest version is
+  asked of GitHub only when Settings is opened or Instagram comes back empty —
+  never at start-up — with a fallback that reads the redirect of
+  `github.com/…/releases/latest`, which has no rate limit.
+- An empty Instagram listing explains the version cause first, with both
+  numbers, and only sends you to check your session when gallery-dl is
+  current. The *Update to latest* button installs today's build
+  (`1.33.0-dev`), which includes the fix.
+
+### The Chromium cookie bridge did not work for Patreon
+
+Testing the bridge's arguments with the real tools exposed a bug: the dummy
+URL handed to gallery-dl, `https://patreon.com/todo-downloader-sesion.png`, was
+claimed by gallery-dl's **Patreon** extractor, which tried to open it as a
+creator page, hit the Cloudflare challenge and exited without exporting
+anything (`ChallengeError … exit 8`). It is now a reserved `.invalid` domain
+that no extractor claims and that never resolves: gallery-dl exits 0 and
+writes the file; yt-dlp fails to resolve, exits 1, and writes it anyway. Both
+verified. The temporary folder is private (`0700`) on Linux and macOS, since
+yt-dlp dumps the whole jar for an instant before it is filtered.
 
 ## Smaller things
 
