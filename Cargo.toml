@@ -38,6 +38,11 @@ aes = "0.8"
 # TLS ni OpenSSL, de modo que no interfiere con reqwest ni con librqbit.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Solo para las pruebas: lee las fuentes que trae egui para comprobar que todo
+# símbolo de la interfaz tiene glifo. Ya venía en el árbol a través de epaint.
+[dev-dependencies]
+ab_glyph = "0.2"
+
 # Embeds the icon and version metadata into the Windows .exe
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

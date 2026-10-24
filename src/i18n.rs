@@ -273,7 +273,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "btn.pause_all" => entry!("⏸  Pausar todo", "⏸  Pause all"),
         "btn.add_links" => entry!("➕  Añadir enlaces", "➕  Add links"),
         "btn.import" => entry!("📂  Importar TXT/JSON", "📂  Import TXT/JSON"),
-        "btn.clean_completed" => entry!("🧹  Limpiar completados", "🧹  Clear completed"),
+        "btn.clean_completed" => entry!("🗑  Limpiar completados", "🗑  Clear completed"),
         "btn.clear_all" => entry!("🗑  Vaciar cola", "🗑  Empty queue"),
         "btn.open_dest" => entry!("📁  Abrir carpeta destino", "📁  Open destination folder"),
         "btn.retry_all" => entry!("🔁  Reintentar todos", "🔁  Retry all"),
@@ -361,8 +361,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "That Threads address is neither a profile nor a post. I have opened the Capture tab: with its userscript, open what you want in the browser and press the button. What it captures comes back to the Profile grid."
         ),
         "profile.threads_capturador" => entry!(
-            "🧩 Perfil completo: abrir el capturador de Threads",
-            "🧩 Whole profile: open the Threads capturer"
+            "📡 Perfil completo: abrir el capturador de Threads",
+            "📡 Whole profile: open the Threads capturer"
         ),
         "threads.post_texto" => entry!(
             "Este post de Threads no tiene fotos ni vídeos: es solo texto.",
@@ -446,8 +446,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "Descargando gallery-dl desde GitHub Releases…",
             "Downloading gallery-dl from GitHub Releases…"
         ),
-        "eng.ytdlp_ok" => entry!("yt-dlp: instalado ✓", "yt-dlp: installed ✓"),
-        "eng.galdl_ok" => entry!("gallery-dl: instalado ✓", "gallery-dl: installed ✓"),
+        "eng.ytdlp_ok" => entry!("yt-dlp: instalado ✔", "yt-dlp: installed ✔"),
+        "eng.galdl_ok" => entry!("gallery-dl: instalado ✔", "gallery-dl: installed ✔"),
         "eng.ytdlp_missing" => entry!(
             "yt-dlp: no instalado — necesario para enlaces de página y CDN caducados",
             "yt-dlp: not installed — required for page links and expired CDN links"
@@ -475,7 +475,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
 
         // ---------- ffmpeg ----------
         "eng.ffmpeg" => entry!("FFMPEG (INTEGRADO)", "FFMPEG (BUILT-IN)"),
-        "eng.ffmpeg_ok" => entry!("ffmpeg: instalado ✓", "ffmpeg: installed ✓"),
+        "eng.ffmpeg_ok" => entry!("ffmpeg: instalado ✔", "ffmpeg: installed ✔"),
         "eng.ffmpeg_quality_on" => entry!(
             "▲ Máxima calidad activada: se pueden fusionar vídeo y audio separados (1080p+ en YouTube y similares).",
             "▲ Maximum quality enabled: separate video and audio streams can be merged (1080p+ on YouTube and similar)."
@@ -504,7 +504,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "gallery-dl records what it already downloaded so that “Retry” resumes where it \
              stopped instead of starting over. Clear it if you want to re-download something."
         ),
-        "btn.clear_history" => entry!("🧹  Vaciar historial", "🧹  Clear history"),
+        "btn.clear_history" => entry!("🗑  Vaciar historial", "🗑  Clear history"),
         "toast.history_cleared" => entry!("Historial vaciado", "History cleared"),
         "toast.history_empty" => entry!("El historial ya estaba vacío", "History was already empty"),
 
@@ -757,7 +757,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "set.ua" => entry!("USER-AGENT (AVANZADO)", "USER-AGENT (ADVANCED)"),
         "set.ua_clear" => entry!("Por defecto", "Default"),
         "set.ua_detect" => entry!("🔎  Detectar desde mi navegador", "🔎  Detect from my browser"),
-        "set.ua_detected" => entry!("✓ User-Agent detectado y guardado", "✓ User-Agent detected and saved"),
+        "set.ua_detected" => entry!("✔ User-Agent detectado y guardado", "✔ User-Agent detected and saved"),
         "set.ua_need_receiver" => entry!(
             "Activa antes «Receptor local» en esta misma pantalla: es quien lee el dato del navegador.",
             "Enable «Local receiver» above first: it is what reads the value from the browser."
@@ -903,14 +903,14 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
 
         "set.magnet" => entry!("ENLACES MAGNET", "MAGNET LINKS"),
         "set.magnet_on" => entry!(
-            "Todo Downloader abre los enlaces magnet ✓",
-            "Todo Downloader opens magnet links ✓"
+            "Todo Downloader abre los enlaces magnet ✔",
+            "Todo Downloader opens magnet links ✔"
         ),
         "set.magnet_off" => entry!(
             "Otro programa (qBittorrent, µTorrent…) abre los enlaces magnet",
             "Another program (qBittorrent, µTorrent…) opens magnet links"
         ),
-        "set.magnet_register" => entry!("🧲  Abrir los magnet con Todo Downloader", "🧲  Open magnet links with Todo Downloader"),
+        "set.magnet_register" => entry!("🔗  Abrir los magnet con Todo Downloader", "🔗  Open magnet links with Todo Downloader"),
         "set.magnet_unregister" => entry!("Dejar de gestionar los magnet", "Stop handling magnet links"),
         "set.magnet_done" => entry!("Listo: los magnet abrirán Todo Downloader", "Done: magnet links will open Todo Downloader"),
         "set.magnet_removed" => entry!("Registro eliminado", "Registration removed"),
@@ -945,7 +945,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "This host needs the cyberdrop-dl engine: install it in Settings (requires Python)"
         ),
         "eng.cyberdrop" => entry!("MOTOR CYBERDROP-DL (HOSTERS DIFÍCILES)", "CYBERDROP-DL ENGINE (HARD HOSTS)"),
-        "eng.cyberdrop_ok" => entry!("cyberdrop-dl: instalado ✓", "cyberdrop-dl: installed ✓"),
+        "eng.cyberdrop_ok" => entry!("cyberdrop-dl: instalado ✔", "cyberdrop-dl: installed ✔"),
         "eng.cyberdrop_missing" => entry!(
             "cyberdrop-dl: no instalado — opcional, para Bunkr, Cyberdrop y similares",
             "cyberdrop-dl: not installed — optional, for Bunkr, Cyberdrop and similar"
@@ -1035,8 +1035,8 @@ pub fn cleared(lang: Lang, n: usize) -> String {
 
 pub fn received(lang: Lang, n: usize) -> String {
     match lang {
-        Lang::Es => format!("🧲 {n} enlaces recibidos del navegador"),
-        Lang::En => format!("🧲 {n} links received from the browser"),
+        Lang::Es => format!("📡 {n} enlaces recibidos del navegador"),
+        Lang::En => format!("📡 {n} links received from the browser"),
     }
 }
 

@@ -12660,7 +12660,7 @@ impl eframe::App for App {
                 if nav_item(ui, self.view == View::Profile, "🔍", t(lang, "nav.profile"), self.profile_entries.len()) {
                     self.view = View::Profile;
                 }
-                if nav_item(ui, self.view == View::Capture, "🧲", t(lang, "nav.capture"), 0) {
+                if nav_item(ui, self.view == View::Capture, "📡", t(lang, "nav.capture"), 0) {
                     self.view = View::Capture;
                 }
                 if nav_item(ui, self.view == View::Artistas, "🎨", t(lang, "nav.artists"), self.art_lista.len()) {
@@ -12669,7 +12669,7 @@ impl eframe::App for App {
                 if nav_item(ui, self.view == View::Booru, "🖼", t(lang, "nav.booru"), self.booru_posts.len()) {
                     self.view = View::Booru;
                 }
-                if nav_item(ui, self.view == View::Kemono, "🗂", t(lang, "nav.kemono"), self.kemono_resultados.len()) {
+                if nav_item(ui, self.view == View::Kemono, "📂", t(lang, "nav.kemono"), self.kemono_resultados.len()) {
                     self.view = View::Kemono;
                 }
                 if nav_item(ui, self.view == View::Torrents, "🌀", t(lang, "nav.torrents"), self.torrents.len()) {
@@ -13844,7 +13844,7 @@ impl App {
                                             }
                                             if carrusel && !pos.is_empty() {
                                                 ui.label(
-                                                    RichText::new(format!("❏ {pos}"))
+                                                    RichText::new(format!("🗐 {pos}"))
                                                         .size(9.5)
                                                         .color(CYAN()),
                                                 );
@@ -15827,7 +15827,7 @@ impl App {
                         .show_ui(ui, |ui| {
                             // Firefox primero: es el único no afectado por App-Bound Encryption
                             for b in ["firefox", "chrome", "edge", "brave", "opera", "vivaldi", "chromium"] {
-                                let label = if b == "firefox" { "firefox  ✓" } else { b };
+                                let label = if b == "firefox" { "firefox  ✔" } else { b };
                                 ui.selectable_value(&mut self.settings.cookies_browser, b.to_string(), label);
                             }
                         });
@@ -15899,7 +15899,7 @@ impl App {
                     }
                 }
                 if !self.settings.user_agent.is_empty() {
-                    ui.label(RichText::new("✓").size(13.0).color(GREEN()));
+                    ui.label(RichText::new("✔").size(13.0).color(GREEN()));
                 }
             });
             ui.label(RichText::new(t(lang, "set.ua_note")).size(11.5).color(MUTED()));
@@ -16375,6 +16375,62 @@ mod tests {
     /// `engine_for_url` —yt-dlp— y un perfil entero de fotos se guardaba como
     /// vídeos `.mp4` (y en disco, como `.unknown_video`, que es el marcador de
     /// yt-dlp para un formato cuya extensión no conoce).
+    /// Todo símbolo de los textos de la interfaz tiene que estar en las
+    /// fuentes que trae egui: uno que falta se pinta como un cuadrado vacío.
+    /// Así estuvieron 🧲 en la pestaña Capturar, 🗂 en la de Kemono, ❏ en los
+    /// carruseles de la rejilla, 🧹 en dos botones y ✓ en siete textos. Lo
+    /// chino y japonés queda fuera: para eso se carga una fuente CJK del
+    /// sistema (`load_cjk_font`).
+    #[test]
+    fn los_simbolos_de_la_interfaz_existen_en_las_fuentes_de_egui() {
+        use ab_glyph::Font as _;
+        let defs = egui::FontDefinitions::default();
+        let fuentes: Vec<ab_glyph::FontRef<'_>> = defs
+            .font_data
+            .values()
+            .filter_map(|d| ab_glyph::FontRef::try_from_slice_and_index(&d.font, d.index).ok())
+            .collect();
+        assert!(fuentes.len() >= 3, "egui trae sus fuentes");
+        let es_cjk = |c: char| matches!(c as u32, 0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF);
+        let mut faltan = std::collections::BTreeSet::new();
+        for (nombre, texto) in [("i18n.rs", include_str!("i18n.rs")), ("main.rs", include_str!("main.rs"))] {
+            // Solo el código de la aplicación: las pruebas no se pintan.
+            let codigo = texto.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(texto);
+            for (n, linea) in codigo.lines().enumerate() {
+                if linea.trim_start().starts_with("//") {
+                    continue;
+                }
+                for c in caracteres_de_literales(linea) {
+                    if (c as u32) >= 0x2190 && !es_cjk(c) && !fuentes.iter().any(|f| f.glyph_id(c).0 != 0) {
+                        faltan.insert(format!("{c} (U+{:04X}) en {nombre}:{}", c as u32, n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            faltan.is_empty(),
+            "símbolos sin glifo en las fuentes de egui:\n{}",
+            faltan.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Los caracteres que hay dentro de los literales `"…"` de una línea.
+    fn caracteres_de_literales(linea: &str) -> Vec<char> {
+        let mut dentro = false;
+        let mut escapado = false;
+        let mut out = Vec::new();
+        for c in linea.chars() {
+            match (dentro, escapado, c) {
+                (true, true, _) => escapado = false,
+                (true, false, '\\') => escapado = true,
+                (_, false, '"') => dentro = !dentro,
+                (true, false, c) => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// Bilibili y NicoNico: los errores con causa conocida llevan una pista
     /// que dice qué hacer, y lo que no se reconoce no inventa ninguna.
     #[test]

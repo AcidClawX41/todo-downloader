@@ -428,6 +428,7 @@ does not.
 
 ## Smaller things
 
+- **Icons that could not be drawn.** egui's bundled fonts have no glyph for 🧲, 🗂, 🧹, ❏ or ✓, and the CJK fallback the app loads from the system does not reliably cover them (WenQuanYi Zen Hei covers none of the five, and emoji like 🧲 are in no CJK font), so the Capture and Kemono tabs, the carousel marker of the grid, two buttons and the «installed ✓» texts could show an empty box. They now use 📡, 📂, 🗑, 🗐 and ✔, which egui draws itself, and a test checks every symbol of the interface texts against egui's own fonts.
 - The supported-sites panel in Profile lists Kemono and Coomer, and the note
   under the URL field explains the 50-post batches when one of their links is
   pasted.
