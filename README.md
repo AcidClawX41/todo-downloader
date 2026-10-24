@@ -42,7 +42,7 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 **Also in v1.7.0:**
 
 - **X (Twitter), Facebook and Bluesky profiles** — browsed with previews, like Instagram: analyze, see each file's resolution and type, and queue only what you want.
-- **Threads, at full resolution** — no extractor covers it anywhere, and Meta signs its CDN links so a thumbnail cannot be rewritten into the original. The userscript reads the responses the page itself receives, takes the largest of `image_versions2.candidates` and `video_versions`, and sends them to the Profile grid.
+- **Threads, at full resolution** — no extractor covers it anywhere, and Meta signs its CDN links so a thumbnail cannot be rewritten into the original. A post pasted into *Profile* is read natively, without signing in: the page itself carries its media when requested the way a browser navigates. Of a profile, Threads shows visitors only its first posts; for the whole profile, the userscript reads the responses the page receives in your own browser session and sends them to the same Profile grid.
 - **Routing now compares hosts, not substrings** — `x.com` is inside `linux.com`, `netflix.com` and `vox.com`, so adding X meant fixing the routing first.
 - **A Supported sites panel** in the Profile tab, in your language: which sites give a grid, which need a session, which are not supported.
 - **A Stop button for the listing** — and *Clear list* now stops it too, killing the process instead of leaving it working for a list you just emptied.
@@ -71,6 +71,10 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Hotfix: Instagram's empty list.** `[]` with exit code 0 is what gallery-dl did before 1.32.17 when Instagram rejected its query. *Settings → Engines* now shows the version in use and the latest one, and an empty Instagram listing says to update before it says to check the session.
 - **Hotfix: Instagram and X.** Listings were cut at five minutes from start-up, silently, even while results were arriving; the limit is now inactivity, a timeout is reported, and rate-limit waits («Waiting for 15 minutes…») are shown instead of looking like a hang. A list cut short by an error says it may be incomplete. Instagram videos are listed as direct MP4s instead of gallery-dl's internal `ytdl:` token, which could not be downloaded from the grid. X errors get specific advice (session cookie of `.x.com`, protected or locked account, outdated gallery-dl), now in listings too, and X videos show the resolution of the file actually downloaded.
 - **Hotfix: Weibo and Threads.** Weibo listings carry the whole post nested in `status`, and every tile came out without post, author or carousel position, with the CDN link as its "page": a video whose signed link had expired (they last about an hour) was retried with the same dead link. Tiles now group by post (`3/9`), use Weibo's own 360-px thumbnail instead of the multi-megabyte original, show a cover for videos and Live Photos, and an expired link is retried from the post, fetching only that file (`--range`) on Weibo and Instagram. A Live Photo's `.mov` was routed to gallery-dl, which has no extractor for it; it now downloads directly. Threads videos served from extensionless Meta URLs were saved as `.jpg`; they are `.mp4`, and carousels show their position. A Douyin or TikTok video post sent to the grid (the default) was saved as its HTML page with a `.jpg` name; it goes to yt-dlp again.
+- **Threads without a browser.** A post pasted into *Profile* (or *Downloads*) is now listed natively, whole, at original resolution and without an account: with the four `Sec-Fetch-*` headers of a real navigation, threads.com serves the post's media in the page itself (without them it serves an error shell with nothing in it). Of a profile, Threads shows visitors only its first posts, so those are listed and the grid points to the capturer for the rest. An expired Threads link is refreshed by reading its post again. The userscript also listens to `/api/graphql`, where Threads sends media when nobody is signed in.
+- **Bilibili works again.** Since 22 October 2026 `bilibili.com/video/<BV>/` answers with a 10 KB shell and the data lives under `/zh-Hans/video/<BV>/`; yt-dlp (2026.10.21 and the nightly of the 23rd) fails every video with *Unable to extract initial state*. The app ships a tiny yt-dlp plugin, loaded only for Bilibili, that requests the right page and leaves everything else to yt-dlp: tested at 1080p AVC + AAC with both the zipapp and the standalone yt-dlp. Known Bilibili and NicoNico errors (anti-bot 412, region lock, premium-only, sign-in) now say what to do, and a sign-in error from any site retries with your cookies.
+- **NicoNico checked end to end**: its videos come as separate encrypted HLS video and audio, so without ffmpeg the app now says so up front instead of yt-dlp's *Requested format is not available*.
+- **Weibo with your account:** valid cookies see everything, expired ones fall back to visitor mode inside gallery-dl, and if the browser's cookies cannot be read at all, the grid listing now retries without them — downloads already did.
 - **Review fixes:** Patreon collections and creators with more than 100 posts now show every batch, not only the last; `?filters[…]` on a creator URL is honoured; an expired Patreon link can no longer be refreshed with another file's URL; pausing a Kemono row pauses it; a `%` before a non-ASCII character in a Kemono URL no longer closes the app.
 - **Hotfix: the Chromium cookie bridge** now uses a reserved `.invalid` URL: the previous one was claimed by gallery-dl's Patreon extractor, which hit Cloudflare and exported nothing. A 60-second read timeout also stops rows from waiting forever on a server that accepts the connection and sends nothing.
 
@@ -295,7 +299,7 @@ from inside your own browser instead. See below.
   - **Douyin** profiles, which no extractor can enumerate.
   - **TikTok** profiles, as an alternative to the API path.
   - **V2PH**, for when the site rate-limits the application. The browser walks the album and hands the URLs over; downloading is unaffected because the image CDN is not the part that pushes back.
-  - **Threads**, which no extractor covers at all — and which cannot be solved by rewriting a thumbnail URL, because Meta signs its CDN links. The script reads the responses the page already received, takes the largest entry of `image_versions2.candidates` and `video_versions`, and sends them to the **Profile** grid with their real resolution. Best installed as a **userscript**: it then hooks in before the page requests anything, and reaches the application on Chrome and Vivaldi.
+  - **Whole Threads profiles**, which no extractor covers — and which cannot be solved by rewriting a thumbnail URL, because Meta signs its CDN links. A single post, and the first posts of a profile, are read natively from *Profile*; for the rest, the script reads the responses the page already received in your session, takes the largest entry of `image_versions2.candidates` and `video_versions`, and sends them to the **Profile** grid with their real resolution. Best installed as a **userscript**: it then hooks in before the page requests anything, and reaches the application on Chrome and Vivaldi.
   
   Chrome blocks pages from reaching `127.0.0.1`, so there the script falls back to saving a JSON file you import from *Downloads → Import TXT/JSON*. Firefox delivers directly.
 - TXT/JSON import and drag-and-drop onto the window.
@@ -387,6 +391,8 @@ cargo test
 | Grab a TikTok profile | **Profile** tab → analyze → select → download |
 | Grab an Instagram/Weibo profile | **Profile** tab → downloaded whole via gallery-dl |
 | Grab a Douyin profile | **Capture** tab → copy script → paste into the browser console (F12) |
+| Grab a Threads post | **Profile** tab → paste `threads.com/@user/post/…` → analyze (no account needed) |
+| Grab a whole Threads profile | **Capture** tab → install the userscript → open the profile → press its button |
 | V2PH keeps returning 403 | **Capture** tab → V2PH script → paste into the album's console |
 | Grab a Bilibili channel | **Profile** tab → paste `space.bilibili.com/UID/video` → analyze |
 | Browse and grab booru art | **Booru** tab → pick a site → tags → select thumbnails → queue |
@@ -443,7 +449,8 @@ Being upfront about these:
 - BitTorrent opens a listening port; your firewall may prompt on first use. Torrent speed limits are applied when the session starts (restart to change them mid-session).
 - **A Hugging Face repository with several precision variants in one folder ticks all of them.** `Comfy-Org/Qwen-Image_ComfyUI` offers eight diffusion models — bf16, fp8_e4m3fn, fp8_hq, fp8mixed, nvfp4 — and only the `.bin`-vs-`.safetensors` and GGUF cases are recognised as alternatives. That listing marks around 260 GB. Use *Select none* and pick.
 - **Multi-connection downloads apply only where the server proves it supports ranges**, and only to heavy files. If a host rate-limits you for opening several, set connections per file to 1.
-- **Bilibili requires ffmpeg**, always — it only serves DASH, so video and audio arrive as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast; requests are spaced out to avoid it.
+- **Bilibili and NicoNico require ffmpeg**, always — both serve video and audio as separate streams that must be merged. The app says so explicitly instead of letting yt-dlp fail cryptically. Bilibili also returns HTTP 412 if channel pagination goes too fast, or to connections its anti-bot control distrusts; requests are spaced out, and a signed-in session usually helps. Bilibili's video pages need the app's yt-dlp plugin since its site change of 22 October 2026, until yt-dlp catches up.
+- **Threads profiles without the capturer** show only the posts Threads shows visitors — the first few. The app deliberately does not send your Meta session from outside the browser: that is the kind of activity Meta flags.
 
 ## Architecture
 
@@ -462,6 +469,8 @@ src/
 ├── torrents.rs   BitTorrent engine facade over librqbit (magnet + .torrent)
 ├── i18n.rs       EN/ES translations — adding languages is trivial
 ├── receiver.rs   Local HTTP receiver (Click'n'Load), 127.0.0.1 only
+├── threads.rs    Threads posts and profiles read natively from the page (no extractor exists)
+├── ytdlp_plugins.rs  yt-dlp plugin written and loaded for Bilibili's new page paths
 └── scripts.rs    Browser console scripts (TikTok, Douyin, V2PH, Threads) with an on-page HUD
 ```
 

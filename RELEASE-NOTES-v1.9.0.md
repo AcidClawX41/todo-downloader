@@ -316,6 +316,90 @@ Photos, 167 files) and against the Threads capturer.
   after the author with the most tiles rather than the first one: a profile
   that started with a retweet was filed under the retweeted account.
 
+### Threads without a browser
+
+Neither gallery-dl (1.33.0-dev) nor yt-dlp (2026.10.21) has a Threads
+extractor, and Meta signs its CDN links, which is why Threads was capture-only.
+Measured on 24 October 2026:
+
+- **A post's page already carries its media.** Requested the way a browser
+  navigates, threads.com puts the post in the HTML: the same
+  `image_versions2`, `video_versions` and `carousel_media` the userscript
+  reads, at original resolution (3072×4096 in the sample). Without the four
+  `Sec-Fetch-*` headers of a navigation it answers `200` with the shell of its
+  error page (`Barcelona404ErrorRoot`) and no media at all; none of the four
+  is enough on its own. Same with curl and with reqwest/rustls.
+- So a **post pasted into Profile** (or Downloads, which now sends it there)
+  is listed natively, without an account: one tile per photo or video, the
+  carousel position, the video's own resolution (`original_width`; its cover
+  is 640 px), and the cover as thumbnail. Only that post: the page also
+  carries replies and "related" posts of other accounts.
+- **Of a profile, Threads shows visitors only its first posts** (its query
+  asks for `first: 4`, and scrolling asks you to sign in instead of loading
+  more). Those are listed, and the grid says so and points to the capturer,
+  which reads the whole profile with your own browser session. Sending your
+  Meta session from outside the browser is deliberately not done: that is
+  the kind of activity Meta flags, and the account is yours.
+- Threads videos are a progressive MP4 with audio, served from paths without
+  an extension (`/o1/v/t16/f2/m84/AQ…`), up to 720p in the sample; the 1080p
+  rendition exists only as separate DASH video and audio.
+- **An expired Threads link is refreshed natively** by reading its post
+  again and matching the file by its path, which does not change when Meta
+  re-signs it. No external engine is tried: none has an extractor, and
+  yt-dlp's *Unsupported URL* only hid the real error.
+- **The userscript now also listens to `/api/graphql`**, which is where a
+  Threads page without a session requests its media; it only listened to
+  `/graphql/query` and `/api/v1/`.
+
+### Bilibili: working again despite its site change
+
+Since 22 October 2026, `www.bilibili.com/video/<BV>/` answers with a 10 KB
+shell without `window.__INITIAL_STATE__`; a script in that shell jumps to
+`/zh-Hans/video/<BV>/`, which carries the 200 KB page with the data (seen in
+Chromium: the first document is the shell, the second the page). yt-dlp
+2026.10.21 and the nightly of 23 October request the old path and fail every
+video with *Unable to extract initial state*. It is not TLS fingerprinting:
+neither `--impersonate` nor curl_cffi posing as Chrome, Safari or Firefox
+helps, and plain curl gets the full page from `/zh-Hans/video/`.
+
+- The app writes a **tiny yt-dlp plugin** to its data folder and loads it with
+  `--plugin-dirs` (plus `default`, so the user's own plugins still load),
+  only for Bilibili links. It subclasses yt-dlp's Bilibili extractor to request
+  the page with the language segment and accept that URL; formats, DASH and
+  everything else are yt-dlp's own code. Tested with both the zipapp `yt-dlp`
+  (what the app installs on Linux and macOS) and the standalone binary (the
+  same kind as `yt-dlp.exe`): 1080p AVC + AAC, merged by ffmpeg, 19 MB for a
+  170 s video. When yt-dlp catches up, requesting `/zh-Hans/` keeps working;
+  a plugin yt-dlp cannot import is reported and skipped (checked).
+- **Errors with a known cause now say what to do**, in Spanish or English:
+  the anti-bot block (412/352) that channel listings hit, region-locked or
+  deleted videos, premium-only (大会员) videos, sign-in, an outdated yt-dlp.
+- **Sign-in errors from any site now retry with your cookies.** yt-dlp
+  appends the same FAQ link to every "you need an account" error; it was not
+  among the phrases the escalation looked for, so Bilibili and NicoNico videos
+  that needed the session never got it.
+
+### NicoNico, checked end to end
+
+`nicovideo.jp/watch/sm9` downloads with the app's arguments: H.264 + AAC,
+320 s, merged into one MP4. Since NicoNico moved to DMS it publishes only
+separate video and audio tracks, in AES-128 HLS, so without ffmpeg yt-dlp
+answers *Requested format is not available*; the app now says *NicoNico
+requires ffmpeg* up front, as it already did for Bilibili. Region locks,
+sign-in, sensitive-content settings and deleted videos get their own hint.
+
+### Weibo with your account
+
+Tested with a Weibo `cookies.txt`, like one exported from an account:
+gallery-dl uses it and skips visitor mode; with an invalid `SUB` cookie it
+detects it and falls back to visitor mode on its own, so expired account
+cookies still list public profiles. The one case that failed was cookies the
+browser would not let anyone read (its database locked or without
+permission): downloads already retried without them, the grid listing did
+not and showed an error. It now retries without them too, with the same
+notice. Weibo's feed tab needs a real session; the album, tried first,
+does not.
+
 ### Found in an independent review of all the new code
 
 - **Patreon collections and creators with more than 100 posts showed only the

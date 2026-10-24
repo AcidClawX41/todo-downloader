@@ -26,8 +26,10 @@ mod kemono;
 mod mega;
 mod receiver;
 mod scripts;
+mod threads;
 mod torrents;
 mod v2ph;
+mod ytdlp_plugins;
 use i18n::{t, Lang};
 
 use std::path::PathBuf;
@@ -948,6 +950,13 @@ fn ffmpeg_location_arg(ff: &str) -> Option<String> {
 /// extractor de notas y gallery-dl no tiene extractor de Douyin).
 fn fallback_engine(page_url: &str) -> Option<Engine> {
     let u = page_url.to_ascii_lowercase();
+
+    // Threads no tiene extractor en ningún motor: yt-dlp solo diría
+    // «Unsupported URL» y taparía el error real del enlace. Su renovación es
+    // nativa (`threads_url_fresca`).
+    if is_threads(&u) {
+        return None;
+    }
 
     // Douyin: solo los vídeos sueltos tienen extractor; las notas (carruseles
     // de imágenes) no las soporta ninguno de los dos motores.
@@ -2275,6 +2284,11 @@ fn needs_auth_error(msg: &str) -> bool {
         || m.contains("account associated with this")
         || m.contains("http error 401")
         || m.contains("http error 403")
+        // La pista que yt-dlp añade a TODO error de «hace falta cuenta», sea
+        // del sitio que sea (`raise_login_required`): NicoNico, Bilibili…
+        // Ninguna de las frases de arriba la cubría, así que esos vídeos no
+        // llegaban a reintentarse con las cookies configuradas.
+        || m.contains("how-do-i-pass-cookies-to-yt-dlp")
         // Douyin. No dice «login», dice que la sesión de visitante caducó, así
         // que ninguna de las frases de arriba lo pillaba y la descarga moría
         // sin llegar a reintentar con las cookies que el usuario ya tenía
@@ -3750,6 +3764,32 @@ impl App {
         ));
     }
 
+    /// Lee un post o un perfil de Threads sin navegador (ver `threads.rs`) y
+    /// lo pone en la rejilla. Lo que Threads no enseña sin sesión —el resto
+    /// de un perfil— se avisa y se deja al userscript.
+    fn explorar_threads(&mut self, url: String) {
+        let url = threads::clasificar(&url).map(|d| d.url_web()).unwrap_or(url);
+        self.profile_url = url.clone();
+        self.profile_entries.clear();
+        self.profile_thumbs.clear();
+        self.profile_pending.clear();
+        self.profile_failed.clear();
+
+        self.gallery_url = url.clone();
+        self.gallery_items.clear();
+        self.gallery_error.clear();
+        self.gallery_aviso.clear();
+        self.gallery_page = 1;
+        self.gallery_loading = true;
+        self.gallery_flujo = false;
+        self.gallery_prefetch_left = 0;
+        self.gallery_prefetching = false;
+        self.gallery_epoch += 1;
+        let ep = self.gallery_epoch;
+        self.gallery_cancel.store(false, Ordering::Relaxed);
+        self.rt.spawn(browse_threads(self.client.clone(), url, self.tx.clone(), ep, self.gallery_cancel.clone()));
+    }
+
     /// Filtra la lista de creadores ya descargada con lo escrito en la
     /// pestaña. Si la lista del sitio aún no está, la pide primero y vuelve
     /// a entrar aquí cuando llegue.
@@ -3853,6 +3893,15 @@ impl App {
             self.profile_url = url.to_string();
             self.view = View::Profile;
             self.toast(t(self.settings.lang, "queue.hf_repo"));
+            return;
+        }
+        // Threads, igual: la PÁGINA de un post o de un perfil no es un
+        // archivo, y ningún motor externo la entiende —yt-dlp respondía
+        // «Unsupported URL»—. Se lee en Perfil, donde se elige qué bajar.
+        if threads::clasificar(url).is_some() {
+            self.profile_url = url.to_string();
+            self.view = View::Profile;
+            self.toast(t(self.settings.lang, "queue.threads"));
             return;
         }
         let canonical;
@@ -4871,6 +4920,16 @@ async fn download_task(
         // sería esperarse a uno mismo.
         if patreon_post_id(&spec.page_url).is_some() {
             if let Some(nueva) = patreon_url_fresca(&spec).await {
+                let spec2 = DlSpec { url: nueva, page_url: String::new(), ..spec.clone() };
+                drop(_permit);
+                Box::pin(download_task(client, spec2, sem, tx, ytdlp, galdl, cyberdrop)).await;
+                return;
+            }
+        }
+        // Threads, igual: el enlace nuevo sale de leer otra vez su post, que
+        // es lo que hizo la rejilla. Ningún motor externo tiene extractor.
+        if is_threads(&spec.page_url) {
+            if let Some(nueva) = threads_url_fresca(&client, &spec).await {
                 let spec2 = DlSpec { url: nueva, page_url: String::new(), ..spec.clone() };
                 drop(_permit);
                 Box::pin(download_task(client, spec2, sem, tx, ytdlp, galdl, cyberdrop)).await;
@@ -6104,6 +6163,82 @@ async fn kemono_get(client: &reqwest::Client, url: &str) -> Result<String, Strin
 /// para saber el nombre del creador —que es el autor de cada ficha y la
 /// carpeta de destino— y cuántas publicaciones tiene, que se enseña como
 /// aviso para que se sepa cuántas veces hay que pulsar «Cargar más».
+/// Pide una página de Threads como la pide un navegador —con las cabeceras
+/// `Sec-Fetch-*`, sin las cuales llega la carcasa de error— y la lee.
+///
+/// El error vuelve ya traducido: quien llama solo lo enseña.
+async fn threads_leer(client: &reqwest::Client, destino: &threads::Destino) -> Result<threads::Lectura, String> {
+    let mut req = client
+        .get(destino.url_web())
+        .header(reqwest::header::USER_AGENT, UA)
+        .timeout(Duration::from_secs(40));
+    for (k, v) in threads::CABECERAS {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send().await.map_err(|e| format!("Threads: {e}"))?;
+    let estado = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return Err(i18n::threads_http(i18n::lang(), estado));
+    }
+    let html = resp.text().await.map_err(|e| format!("Threads: {e}"))?;
+    threads::leer_html(&html, destino).ok_or_else(|| i18n::threads_no_servida(i18n::lang()))
+}
+
+/// Lista un post o un perfil de Threads en la rejilla (ver `threads.rs`).
+async fn browse_threads(
+    client: reqwest::Client,
+    url: String,
+    tx: UnboundedSender<Ev>,
+    epoch: u64,
+    cancelar: Arc<AtomicBool>,
+) {
+    let lang = i18n::lang();
+    let Some(destino) = threads::clasificar(&url) else {
+        let _ = tx.send(Ev::GalleryError(t(lang, "profile.threads_unsupported").to_string(), epoch));
+        let _ = tx.send(Ev::GalleryDone(epoch));
+        return;
+    };
+    let resultado = threads_leer(&client, &destino).await;
+    if !cancelar.load(Ordering::Relaxed) {
+        match resultado {
+            Ok(lectura) => {
+                // El aviso va ANTES que la lista, como en Kemono: la rejilla
+                // lo pinta encima en cuanto llegan los archivos.
+                let aviso = match &destino {
+                    threads::Destino::Perfil { usuario } => Some(i18n::threads_perfil(
+                        lang,
+                        usuario,
+                        lectura.publicaciones,
+                        lectura.items.len(),
+                        lectura.hay_mas,
+                    )),
+                    threads::Destino::Post { .. } if lectura.items.is_empty() => {
+                        Some(t(lang, "threads.post_texto").to_string())
+                    }
+                    threads::Destino::Post { .. } => None,
+                };
+                if let Some(a) = aviso {
+                    let _ = tx.send(Ev::GalleryNotice(a, epoch));
+                }
+                let _ = tx.send(Ev::GalleryResults(lectura.items, 1, epoch));
+            }
+            Err(e) => {
+                let _ = tx.send(Ev::GalleryError(e, epoch));
+            }
+        }
+    }
+    let _ = tx.send(Ev::GalleryDone(epoch));
+}
+
+/// El enlace nuevo de un archivo de Threads cuya firma ha caducado: se vuelve
+/// a leer su post y se busca el mismo archivo (ver `threads::url_fresca`).
+async fn threads_url_fresca(client: &reqwest::Client, spec: &DlSpec) -> Option<String> {
+    let destino = threads::clasificar(&spec.page_url)?;
+    let threads::Destino::Post { codigo, .. } = &destino else { return None };
+    let lectura = threads_leer(client, &destino).await.ok()?;
+    threads::url_fresca(&lectura, &spec.url, codigo, spec.num_en_post)
+}
+
 async fn browse_kemono(
     client: reqwest::Client,
     url: String,
@@ -8571,6 +8706,11 @@ fn is_bilibili(url: &str) -> bool {
     u.contains("bilibili.com") || u.contains("b23.tv")
 }
 
+/// ¿La URL es de NicoNico? (incluye el acortador nico.ms)
+fn is_niconico(url: &str) -> bool {
+    host_of(url).is_some_and(|h| host_matches(&h, "nicovideo.jp") || host_matches(&h, "nico.ms"))
+}
+
 async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: Option<&str>) {
     let Some(program) = program else {
         let _ = tx.send(Ev::Status(
@@ -8583,11 +8723,27 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
     // Bilibili solo sirve DASH (vídeo y audio SIEMPRE separados): sin ffmpeg
     // no hay forma de obtener un archivo completo. Mejor un error claro ahora
     // que el críptico «Requested merging of multiple formats» de yt-dlp.
-    if is_bilibili(url) && spec.ffmpeg.is_none() {
-        let msg = msg_lang(
+    //
+    // NicoNico, igual desde su paso a DMS: solo publica pistas de vídeo y de
+    // audio por separado, en HLS cifrado con AES-128. Sin ffmpeg, el selector
+    // sin fusión (`b`) no encuentra nada y yt-dlp responde «Requested format is
+    // not available» (medido con sm9, 24/10/2026).
+    let falta_ffmpeg = if spec.ffmpeg.is_some() {
+        None
+    } else if is_bilibili(url) {
+        Some(msg_lang(
             "Bilibili necesita ffmpeg (Ajustes → instalar ffmpeg)",
             "Bilibili requires ffmpeg (Settings → install ffmpeg)",
-        );
+        ))
+    } else if is_niconico(url) {
+        Some(msg_lang(
+            "NicoNico necesita ffmpeg: publica el vídeo y el audio por separado (Ajustes → instalar ffmpeg)",
+            "NicoNico requires ffmpeg: it publishes video and audio separately (Settings → install ffmpeg)",
+        ))
+    } else {
+        None
+    };
+    if let Some(msg) = falta_ffmpeg {
         let _ = tx.send(Ev::ErrorDetail(spec.id, msg.into()));
         let _ = tx.send(Ev::Status(spec.id, Status::Error(msg.into())));
         return;
@@ -8671,6 +8827,18 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         base.push(FORMAT_SORT_BITRATE.into());
     }
 
+    // Bilibili cambió su web el 22/10/2026 y yt-dlp aún no lo sigue: el plugin
+    // propio pide la página que sí trae los datos (ver `ytdlp_plugins.rs`).
+    // Solo para Bilibili: al resto no le hace falta, y así un plugin que algún
+    // día no cargara no ensuciaría los errores de otros sitios.
+    // Si no se puede escribir, la descarga se intenta igual, y el error de
+    // yt-dlp, con su pista (`pista_ytdlp`), dirá por qué.
+    if is_bilibili(url) {
+        if let Ok(dir) = ytdlp_plugins::preparar(&ytdlp_dir().join("plugins")) {
+            base.extend(ytdlp_plugins::args(&dir));
+        }
+    }
+
     // Indicar a yt-dlp dónde está nuestro ffmpeg integrado
     if let Some(dir) = spec.ffmpeg.as_deref().and_then(ffmpeg_location_arg) {
         base.push("--ffmpeg-location".into());
@@ -8737,7 +8905,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
             Ok(r) if r.ok => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Done));
             }
-            Ok(r) => report_ytdlp_error(spec.id, &err, r.stderr, &tmpl.to_string_lossy(), tx),
+            Ok(r) => report_ytdlp_error(spec.id, url, &err, r.stderr, &tmpl.to_string_lossy(), tx),
             Err(e) => {
                 let _ = tx.send(Ev::Status(spec.id, Status::Error(format!("yt-dlp: {e}"))));
             }
@@ -8745,7 +8913,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
         return;
     }
 
-    report_ytdlp_error(spec.id, "", err, &tmpl.to_string_lossy(), tx);
+    report_ytdlp_error(spec.id, url, "", err, &tmpl.to_string_lossy(), tx);
 }
 
 /// Reporta un fallo de yt-dlp conservando la salida completa.
@@ -8765,6 +8933,7 @@ async fn run_ytdlp(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: 
 /// —es una ruta de descarga del propio usuario— así que se enseña entera.
 fn report_ytdlp_error(
     id: u64,
+    url: &str,
     first: &str,
     last_out: String,
     salida: &str,
@@ -8776,7 +8945,9 @@ fn report_ytdlp_error(
         .find(|l| l.trim_start().starts_with("ERROR:"))
         .or_else(|| last_out.lines().rev().find(|l| !l.trim().is_empty()))
         .unwrap_or("error yt-dlp");
-    let short: String = brief.trim().chars().take(60).collect();
+    // La pista, si la hay, es lo que se lee en la fila: dice qué hacer.
+    let pista = pista_ytdlp(url, &format!("{first}\n{last_out}"));
+    let short: String = pista.unwrap_or(brief.trim()).chars().take(60).collect();
 
     let full = if first.is_empty() {
         last_out
@@ -8784,12 +8955,96 @@ fn report_ytdlp_error(
         format!("--- intento 1 ---\n{first}\n--- intento 2 ---\n{last_out}")
     };
     let full = format!(
-        "{full}\n\n{}\n  {salida}\n  ({} caracteres)",
+        "{}{full}\n\n{}\n  {salida}\n  ({} caracteres)",
+        pista.map(|p| format!("{p}\n\n")).unwrap_or_default(),
         msg_lang("Nombre de salida que se intentó:", "Output name it tried:"),
         salida.chars().count()
     );
     let _ = tx.send(Ev::ErrorDetail(id, full));
     let _ = tx.send(Ev::Status(id, Status::Error(short)));
+}
+
+/// Qué hacer ante los errores de yt-dlp que tienen una causa conocida en
+/// Bilibili y NicoNico. `None` = el mensaje de yt-dlp ya es lo mejor que hay.
+///
+/// Los textos que se buscan son los de yt-dlp 2026.10.21 (`bilibili.py`,
+/// `niconico.py`, `common.py`): cambian poco, y si cambian, se pierde la
+/// pista pero el error de yt-dlp se sigue viendo entero debajo.
+fn pista_ytdlp(url: &str, err: &str) -> Option<&'static str> {
+    let e = err.to_ascii_lowercase();
+    if is_bilibili(url) {
+        // Un yt-dlp del sistema anterior a `--plugin-dirs` rechaza la opción
+        // con la que se carga el plugin de Bilibili.
+        if e.contains("no such option") && e.contains("plugin-dirs") {
+            return Some(msg_lang(
+                "Tu yt-dlp es demasiado antiguo para Bilibili: actualízalo en Ajustes → Motores.",
+                "Your yt-dlp is too old for Bilibili: update it in Settings → Engines.",
+            ));
+        }
+        // Con paréntesis: un «412» suelto puede estar dentro del BV del vídeo.
+        if e.contains("blocked by server")
+            || e.contains("rejected by server")
+            || e.contains("(412)")
+            || e.contains("(352)")
+            || e.contains("http error 412")
+            || e.contains("exceeded the rate limit")
+        {
+            return Some(msg_lang(
+                "Bilibili ha bloqueado temporalmente las peticiones (su control antibots: 412/352). Espera unos minutos; con tu sesión del navegador (Ajustes → Cookies del navegador) suele dejar de pasar.",
+                "Bilibili is temporarily blocking requests (its anti-bot control: 412/352). Wait a few minutes; with your browser session (Settings → Browser cookies) it usually stops happening.",
+            ));
+        }
+        if e.contains("geo-restricted") || e.contains("geo restriction") || e.contains("may be deleted") {
+            return Some(msg_lang(
+                "Bilibili dice que el vídeo no existe para ti: se ha borrado o solo se ve desde China (bloqueo regional).",
+                "Bilibili says the video does not exist for you: it was deleted or can only be watched from China (region lock).",
+            ));
+        }
+        if e.contains("premium members only") || e.contains("supporter-only") || e.contains("purchase") {
+            return Some(msg_lang(
+                "Ese vídeo es de pago o para miembros premium (大会员): hace falta una cuenta que lo tenga, con su sesión en Ajustes → Cookies del navegador.",
+                "That video is paid or for premium members (大会员): it needs an account that has it, with its session in Settings → Browser cookies.",
+            ));
+        }
+        if e.contains("unable to extract initial state") {
+            return Some(msg_lang(
+                "Bilibili ha vuelto a cambiar su web y yt-dlp no la entiende. Actualiza yt-dlp (Ajustes → Motores); la aplicación ya corrige el cambio del 22/10/2026.",
+                "Bilibili has changed its site again and yt-dlp cannot read it. Update yt-dlp (Settings → Engines); the application already handles the change of 22/10/2026.",
+            ));
+        }
+        if e.contains("how-do-i-pass-cookies-to-yt-dlp") {
+            return Some(msg_lang(
+                "Bilibili pide iniciar sesión para ese vídeo (o para su mejor calidad): abre bilibili.com en el navegador elegido en Ajustes, o carga un cookies.txt.",
+                "Bilibili asks you to sign in for that video (or for its best quality): open bilibili.com in the browser selected in Settings, or load a cookies.txt.",
+            ));
+        }
+    }
+    if is_niconico(url) {
+        if e.contains("geo restriction") || e.contains("not available from your location") {
+            return Some(msg_lang(
+                "NicoNico solo deja ver ese vídeo desde Japón (bloqueo regional).",
+                "NicoNico only lets that video be watched from Japan (region lock).",
+            ));
+        }
+        if e.contains("sensitive content setting") {
+            return Some(msg_lang(
+                "Ese vídeo de NicoNico es contenido sensible: actívalo en la configuración de tu cuenta y usa su sesión (Ajustes → Cookies del navegador).",
+                "That NicoNico video is sensitive content: enable it in your account settings and use its session (Settings → Browser cookies).",
+            ));
+        }
+        if e.contains("how-do-i-pass-cookies-to-yt-dlp") || e.contains("logged in") || e.contains("login is required") {
+            return Some(msg_lang(
+                "NicoNico pide iniciar sesión para ese vídeo: entra en nicovideo.jp en el navegador elegido en Ajustes, o carga un cookies.txt.",
+                "NicoNico asks you to sign in for that video: sign in to nicovideo.jp in the browser selected in Settings, or load a cookies.txt.",
+            ));
+        }
+        // «has been deleted», no «deleted» a secas: ffmpeg dice «Deleting
+        // original file» al fusionar, y eso no es un vídeo borrado.
+        if e.contains("has been deleted") || e.contains("video was deleted") || e.contains("削除") {
+            return Some(msg_lang("Ese vídeo de NicoNico se ha borrado.", "That NicoNico video has been deleted."));
+        }
+    }
+    None
 }
 
 /// Descarga un enlace público de MEGA con el motor nativo de `src/mega`.
@@ -9492,6 +9747,25 @@ async fn browse_gallery_hop(
             Err(e) => Accion::Fallo(motivo(&e)),
         }
     };
+
+    // Cookies ilegibles (la base de datos del navegador bloqueada o sin
+    // permiso, el llavero que no responde…): la DESCARGA ya reintentaba sin
+    // ellas y el LISTADO no, así que quien tenía la cuenta configurada veía un
+    // error donde un visitante veía la lista. Weibo y X listan lo público sin
+    // sesión. Mismo aviso y misma desactivación que en las descargas.
+    if matches!(accion, Accion::Fallo(_))
+        && !cookies_next.is_empty()
+        && is_cookie_error(stderr)
+        && hops < MAX_GALLERY_HOPS
+    {
+        let _ = tx.send(Ev::CookieFallback);
+        let _ = tx.send(Ev::DisableCookies);
+        Box::pin(browse_gallery_hop(
+            program, url, page, per_page, Vec::new(), tx, hops + 1, epoch, cancelar,
+        ))
+        .await;
+        return;
+    }
 
     // Si el muro de fotos no da nada (cuenta sin álbum poblado), se prueba el
     // feed antes de rendirse, aun sabiendo que su resolución es menor.
@@ -11127,7 +11401,13 @@ async fn analyze_profile(program: String, url: String, extra_args: Vec<String>, 
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr);
             let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("error yt-dlp");
-            let _ = tx.send(Ev::ProfileError(last.chars().take(120).collect()));
+            // El 412 de Bilibili al listar un perfil es su control antibots,
+            // y en bruto no le dice a nadie qué hacer.
+            let msg = match pista_ytdlp(&url, &err) {
+                Some(p) => format!("{p}\n\n{}", last.chars().take(160).collect::<String>()),
+                None => last.chars().take(120).collect(),
+            };
+            let _ = tx.send(Ev::ProfileError(msg));
         }
         Err(e) => {
             let _ = tx.send(Ev::ProfileError(e.to_string()));
@@ -13036,7 +13316,12 @@ impl App {
             if is_patreon_home(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.patreon_home")).size(11.5).color(AMBER()));
             } else if is_threads(&self.profile_url) {
-                ui.label(RichText::new(t(lang, "profile.threads_note")).size(11.5).color(AMBER()));
+                ui.label(RichText::new(t(lang, "profile.threads_note")).size(11.5).color(CYAN()));
+                // El perfil completo necesita la sesión del navegador: a un clic.
+                if ui.small_button(t(lang, "profile.threads_capturador")).clicked() {
+                    self.view = View::Capture;
+                    self.capture_site = 3;
+                }
             } else if is_douyin_profile(&self.profile_url) {
                 ui.label(RichText::new(t(lang, "profile.douyin_note")).size(11.5).color(RED()));
             } else if es_huggingface(&self.profile_url)
@@ -13104,12 +13389,17 @@ impl App {
                         hf::Destino::Otro => self.toast(t(lang, "profile.hf_otro")),
                     }
                 } else if is_threads(&url) {
-                    // Mandarlo a gallery-dl solo produciría «Unsupported URL»,
-                    // que es cierto pero no le dice a nadie qué hacer. La ruta
-                    // que sí funciona está a un clic, así que se dice.
-                    self.view = View::Capture;
-                    self.capture_site = 3;
-                    self.toast(t(lang, "profile.threads_unsupported"));
+                    // Un post se lee entero, y de un perfil lo que Threads
+                    // enseña sin sesión: ver `threads.rs`. Una URL de Threads
+                    // que no es ni lo uno ni lo otro —la portada, una
+                    // búsqueda— no tiene nada que leer: al capturador.
+                    if threads::clasificar(&url).is_some() {
+                        self.explorar_threads(url.clone());
+                    } else {
+                        self.view = View::Capture;
+                        self.capture_site = 3;
+                        self.toast(t(lang, "profile.threads_unsupported"));
+                    }
                 } else if is_douyin_profile(&url) {
                     self.toast(t(lang, "profile.douyin_unsupported"));
                 } else if v2ph::is_v2ph(&url) {
@@ -16085,6 +16375,51 @@ mod tests {
     /// `engine_for_url` —yt-dlp— y un perfil entero de fotos se guardaba como
     /// vídeos `.mp4` (y en disco, como `.unknown_video`, que es el marcador de
     /// yt-dlp para un formato cuya extensión no conoce).
+    /// Bilibili y NicoNico: los errores con causa conocida llevan una pista
+    /// que dice qué hacer, y lo que no se reconoce no inventa ninguna.
+    #[test]
+    fn las_pistas_de_bilibili_y_niconico() {
+        let bili = "https://www.bilibili.com/video/BV1RbHK6AEei";
+        let nico = "https://www.nicovideo.jp/watch/sm9";
+        let p = |u: &str, e: &str| pista_ytdlp(u, e).unwrap_or("");
+        assert!(p(bili, "ERROR: [BilibiliSpaceVideo] 1: Request is blocked by server (412), please wait").contains("412"));
+        assert!(p(bili, "ERROR: [BiliBili] x: This video may be deleted or geo-restricted.").contains("China"));
+        assert!(p(bili, "ERROR: [BiliBili] x: Unable to extract initial state; please report").contains("yt-dlp"));
+        assert!(p(bili, "ERROR: x: This video is for premium members only. Use --cookies-from-browser").contains("大会员"));
+        assert!(p(nico, "ERROR: [niconico] sm1: This video is not available from your location due to geo restriction").contains("Jap"));
+        assert!(p(nico, "ERROR: [niconico] sm1: Sensitive content setting must be enabled").contains("sensible") || p(nico, "Sensitive content setting must be enabled").contains("sensitive"));
+        assert!(!p(nico, "ERROR: Login is required to access age-restricted content. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how").is_empty());
+        // Un «412» dentro del identificador del vídeo no es un bloqueo.
+        assert_eq!(pista_ytdlp("https://www.bilibili.com/video/BV1x412y7abc", "ERROR: [BiliBili] 1x412y7abc: Some other error"), None);
+        // Fusionar borra los temporales: eso no es un vídeo borrado.
+        assert_eq!(pista_ytdlp(nico, "Deleting original file x.f1.mp4"), None);
+        assert!(!p(bili, "yt-dlp: error: no such option: --plugin-dirs").is_empty());
+        // Y otros sitios no reciben pistas de estos dos.
+        assert_eq!(pista_ytdlp("https://www.youtube.com/watch?v=x", "Request is blocked by server (412)"), None);
+    }
+
+    #[test]
+    fn niconico_se_reconoce_por_el_host() {
+        assert!(is_niconico("https://www.nicovideo.jp/watch/sm9"));
+        assert!(is_niconico("https://nico.ms/sm9"));
+        assert!(is_niconico("https://sp.nicovideo.jp/watch/sm9"));
+        assert!(!is_niconico("https://nicovideo.jp.atacante.example/watch/sm9"));
+        assert!(!is_niconico("https://www.bilibili.com/video/BV1"));
+        assert_eq!(engine_for_url("https://www.nicovideo.jp/watch/sm9"), Engine::YtDlp);
+        assert_eq!(engine_for_url("https://www.bilibili.com/video/BV1RbHK6AEei"), Engine::YtDlp);
+    }
+
+    /// El error de «hace falta cuenta» de yt-dlp, de cualquier sitio, hace
+    /// que se reintente con las cookies configuradas.
+    #[test]
+    fn el_aviso_de_cuenta_de_yt_dlp_escala_a_cookies() {
+        assert!(needs_auth_error(
+            "ERROR: [niconico] sm1: Login is required to access age-restricted content. Use --cookies, \
+             --cookies-from-browser, --username and --password. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies"
+        ));
+        assert!(!needs_auth_error("ERROR: [niconico] sm1: Requested format is not available"));
+    }
+
     #[test]
     fn las_imagenes_de_x_no_son_video() {
         let u = "https://pbs.twimg.com/media/HPd2NSoWcAAKujc?format=jpg&name=orig";
@@ -16380,6 +16715,38 @@ mod tests {
     /// de la red. Se lanza con `cargo test -- --ignored kemono_api`. Es la
     /// que demuestra que la cabecera `Accept: text/css` sigue valiendo y que
     /// la respuesta —que el servidor manda comprimida— se descomprime sola.
+    /// Threads de verdad, con el mismo `threads_leer` que usa la aplicación:
+    /// un post de vídeo, uno con carrusel y un perfil, sin sesión. Lo que
+    /// comprueba es el contrato que no controla nadie de aquí: que con las
+    /// cabeceras de navegación threads.com sirva las publicaciones en el HTML.
+    /// `cargo test -- --ignored threads_en_vivo`
+    #[test]
+    #[ignore]
+    fn threads_en_vivo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+
+            let d = threads::clasificar("https://www.threads.com/@netflix/post/De1nYC8Eggo").unwrap();
+            let l = threads_leer(&client, &d).await.expect("post de vídeo");
+            assert_eq!(l.items.len(), 1);
+            let v = &l.items[0];
+            assert!(v.is_video && v.ext == "mp4", "{v:?}");
+            assert!(v.width >= 1280, "{}x{}", v.width, v.height);
+
+            let d = threads::clasificar("https://www.threads.com/@nasa/post/Decc755lYhC").unwrap();
+            let l = threads_leer(&client, &d).await.expect("post con carrusel");
+            assert_eq!(l.items.len(), 4, "{:?}", l.items.iter().map(|i| &i.url).collect::<Vec<_>>());
+            assert!(l.items.iter().all(|i| i.count_in_post == 4 && !i.is_video));
+
+            let d = threads::clasificar("https://www.threads.com/@nasa").unwrap();
+            let l = threads_leer(&client, &d).await.expect("perfil");
+            assert!(l.publicaciones >= 1, "{}", l.publicaciones);
+            assert!(l.items.iter().all(|i| i.author == "nasa"));
+            eprintln!("perfil @nasa: {} publicaciones, {} archivos, más: {}", l.publicaciones, l.items.len(), l.hay_mas);
+        });
+    }
+
     #[test]
     #[ignore]
     fn kemono_api_en_vivo() {
@@ -17432,6 +17799,12 @@ Set-Cookie: sesion=SECRETO_CUATRO; Path=/";
     fn is_cookie_error_no_confunde_formato_con_cookies() {
         assert!(is_cookie_error("Failed to decrypt with DPAPI"));
         assert!(is_cookie_error("could not copy the cookie database"));
+        // El fallo fatal de gallery-dl con Chrome abierto en Windows: también
+        // lo detecta el listado de la rejilla, que ahora reintenta sin cookies.
+        assert!(is_cookie_error(
+            "[gallery-dl][error] PermissionError: [Errno 13] Permission denied: \
+             'C:\\Users\\x\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Network\\Cookies'"
+        ));
         assert!(!is_cookie_error("ERROR: Requested format is not available"));
         assert!(!is_cookie_error("ERROR: HTTP Error 403: Forbidden"));
     }

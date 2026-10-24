@@ -320,8 +320,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         // ---------- Vista Perfil ----------
         "profile.title" => entry!("Descargar un perfil completo", "Download a full profile"),
         "profile.subtitle" => entry!(
-            "Perfiles de TikTok, Weibo, Bilibili y V2PH: analiza y elige qué descargar. Instagram, X, Facebook, Pinterest y Bluesky: descarga completa con gallery-dl, y casi todos necesitan cookies. Douyin y Threads: desde la pestaña Capturar; lo de Threads vuelve aquí, a la rejilla.",
-            "TikTok, Weibo, Bilibili and V2PH profiles: analyze and pick what to download. Instagram, X, Facebook, Pinterest and Bluesky: full download via gallery-dl, and most of them need cookies. Douyin and Threads: from the Capture tab — and Threads comes back here, to the grid."
+            "Perfiles de TikTok, Weibo, Bilibili y V2PH: analiza y elige qué descargar. Instagram, X, Facebook, Pinterest y Bluesky: descarga completa con gallery-dl, y casi todos necesitan cookies. Threads: un post se lee aquí mismo, y de un perfil lo que Threads enseña sin sesión; el perfil entero, desde la pestaña Capturar. Douyin: desde la pestaña Capturar.",
+            "TikTok, Weibo, Bilibili and V2PH profiles: analyze and pick what to download. Instagram, X, Facebook, Pinterest and Bluesky: full download via gallery-dl, and most of them need cookies. Threads: a post is read right here, and of a profile, what Threads shows without signing in; the whole profile, from the Capture tab. Douyin: from the Capture tab."
         ),
         "profile.url_label" => entry!("URL DEL PERFIL", "PROFILE URL"),
         "profile.want" => entry!("Quiero descargar:", "I want to download:"),
@@ -357,12 +357,20 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "▸ patreon.com/home is the feed of ALL your active subscriptions. It can queue hundreds of files at once, and there is no listing first: it downloads whole. For a single account, paste that creator's URL. gallery-dl skips posts your account cannot see on its own."
         ),
         "profile.threads_unsupported" => entry!(
-            "Threads no lo lista ningún extractor. Te he abierto la pestaña Capturar con su script: instálalo como userscript, abre el perfil y pulsa el botón. Lo capturado vuelve aquí, a la rejilla.",
-            "No extractor lists Threads. I have opened the Capture tab on its script: install it as a userscript, open the profile and press the button. What it captures comes back here, to the grid."
+            "Esa dirección de Threads no es un perfil ni un post. Te he abierto la pestaña Capturar: con su userscript, abre en el navegador lo que quieras bajar y pulsa el botón. Lo capturado vuelve a la rejilla de Perfil.",
+            "That Threads address is neither a profile nor a post. I have opened the Capture tab: with its userscript, open what you want in the browser and press the button. What it captures comes back to the Profile grid."
+        ),
+        "profile.threads_capturador" => entry!(
+            "🧩 Perfil completo: abrir el capturador de Threads",
+            "🧩 Whole profile: open the Threads capturer"
+        ),
+        "threads.post_texto" => entry!(
+            "Este post de Threads no tiene fotos ni vídeos: es solo texto.",
+            "This Threads post has no photos or videos: it is text only."
         ),
         "profile.threads_note" => entry!(
-            "▸ Threads se captura desde el navegador: no existe extractor, y Meta firma los enlaces de su CDN, así que la URL del original solo está dentro de la respuesta que recibe la propia página. Pulsa Analizar y te llevo al script.",
-            "▸ Threads is captured from the browser: no extractor exists, and Meta signs its CDN links, so the original's URL only lives inside the response the page itself receives. Press Analyze and I will take you to the script."
+            "▸ Threads sin navegador: un post se lee entero, con sus fotos y vídeos a resolución original y sin iniciar sesión. De un perfil, Threads solo enseña sin sesión sus primeras publicaciones; para el perfil completo usa el capturador (userscript), que lee con tu sesión del navegador.",
+            "▸ Threads without a browser: a post is read whole, with its photos and videos at original resolution and without signing in. Of a profile, Threads only shows its first posts to visitors; for the whole profile use the capturer (userscript), which reads with your browser session."
         ),
         "profile.need_galdl" => entry!(
             "Instala primero gallery-dl en Ajustes (un clic)",
@@ -560,11 +568,11 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "▸ Patreon:  un creador, un post, una colección, o «patreon.com/home» para TODAS tus suscripciones a la vez. Necesita tu sesión, y solo trae lo que tu cuenta ya puede ver — los posts por encima de tu tramo se saltan. OJO: si el creador comparte su obra con un enlace a MEGA o Google Drive en vez de subirla al post, ese enlace NO se sigue; cópialo y pégalo en Descargas (MEGA tiene motor propio; Drive no está soportado).",
             "▸ Patreon:  a creator, a post, a collection, or «patreon.com/home» for ALL your subscriptions at once. It needs your session, and it only brings what your account can already see — posts above your tier are skipped. NOTE: if the creator shares their work as a MEGA or Google Drive link instead of uploading it to the post, that link is NOT followed; copy it into Downloads (MEGA has its own engine; Drive is not supported)."),
         "profile.sites_cookies" => entry!(
-            "▸ Necesitan tu sesión:  Instagram, X, Facebook, Weibo, Douyin, Threads y cualquier perfil privado o con restricción de edad. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt. En Threads la sesión es la del propio navegador, no hace falta exportar nada.",
-            "▸ Need your session:  Instagram, X, Facebook, Weibo, Douyin, Threads and any private or age-restricted profile. Turn it on in Settings → Browser cookies, or load a cookies.txt. On Threads the session is the browser's own — nothing to export."),
+            "▸ Necesitan tu sesión:  Instagram, X, Facebook, Douyin y cualquier perfil privado o con restricción de edad. Actívala en Ajustes → Cookies del navegador, o carga un cookies.txt. Weibo funciona sin ella con los perfiles públicos y con ella ve lo de tu cuenta. En Threads la sesión es la del propio navegador, por el capturador: no hace falta exportar nada.",
+            "▸ Need your session:  Instagram, X, Facebook, Douyin and any private or age-restricted profile. Turn it on in Settings → Browser cookies, or load a cookies.txt. Weibo works without it for public profiles, and with it sees what your account sees. On Threads the session is the browser's own, through the capturer — nothing to export."),
         "profile.sites_capture" => entry!(
-            "▸ Solo desde la pestaña Capturar:  Threads y los perfiles de Douyin. No los lista ningún extractor, así que se leen desde el navegador con la sesión que ya tienes abierta. Lo de Threads acaba igualmente aquí, en la rejilla, con su resolución. Para un post suelto de Douyin o TikTok, el capturador de posts es más rápido que analizar el perfil entero.",
-            "▸ From the Capture tab only:  Threads, and Douyin profiles. No extractor lists them, so they are read from the browser using the session you already have open. Threads still ends up here, in the grid, with its resolution. For a single Douyin or TikTok post, the post capturer is quicker than analyzing the whole profile."),
+            "▸ Desde la pestaña Capturar:  los perfiles de Douyin, y los de Threads ENTEROS. No los lista ningún extractor, así que se leen desde el navegador con la sesión que ya tienes abierta. Un post de Threads, en cambio, se lee aquí mismo y sin sesión, y de un perfil, sus primeras publicaciones; lo del capturador acaba igualmente en esta rejilla. Para un post suelto de Douyin o TikTok, el capturador de posts es más rápido que analizar el perfil entero.",
+            "▸ From the Capture tab:  Douyin profiles, and WHOLE Threads profiles. No extractor lists them, so they are read from the browser using the session you already have open. A Threads post, on the other hand, is read right here without signing in, and of a profile, its first posts; what the capturer brings ends up in this same grid. For a single Douyin or TikTok post, the post capturer is quicker than analyzing the whole profile."),
         "profile.sites_no" => entry!(
             "▸ No soportado:  los servicios de streaming con DRM (Netflix, Disney+, Prime Video y similares). No es una limitación que se pueda enrutar desde aquí: el contenido va cifrado y saltárselo sería eludir una medida técnica de protección.",
             "▸ Not supported:  DRM-protected streaming services (Netflix, Disney+, Prime Video and the like). This is not something that can be routed from here: the content is encrypted, and getting around that would be circumventing a technological protection measure."),
@@ -627,6 +635,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "profile.hf_otro" => entry!(
             "Esa dirección de Hugging Face no es un repositorio. Hace falta la página de un modelo o de un dataset, del estilo huggingface.co/autor/nombre.",
             "That Hugging Face address is not a repository. It needs a model or dataset page, of the form huggingface.co/owner/name."
+        ),
+        "queue.threads" => entry!(
+            "Threads se lista en Perfil: pulsa Analizar para ver sus fotos y vídeos y elegir qué bajar.",
+            "Threads is listed in Profile: press Analyze to see its photos and videos and pick what to fetch."
         ),
         "queue.hf_repo" => entry!(
             "Un modelo son muchos archivos. Se ha abierto en Perfil para que elijas cuáles.",
@@ -1154,6 +1166,38 @@ pub fn kemono_caido(lang: Lang, sitio: &str) -> String {
         Lang::En => format!(
             "⚠ {sitio}'s original-file servers are not answering right now (a site outage since June 2026). Whatever you queue will be saved as a JPEG preview of about 533×800, with «_preview» in the name, if that option is on in Settings. Videos and archives will fail until the site recovers."
         ),
+    }
+}
+
+/// Resumen de un perfil de Threads leído sin sesión.
+pub fn threads_perfil(lang: Lang, usuario: &str, publicaciones: usize, archivos: usize, hay_mas: bool) -> String {
+    match (lang, hay_mas) {
+        (Lang::Es, true) => format!(
+            "ℹ @{usuario}: sin sesión, Threads solo enseña las primeras publicaciones de un perfil (aquí {publicaciones}, con {archivos} archivos). Para el perfil entero usa el capturador (pestaña Capturar → Threads): lee con tu sesión en el navegador y lo trae a esta misma rejilla."
+        ),
+        (Lang::En, true) => format!(
+            "ℹ @{usuario}: without signing in, Threads only shows the first posts of a profile (here {publicaciones}, with {archivos} files). For the whole profile use the capturer (Capture tab → Threads): it reads with your browser session and brings it to this same grid."
+        ),
+        (Lang::Es, false) => format!("ℹ @{usuario}: {publicaciones} publicaciones, {archivos} archivos."),
+        (Lang::En, false) => format!("ℹ @{usuario}: {publicaciones} posts, {archivos} files."),
+    }
+}
+
+/// Threads no ha servido la página (carcasa de error, sin datos).
+pub fn threads_no_servida(lang: Lang) -> String {
+    match lang {
+        Lang::Es => "Threads no ha servido esa página: el post se ha borrado, la cuenta es privada o Meta no ha tomado la petición por una visita normal. Prueba con el capturador (pestaña Capturar → Threads), que lee desde tu navegador.".into(),
+        Lang::En => "Threads did not serve that page: the post was deleted, the account is private, or Meta did not take the request for a normal visit. Try the capturer (Capture tab → Threads), which reads from your browser.".into(),
+    }
+}
+
+/// Threads ha respondido con un error HTTP.
+pub fn threads_http(lang: Lang, codigo: u16) -> String {
+    match (lang, codigo) {
+        (Lang::Es, 429) => "Threads ha respondido 429: demasiadas peticiones seguidas desde tu conexión. Espera unos minutos, o usa el capturador (pestaña Capturar → Threads).".into(),
+        (Lang::En, 429) => "Threads answered 429: too many requests in a row from your connection. Wait a few minutes, or use the capturer (Capture tab → Threads).".into(),
+        (Lang::Es, c) => format!("Threads ha respondido HTTP {c}. Si se repite, usa el capturador (pestaña Capturar → Threads)."),
+        (Lang::En, c) => format!("Threads answered HTTP {c}. If it keeps happening, use the capturer (Capture tab → Threads)."),
     }
 }
 

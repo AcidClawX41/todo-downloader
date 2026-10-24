@@ -783,10 +783,13 @@ fn threads_core() -> &'static str {
 // y la captura empezar mucho después.
 const TD_TH = { items: new Map(), diag: { hits: 0, nodes: 0, sinUrl: 0 }, hooked: false };
 
-// Threads pagina contra /graphql/query. `bulk-route-definitions` y
-// `/ajax/navigation` también pasan por ahí, pero no llevan medios: el filtro de
-// contenido de `tdThIngest` los descarta solos.
-const TD_TH_API = /\/graphql\/query|\/api\/v1\//;
+// Threads pagina contra /graphql/query con sesión y contra /api/graphql sin
+// ella (medido el 24/10/2026: un post abierto sin sesión pide sus medios por
+// /api/graphql). Con solo la primera ruta, de esas páginas se leía únicamente
+// lo que ya venía en el HTML inicial (`tdThBootstrap`).
+// `bulk-route-definitions` y `/ajax/navigation` también pasan por aquí, pero
+// no llevan medios: el filtro de contenido de `tdThIngest` los descarta solos.
+const TD_TH_API = /\/graphql\/query|\/api\/graphql|\/api\/v1\//;
 
 /** Cuenta que se está mirando AHORA.
  *
@@ -1326,6 +1329,8 @@ mod tests {
         // Y manda el tamaño real, que es lo que la rejilla no puede medir.
         assert!(s.contains("w: mejor.width"));
         assert!(s.contains("video: !!vid"));
+        // Escucha las dos rutas de la API: con sesión y sin ella.
+        assert!(s.contains(r"/\/graphql\/query|\/api\/graphql|\/api\/v1\//"));
         // Y la posición dentro del carrusel, que el receptor lee como num/count.
         assert!(s.contains("num: total > 1 ? idx + 1 : 0"));
         assert!(s.contains("count: total > 1 ? total : 0"));
