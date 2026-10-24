@@ -350,6 +350,20 @@ Measured on 24 October 2026:
 - **The userscript now also listens to `/api/graphql`**, which is where a
   Threads page without a session requests its media; it only listened to
   `/graphql/query` and `/api/v1/`.
+- **Videos at maximum quality, not 720p.** Every Threads video node carries,
+  besides `video_versions`, a `video_dash_manifest`. Measured on the same
+  video: the progressive MP4 is H.264 1280×720 at 1.09 Mbps
+  (`xpv_progressive…C3.1280`); the manifest goes up to VP9 1920×1080 at
+  1.38 Mbps, with the audio as a separate HE-AAC track. Each of its
+  `BaseURL`s is a complete MP4 (the downloaded sizes match its
+  `FBContentLength`), so there are no segments to stitch: two files. When the
+  manifest beats the progressive file, the native reader and the userscript
+  now pick its best video track; the download fetches it, then the audio, and
+  ffmpeg joins them with `-c copy` (VP9 + AAC in MP4, checked with ffprobe).
+  The grid shows the real resolution and size. Without ffmpeg, or if the
+  audio cannot be fetched, the video is kept at full quality without audio
+  and a notice says why — quality first, as asked; the missing-ffmpeg notice
+  appears once per session.
 
 ### Bilibili: working again despite its site change
 

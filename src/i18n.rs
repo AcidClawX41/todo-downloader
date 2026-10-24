@@ -1169,6 +1169,30 @@ pub fn kemono_caido(lang: Lang, sitio: &str) -> String {
     }
 }
 
+/// Por qué un vídeo a máxima calidad se ha quedado sin su pista de audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinAudio {
+    FaltaFfmpeg,
+    AudioNoBajado,
+    FfmpegFallo,
+}
+
+/// Aviso de un vídeo guardado a máxima calidad pero sin audio.
+pub fn video_sin_audio(lang: Lang, nombre: &str, motivo: SinAudio) -> String {
+    match (lang, motivo) {
+        (Lang::Es, SinAudio::FaltaFfmpeg) => format!(
+            "{nombre}: guardado a máxima calidad pero SIN audio, porque juntar las dos pistas necesita ffmpeg (Ajustes → instalar ffmpeg). Pasará igual con el resto de vídeos así."
+        ),
+        (Lang::En, SinAudio::FaltaFfmpeg) => format!(
+            "{nombre}: saved at maximum quality but WITHOUT audio, because joining the two tracks needs ffmpeg (Settings → install ffmpeg). The same will happen to the other videos like it."
+        ),
+        (Lang::Es, SinAudio::AudioNoBajado) => format!("{nombre}: guardado a máxima calidad pero sin audio: la pista de audio no se pudo bajar."),
+        (Lang::En, SinAudio::AudioNoBajado) => format!("{nombre}: saved at maximum quality but without audio: the audio track could not be downloaded."),
+        (Lang::Es, SinAudio::FfmpegFallo) => format!("{nombre}: guardado a máxima calidad pero sin audio: ffmpeg no pudo juntar las pistas."),
+        (Lang::En, SinAudio::FfmpegFallo) => format!("{nombre}: saved at maximum quality but without audio: ffmpeg could not join the tracks."),
+    }
+}
+
 /// Resumen de un perfil de Threads leído sin sesión.
 pub fn threads_perfil(lang: Lang, usuario: &str, publicaciones: usize, archivos: usize, hay_mas: bool) -> String {
     match (lang, hay_mas) {

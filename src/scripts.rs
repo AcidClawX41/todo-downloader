@@ -813,6 +813,34 @@ function tdThArea(arr, mayor) {
     return c[0] || null;
 }
 
+/** La mejor pista de vídeo y la de audio del manifiesto DASH de un vídeo
+ *  (`video_dash_manifest`, un MPD en texto). Cada `Representation` trae su
+ *  `BaseURL`: un MP4 completo. Por resolución primero y bitrate después. */
+function tdThDash(mpd) {
+    if (!mpd || typeof mpd !== 'string') return null;
+    try {
+        const doc = new DOMParser().parseFromString(mpd, 'application/xml');
+        let mejor = null, audio = null;
+        for (const r of doc.getElementsByTagName('Representation')) {
+            const b = r.getElementsByTagName('BaseURL')[0];
+            const url = b ? b.textContent.trim() : '';
+            if (!url.startsWith('http')) continue;
+            const set = r.parentElement;
+            const tipo = r.getAttribute('mimeType')
+                || (set && (set.getAttribute('mimeType') || set.getAttribute('contentType'))) || '';
+            const bw = +r.getAttribute('bandwidth') || 0;
+            if (tipo.indexOf('video') === 0) {
+                const w = +r.getAttribute('width') || 0, h = +r.getAttribute('height') || 0;
+                const k = Math.max(w, h) * 1e9 + bw;
+                if (!mejor || k > mejor.k) mejor = { k, url, w, h };
+            } else if (tipo.indexOf('audio') === 0 && (!audio || bw > audio.bw)) {
+                audio = { bw, url };
+            }
+        }
+        return mejor ? { url: mejor.url, w: mejor.w, h: mejor.h, audio: audio ? audio.url : '' } : null;
+    } catch (e) { return null; }
+}
+
 /** Un archivo suelto: o el nodo de una publicación simple, o un elemento de un
  *  carrusel. */
 function tdThAdd(n, code, autor, texto, idx, total) {
@@ -833,18 +861,27 @@ function tdThAdd(n, code, autor, texto, idx, total) {
     const mejor = vid || img;
     if (!mejor) { TD_TH.diag.sinUrl++; return; }
 
+    // MÁXIMA CALIDAD: el MP4 de `video_versions` se queda en 1280 de lado
+    // largo (H.264 720p en la muestra) y el manifiesto DASH llega a 1080p
+    // (VP9). Viene en dos pistas, vídeo y audio: la aplicación las junta con
+    // ffmpeg, y sin él guarda el vídeo sin audio.
+    const dash = vid ? tdThDash(n.video_dash_manifest) : null;
+    const usarDash = !!dash && Math.max(dash.w, dash.h) > 1280;
+
     TD_TH.items.set(id, {
         id,
         author: autor,
         title: texto,
-        url: mejor.url,
+        url: usarDash ? dash.url : mejor.url,
         // La miniatura es el candidato MÁS PEQUEÑO a propósito: la rejilla
         // pinta 320 px y descargar el original de 1440 para eso serían decenas
         // de megas por un perfil.
         thumb: (mini || img || {}).url || '',
-        w: mejor.width || n.original_width || 0,
-        h: mejor.height || n.original_height || 0,
+        w: usarDash ? dash.w : (mejor.width || n.original_width || 0),
+        h: usarDash ? dash.h : (mejor.height || n.original_height || 0),
         video: !!vid,
+        // La pista de audio aparte del DASH; vacía con el MP4 progresivo.
+        audio: usarDash ? dash.audio : '',
         // Posición dentro del carrusel (1-based) y total: la rejilla lo pinta
         // como «2/5». En una publicación de un solo archivo, cero.
         num: total > 1 ? idx + 1 : 0,
@@ -1327,12 +1364,15 @@ mod tests {
         // Va a la rejilla de selección, no a la cola.
         assert!(s.contains("tdSend(arr, hud, 'select')"));
         // Y manda el tamaño real, que es lo que la rejilla no puede medir.
-        assert!(s.contains("w: mejor.width"));
+        assert!(s.contains("mejor.width || n.original_width"));
         assert!(s.contains("video: !!vid"));
         // Escucha las dos rutas de la API: con sesión y sin ella.
         assert!(s.contains(r"/\/graphql\/query|\/api\/graphql|\/api\/v1\//"));
         // Y la posición dentro del carrusel, que el receptor lee como num/count.
         assert!(s.contains("num: total > 1 ? idx + 1 : 0"));
+        // La máxima calidad: el manifiesto DASH, con su audio aparte.
+        assert!(s.contains("tdThDash(n.video_dash_manifest)"));
+        assert!(s.contains("audio: usarDash ? dash.audio : ''"));
         assert!(s.contains("count: total > 1 ? total : 0"));
     }
 

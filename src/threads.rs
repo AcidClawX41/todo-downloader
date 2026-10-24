@@ -164,12 +164,13 @@ pub fn leer_html(html: &str, destino: &Destino) -> Option<Lectura> {
     Some(lectura)
 }
 
-/// La URL nueva del mismo archivo en una lectura fresca de su post: para un
-/// enlace firmado que ha caducado.
+/// Las URL nuevas —archivo y, si la tiene, su pista de audio— del mismo
+/// archivo en una lectura fresca de su post: para un enlace firmado que ha
+/// caducado.
 ///
 /// Se busca por la RUTA, que no cambia al volver a firmar (solo cambian `oh` y
 /// `oe` en la query). Si no aparece, por su posición en el carrusel.
-pub fn url_fresca(lectura: &Lectura, url_vieja: &str, codigo: &str, num: u32) -> Option<String> {
+pub fn url_fresca(lectura: &Lectura, url_vieja: &str, codigo: &str, num: u32) -> Option<(String, String)> {
     let ruta = sin_query(url_vieja);
     lectura
         .items
@@ -179,8 +180,8 @@ pub fn url_fresca(lectura: &Lectura, url_vieja: &str, codigo: &str, num: u32) ->
             (num > 0).then_some(())?;
             lectura.items.iter().find(|i| i.post_id == codigo && i.index_in_post == num)
         })
-        .map(|i| i.url.clone())
-        .filter(|u| u != url_vieja)
+        .map(|i| (i.url.clone(), i.audio_url.clone()))
+        .filter(|(u, _)| u != url_vieja)
 }
 
 // ------------------------------- Internos -------------------------------
@@ -274,6 +275,112 @@ fn candidatos(n: &Value) -> Vec<(&str, u32, u32)> {
     c
 }
 
+/// La mejor calidad de un vídeo, sacada de su manifiesto DASH.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dash {
+    /// La pista de vídeo de más resolución (y, a igualdad, más bitrate).
+    pub video: String,
+    pub ancho: u32,
+    pub alto: u32,
+    /// La pista de audio, aparte. Vacía si el manifiesto no trae ninguna.
+    pub audio: String,
+    /// Bytes de vídeo + audio, si el manifiesto los declara (`FBContentLength`).
+    pub bytes: u64,
+}
+
+/// El lado largo del MP4 progresivo de Meta. Medido: `video_versions` es
+/// `xpv_progressive…C3.1280` (H.264 1280×720 a 1,09 Mbps en la muestra), y el
+/// manifiesto del mismo vídeo llega a 1920×1080 en VP9 a 1,38 Mbps. Solo
+/// compensa bajar las pistas por separado cuando superan esto.
+const LADO_PROGRESIVO: u32 = 1280;
+
+/// La mejor pista de vídeo y la de audio de un manifiesto DASH de Meta
+/// (`video_dash_manifest`, un MPD en texto).
+///
+/// Cada `Representation` lleva su `BaseURL`: un MP4 COMPLETO, firmado igual
+/// que el progresivo (medido: los tamaños descargados coinciden con su
+/// `FBContentLength`). No hay segmentos que unir; solo dos archivos.
+pub fn mejor_dash(mpd: &str) -> Option<Dash> {
+    let mut video: Option<(u64, u64, String, u32, u32, u64)> = None; // (lado, bitrate, url, w, h, bytes)
+    let mut audio: Option<(u64, String, u64)> = None; // (bitrate, url, bytes)
+    for (tipo_conjunto, cuerpo) in bloques_xml(mpd, "AdaptationSet") {
+        for (etiqueta, contenido) in bloques_xml(cuerpo, "Representation") {
+            let Some(url) = bloques_xml(contenido, "BaseURL")
+                .next()
+                .map(|(_, u)| desescapar_xml(u.trim()))
+                .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+            else {
+                continue;
+            };
+            let tipo = atributo(etiqueta, "mimeType")
+                .or_else(|| atributo(tipo_conjunto, "mimeType"))
+                .or_else(|| atributo(tipo_conjunto, "contentType"))
+                .unwrap_or("");
+            let num = |a: &str| atributo(etiqueta, a).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            let (bitrate, bytes) = (num("bandwidth"), num("FBContentLength"));
+            if tipo.starts_with("video") {
+                let (w, h) = (num("width") as u32, num("height") as u32);
+                let clave = (u64::from(w.max(h)), bitrate);
+                if video.as_ref().is_none_or(|v| clave > (v.0, v.1)) {
+                    video = Some((clave.0, clave.1, url, w, h, bytes));
+                }
+            } else if tipo.starts_with("audio") && audio.as_ref().is_none_or(|a| bitrate > a.0) {
+                audio = Some((bitrate, url, bytes));
+            }
+        }
+    }
+    let (_, _, url, ancho, alto, bytes_v) = video?;
+    let (audio, bytes_a) = audio.map(|(_, u, b)| (u, b)).unwrap_or_default();
+    Some(Dash { video: url, ancho, alto, audio, bytes: bytes_v + bytes_a })
+}
+
+/// Los elementos `<nombre …>…</nombre>` de un trozo de XML: (etiqueta de
+/// apertura, contenido). Lo justo para un MPD, que es XML plano y sin
+/// comentarios raros; no un analizador de XML.
+fn bloques_xml<'a>(xml: &'a str, nombre: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    let apertura = format!("<{nombre}");
+    let cierre = format!("</{nombre}>");
+    let mut resto = xml;
+    std::iter::from_fn(move || loop {
+        let ini = resto.find(&apertura)?;
+        let tras = &resto[ini + apertura.len()..];
+        // `<Representation` no debe casar con `<RepresentationIndex`.
+        if !tras.starts_with([' ', '>', '\t', '\n', '\r', '/']) {
+            resto = tras;
+            continue;
+        }
+        let fin_etiqueta = tras.find('>')?;
+        let etiqueta = &tras[..fin_etiqueta];
+        if etiqueta.ends_with('/') {
+            resto = &tras[fin_etiqueta + 1..];
+            return Some((etiqueta, ""));
+        }
+        let cuerpo = &tras[fin_etiqueta + 1..];
+        let fin = cuerpo.find(&cierre)?;
+        resto = &cuerpo[fin + cierre.len()..];
+        return Some((etiqueta, &cuerpo[..fin]));
+    })
+}
+
+/// El valor de `nombre="…"` dentro de una etiqueta. Con el espacio delante:
+/// `width` no debe casar con `FBwidth`.
+fn atributo<'a>(etiqueta: &'a str, nombre: &str) -> Option<&'a str> {
+    let clave = format!(" {nombre}=\"");
+    let ini = etiqueta.find(&clave)? + clave.len();
+    let fin = etiqueta[ini..].find('"')?;
+    Some(&etiqueta[ini..ini + fin])
+}
+
+/// Las cinco entidades de XML. En los `BaseURL` de Meta solo aparece `&amp;`,
+/// pero una URL con `&amp;` sin desescapar es una URL que da 403.
+fn desescapar_xml(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 /// El vídeo: el primero de `video_versions`. Threads publica tres (`type`
 /// 101, 102 y 103) SIN anchura ni altura, y en la muestra los tres eran el
 /// mismo MP4 progresivo con audio.
@@ -331,6 +438,21 @@ fn items_de_publicacion(p: &Value) -> Vec<GalleryItem> {
         } else {
             extension_imagen(url)
         };
+        // MÁXIMA CALIDAD: la del manifiesto DASH, cuando supera al MP4
+        // progresivo (ver `LADO_PROGRESIVO`). Llega en dos pistas; la descarga
+        // las junta con ffmpeg, y sin él se queda el vídeo sin audio.
+        let dash = if es_video {
+            n.get("video_dash_manifest")
+                .and_then(|m| m.as_str())
+                .and_then(mejor_dash)
+                .filter(|d| d.ancho.max(d.alto) > LADO_PROGRESIVO)
+        } else {
+            None
+        };
+        let (url, w, h, audio_url, filesize) = match &dash {
+            Some(d) => (d.video.as_str(), d.ancho, d.alto, d.audio.clone(), d.bytes),
+            None => (url, w, h, String::new(), 0),
+        };
         let carrusel = total > 1;
         out.push(GalleryItem {
             url: url.to_string(),
@@ -340,7 +462,8 @@ fn items_de_publicacion(p: &Value) -> Vec<GalleryItem> {
             ext,
             width: w,
             height: h,
-            filesize: 0,
+            filesize,
+            audio_url,
             is_video: es_video,
             post_id: codigo.clone(),
             index_in_post: if carrusel { i as u32 + 1 } else { 0 },
@@ -511,13 +634,68 @@ mod tests {
         let l = leer_html(&pagina(""), &Destino::Perfil { usuario: "nasa".into() }).unwrap();
         let actual = &l.items[2];
         let vieja = format!("{}?oh=viejo&oe=0", sin_query(&actual.url));
-        assert_eq!(url_fresca(&l, &vieja, "Decc755lYhC", 3).as_deref(), Some(actual.url.as_str()));
+        assert_eq!(url_fresca(&l, &vieja, "Decc755lYhC", 3).map(|(u, _)| u).as_deref(), Some(actual.url.as_str()));
         // Por posición, si la ruta no aparece.
         assert_eq!(
-            url_fresca(&l, "https://scontent.cdninstagram.com/otra.jpg", "Decc755lYhC", 3).as_deref(),
+            url_fresca(&l, "https://scontent.cdninstagram.com/otra.jpg", "Decc755lYhC", 3).map(|(u, _)| u).as_deref(),
             Some(actual.url.as_str())
         );
         assert_eq!(url_fresca(&l, "https://scontent.cdninstagram.com/otra.jpg", "Decc755lYhC", 0), None);
+    }
+
+    /// El manifiesto DASH real de un vídeo de Threads (recortado a 240p, 720p,
+    /// 1080p y el audio): la mejor pista es la de 1080p, el audio va aparte, y
+    /// las URL salen con `&` y no con `&amp;`.
+    #[test]
+    fn el_manifiesto_da_la_mejor_pista_y_su_audio() {
+        let d = mejor_dash(include_str!("testdata/threads_mpd.xml")).expect("hay pistas");
+        assert_eq!((d.ancho, d.alto), (1920, 1080));
+        assert!(d.video.contains("/m367/AQNpDjkZ5"), "{}", d.video);
+        assert!(d.audio.contains("/m78/AQMYnjl3"), "{}", d.audio);
+        assert!(!d.video.contains("&amp;") && d.video.contains('&'), "desescapada: {}", d.video);
+        assert_eq!(d.bytes, 4_527_727 + 241_563, "FBContentLength de las dos pistas");
+        // Sin pistas, nada; y una sin BaseURL no cuenta.
+        assert_eq!(mejor_dash("<MPD></MPD>"), None);
+        assert_eq!(
+            mejor_dash("<MPD><AdaptationSet contentType=\"video\"><Representation width=\"1920\" height=\"1080\"/></AdaptationSet></MPD>"),
+            None
+        );
+    }
+
+    /// Un post de vídeo con manifiesto: la ficha es la pista de 1080p, con su
+    /// audio aparte, su resolución y su peso. Sin manifiesto, o con uno que no
+    /// supera al MP4 progresivo, se queda el progresivo, que ya lleva audio.
+    #[test]
+    fn un_video_con_manifiesto_baja_la_maxima_calidad() {
+        let mpd = include_str!("testdata/threads_mpd.xml");
+        let con_mpd = |m: &str| {
+            let mut posts: Vec<Value> = serde_json::from_str(include_str!("testdata/threads_posts.json")).unwrap();
+            for p in &mut posts {
+                if p["code"] == "De1nYC8Eggo" {
+                    p["video_dash_manifest"] = Value::String(m.to_string());
+                }
+            }
+            let html = format!(
+                "<script type=\"application/json\">{{\"x\":{}}}</script>",
+                serde_json::to_string(&posts).unwrap()
+            );
+            let d = Destino::Post { usuario: "netflix".into(), codigo: "De1nYC8Eggo".into() };
+            leer_html(&html, &d).unwrap().items.remove(0)
+        };
+
+        let v = con_mpd(mpd);
+        assert!(v.is_video && v.ext == "mp4");
+        assert!(v.url.contains("/m367/AQNpDjkZ5"), "la pista de 1080p: {}", v.url);
+        assert!(v.audio_url.contains("/m78/"), "con su audio: {}", v.audio_url);
+        assert_eq!((v.width, v.height), (1920, 1080));
+        assert_eq!(v.filesize, 4_527_727 + 241_563);
+
+        // Un manifiesto que solo llega a 1280×720 no mejora al progresivo.
+        let solo_720 = mpd.replace("width=\"1920\" height=\"1080\"", "width=\"1280\" height=\"720\"");
+        let p = con_mpd(&solo_720);
+        assert!(p.url.contains("/o1/v/t16/"), "el progresivo: {}", p.url);
+        assert_eq!(p.audio_url, "");
+        assert_eq!(p.filesize, 0);
     }
 
     #[test]

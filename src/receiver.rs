@@ -43,6 +43,9 @@ pub struct Incoming {
     /// manda. Cero = archivo suelto o script antiguo.
     pub num: u32,
     pub count: u32,
+    /// Pista de audio aparte: el capturador de Threads manda la máxima
+    /// calidad de un vídeo como vídeo + audio (DASH). Vacía si no hay.
+    pub audio: String,
 }
 
 /// A dónde quiere el script que vayan los enlaces que manda.
@@ -267,6 +270,11 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                     let t = g("thumb");
                     if is_http(&t) { t } else { String::new() }
                 };
+                // Y el audio, igual, y nunca un magnet: es un archivo que se baja.
+                let audio = {
+                    let a = g("audio");
+                    if a.starts_with("https://") || a.starts_with("http://") { a } else { String::new() }
+                };
                 // Ausentes en los scripts antiguos y en el texto plano: cero y
                 // falso son exactamente lo que la aplicación ya sabía manejar.
                 let n = |k: &str| {
@@ -287,6 +295,7 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                     is_video: it.get("video").and_then(|x| x.as_bool()).unwrap_or(false),
                     num: n("num"),
                     count: n("count"),
+                    audio,
                 });
             }
             return (out, destino);
@@ -309,6 +318,7 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                 is_video: false,
                 num: 0,
                 count: 0,
+                audio: String::new(),
             });
         }
     }
@@ -385,6 +395,20 @@ mod tests {
         let (v, _) = parse_body(body);
         assert_eq!((v[0].num, v[0].count), (1, 3));
         assert_eq!((v[1].num, v[1].count), (2, 3));
+    }
+
+    /// El audio aparte de un vídeo de Threads a máxima calidad: solo http(s).
+    #[test]
+    fn lee_la_pista_de_audio_aparte() {
+        let body = r#"{"mode":"select","items":[
+            {"url":"https://scontent.cdninstagram.com/o1/v/t2/f2/m367/AQv","video":true,"audio":"https://scontent.cdninstagram.com/o1/v/t2/f2/m78/AQa"},
+            {"url":"https://scontent.cdninstagram.com/o1/v/t2/f2/m367/AQw","video":true,"audio":"javascript:alert(1)"},
+            {"url":"https://scontent.cdninstagram.com/v/a.jpg"}
+        ]}"#;
+        let (v, _) = parse_body(body);
+        assert_eq!(v[0].audio, "https://scontent.cdninstagram.com/o1/v/t2/f2/m78/AQa");
+        assert_eq!(v[1].audio, "", "lo que no es http(s) no se acepta");
+        assert_eq!(v[2].audio, "");
     }
 
     #[test]

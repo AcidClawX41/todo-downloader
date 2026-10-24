@@ -739,6 +739,7 @@ pub fn items_de_post(post: &Value, sitio: Sitio, autor: &str) -> Vec<GalleryItem
                 } else {
                     String::new()
                 },
+                audio_url: String::new(),
                 selected: false,
             }
         })

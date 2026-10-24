@@ -44,6 +44,10 @@ pub struct GalleryItem {
     /// archivo (no se decodifica como imagen), así que si el extractor no da
     /// una portada, se queda vacía y la rejilla muestra un marcador.
     pub thumb_url: String,
+    /// Pista de audio aparte, cuando la máxima calidad de un vídeo llega en
+    /// dos archivos (Threads, por DASH): la descarga baja `url` y esto, y
+    /// ffmpeg los junta. Vacía en todo lo demás.
+    pub audio_url: String,
     /// Marcado en la rejilla
     pub selected: bool,
 }
@@ -426,6 +430,7 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
             },
             date: text(meta, &["date", "created_at", "post_date"]),
             post_url: post_url_de(meta),
+            audio_url: String::new(),
             thumb_url: {
                 // Se prefiere una portada explícita: bajar el original a tamaño
                 // completo solo para previsualizar 30 elementos es tirar ancho

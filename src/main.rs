@@ -576,6 +576,9 @@ struct Row {
     /// Posición del archivo dentro de su publicación, cuando viene de la
     /// rejilla de un listado. 0 = desconocida. Ver `rango_respaldo`.
     num_en_post: u32,
+    /// Pista de audio aparte (vídeo de Threads a máxima calidad): se baja
+    /// después del vídeo y ffmpeg la junta. Ver `anadir_audio`.
+    audio_url: String,
 }
 
 /// Un archivo resuelto por un hoster, para expandir la fila origen en varias
@@ -3134,6 +3137,8 @@ impl App {
                 date: String::new(),
                 post_url: it.page_url,
                 thumb_url: it.thumb,
+                // La pista de audio de un vídeo de Threads a máxima calidad.
+                audio_url: it.audio,
                 selected: false,
             });
             nuevos += 1;
@@ -4042,6 +4047,7 @@ impl App {
             thumb_url: if thumb.starts_with("http") { thumb.to_string() } else { String::new() },
             dl_cookie: cookie.to_string(),
             num_en_post: 0,
+            audio_url: String::new(),
         });
     }
 
@@ -4175,6 +4181,7 @@ impl App {
             conexiones: self.settings.http_conexiones,
             kemono_preview: self.settings.kemono_preview,
             num_en_post: row.num_en_post,
+            audio_url: row.audio_url.clone(),
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
@@ -4792,6 +4799,8 @@ struct DlSpec {
     kemono_preview: bool,
     /// Ver `Row::num_en_post`.
     num_en_post: u32,
+    /// Ver `Row::audio_url`.
+    audio_url: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4875,6 +4884,10 @@ async fn download_task(
         for attempt in 1..=MAX_RETRIES {
             match try_http(&client, &vspec, &tx).await {
                 Ok(HttpOutcome::Done) => {
+                    // Vídeo a máxima calidad en dos pistas: falta el audio.
+                    if !spec.audio_url.is_empty() {
+                        anadir_audio(&client, &spec, &tx).await;
+                    }
                     let _ = tx.send(Ev::Status(spec.id, Status::Done));
                     return;
                 }
@@ -4929,8 +4942,8 @@ async fn download_task(
         // Threads, igual: el enlace nuevo sale de leer otra vez su post, que
         // es lo que hizo la rejilla. Ningún motor externo tiene extractor.
         if is_threads(&spec.page_url) {
-            if let Some(nueva) = threads_url_fresca(&client, &spec).await {
-                let spec2 = DlSpec { url: nueva, page_url: String::new(), ..spec.clone() };
+            if let Some((nueva, audio)) = threads_url_fresca(&client, &spec).await {
+                let spec2 = DlSpec { url: nueva, audio_url: audio, page_url: String::new(), ..spec.clone() };
                 drop(_permit);
                 Box::pin(download_task(client, spec2, sem, tx, ytdlp, galdl, cyberdrop)).await;
                 return;
@@ -5908,6 +5921,7 @@ fn patreon_items_de_post(
             date: fecha.clone(),
             post_url: url_post.to_string(),
             thumb_url: thumb,
+            audio_url: String::new(),
             selected: false,
         });
     }
@@ -6232,11 +6246,79 @@ async fn browse_threads(
 
 /// El enlace nuevo de un archivo de Threads cuya firma ha caducado: se vuelve
 /// a leer su post y se busca el mismo archivo (ver `threads::url_fresca`).
-async fn threads_url_fresca(client: &reqwest::Client, spec: &DlSpec) -> Option<String> {
+async fn threads_url_fresca(client: &reqwest::Client, spec: &DlSpec) -> Option<(String, String)> {
     let destino = threads::clasificar(&spec.page_url)?;
     let threads::Destino::Post { codigo, .. } = &destino else { return None };
     let lectura = threads_leer(client, &destino).await.ok()?;
     threads::url_fresca(&lectura, &spec.url, codigo, spec.num_en_post)
+}
+
+/// Junta la pista de audio con el vídeo recién descargado.
+///
+/// La máxima calidad de un vídeo de Threads llega en dos archivos (ver
+/// `threads::mejor_dash`): el vídeo ya está completo en `spec.path`, aquí se
+/// baja el audio —cientos de KB— y ffmpeg los junta SIN recodificar
+/// (`-c copy`, VP9 + AAC en MP4; medido: 1920×1080 + audio, 26 s, 4,8 MB).
+///
+/// Si algo falla —sin ffmpeg, el audio caducado, ffmpeg que se queja— el
+/// vídeo se queda como está: completo, a máxima calidad y sin audio, que es
+/// lo que se pidió priorizar. Se avisa, eso sí; el de «falta ffmpeg» una sola
+/// vez por sesión, para no repetirlo en cada vídeo de una cola.
+async fn anadir_audio(client: &reqwest::Client, spec: &DlSpec, tx: &UnboundedSender<Ev>) {
+    static AVISADO_SIN_FFMPEG: AtomicBool = AtomicBool::new(false);
+    let nombre = spec.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let avisar = |motivo: i18n::SinAudio| {
+        let _ = tx.send(Ev::Toast(i18n::video_sin_audio(i18n::lang(), &nombre, motivo)));
+    };
+    let Some(ffmpeg) = spec.ffmpeg.as_deref() else {
+        if !AVISADO_SIN_FFMPEG.swap(true, Ordering::Relaxed) {
+            avisar(i18n::SinAudio::FaltaFfmpeg);
+        }
+        return;
+    };
+    let audio = PathBuf::from(format!("{}.audio.part", spec.path.display()));
+    // ffmpeg deduce el contenedor por la extensión: tiene que acabar en .mp4.
+    let mezcla = PathBuf::from(format!("{}.mezcla.mp4", spec.path.display()));
+
+    let bajado: Result<(), String> = async {
+        let resp = client
+            .get(&spec.audio_url)
+            .header(reqwest::header::REFERER, referer_for(&spec.audio_url))
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status().as_u16()));
+        }
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        tokio::fs::write(&audio, &bytes).await.map_err(|e| e.to_string())
+    }
+    .await;
+    if bajado.is_err() {
+        let _ = tokio::fs::remove_file(&audio).await;
+        avisar(i18n::SinAudio::AudioNoBajado);
+        return;
+    }
+
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-y", "-i"])
+        .arg(&spec.path)
+        .arg("-i")
+        .arg(&audio)
+        .args(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart"])
+        .arg(&mezcla);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+    let junto = matches!(cmd.output().await, Ok(o) if o.status.success())
+        && tokio::fs::rename(&mezcla, &spec.path).await.is_ok();
+    let _ = tokio::fs::remove_file(&audio).await;
+    if !junto {
+        let _ = tokio::fs::remove_file(&mezcla).await;
+        avisar(i18n::SinAudio::FfmpegFallo);
+    }
 }
 
 async fn browse_kemono(
@@ -10284,6 +10366,7 @@ fn v2ph_items(
                 description: titulo.chars().take(160).collect(),
                 date: String::new(),
                 post_url: post_url.clone(),
+                audio_url: String::new(),
                 selected: false,
             }
         })
@@ -13930,6 +14013,7 @@ impl App {
                             if self.rows.len() > antes {
                                 if let Some(r) = self.rows.last_mut() {
                                     r.num_en_post = it.index_in_post;
+                                    r.audio_url = it.audio_url.clone();
                                 }
                             }
                         }
@@ -16771,6 +16855,57 @@ mod tests {
     /// de la red. Se lanza con `cargo test -- --ignored kemono_api`. Es la
     /// que demuestra que la cabecera `Accept: text/css` sigue valiendo y que
     /// la respuesta —que el servidor manda comprimida— se descomprime sola.
+    /// La máxima calidad de Threads de punta a punta, con el código de la
+    /// aplicación: leer el post, bajar la pista de vídeo de 1080p y juntarle
+    /// el audio con ffmpeg (`anadir_audio`). Necesita red, ffmpeg y ffprobe:
+    /// `cargo test -- --ignored threads_maxima_calidad_en_vivo`
+    #[test]
+    #[ignore]
+    fn threads_maxima_calidad_en_vivo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().unwrap();
+            let d = threads::clasificar("https://www.threads.com/@netflix/post/De1nYC8Eggo").unwrap();
+            let v = threads_leer(&client, &d).await.expect("post").items.remove(0);
+            assert!(!v.audio_url.is_empty(), "la máxima calidad llega en dos pistas");
+            let dir = std::env::temp_dir().join(format!("td-threads-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("netflix_De1nYC8Eggo.mp4");
+            let video = client.get(&v.url).send().await.unwrap().bytes().await.unwrap();
+            std::fs::write(&path, &video).unwrap();
+            let spec = DlSpec {
+                id: 1,
+                url: v.url.clone(),
+                page_url: v.post_url.clone(),
+                path: path.clone(),
+                engine: Engine::Http,
+                extra_args: Vec::new(),
+                ffmpeg: Some("ffmpeg".into()),
+                prefer_bitrate: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                lang: Lang::Es,
+                cookie: String::new(),
+                auth: String::new(),
+                conexiones: 1,
+                kemono_preview: false,
+                num_en_post: 0,
+                audio_url: v.audio_url.clone(),
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            anadir_audio(&client, &spec, &tx).await;
+            assert!(rx.try_recv().is_err(), "sin avisos: el audio se ha juntado");
+            let sonda = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-show_entries", "stream=codec_type,width,height", "-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let salida = String::from_utf8_lossy(&sonda.stdout).to_string();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(salida.contains("audio"), "{salida}");
+            assert!(salida.contains("1920,1080"), "{salida}");
+        });
+    }
+
     /// Threads de verdad, con el mismo `threads_leer` que usa la aplicación:
     /// un post de vídeo, uno con carrusel y un perfil, sin sesión. Lo que
     /// comprueba es el contrato que no controla nadie de aquí: que con las
@@ -17026,6 +17161,7 @@ mod tests {
                 conexiones: 1,
                 kemono_preview: true,
                 num_en_post: 0,
+                audio_url: String::new(),
             };
             kemono::marcar_originales_vivos(kemono::Sitio::Kemono);
 
