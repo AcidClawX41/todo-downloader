@@ -464,6 +464,7 @@ while recording the demos for this release.
 ## Smaller things
 
 - **Icons that could not be drawn.** egui's bundled fonts have no glyph for 🧲, 🗂, 🧹, ❏ or ✓, and the CJK fallback the app loads from the system does not reliably cover them (WenQuanYi Zen Hei covers none of the five, and emoji like 🧲 are in no CJK font), so the Capture and Kemono tabs, the carousel marker of the grid, two buttons and the «installed ✓» texts could show an empty box. They now use 📡, 📂, 🗑, 🗐 and ✔, which egui draws itself, and a test checks every symbol of the interface texts against egui's own fonts.
+- **…and the arrows and bullets that test let through.** The first version of that test accepted a glyph from any of egui's fonts, Hack included, but Hack is only its monospace font, not the one the interface is written in. So →, ▸, ●, ▲, ↑ and ↓, in 105 texts, drew as boxes wherever the system's CJK font did not happen to have them, and ▸ is in almost none (it showed in the Threads note while recording the demos). Hack is now the last fallback of the interface font, before the CJK one: it is already inside the executable, so this costs nothing, and the symbols draw the same on every system. The test now checks the fonts the interface really uses, and the sidebar's status dots are painted rather than written.
 - The supported-sites panel in Profile lists Kemono and Coomer, and the note
   under the URL field explains the 50-post batches when one of their links is
   pasted.

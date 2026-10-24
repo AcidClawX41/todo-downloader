@@ -12235,6 +12235,33 @@ fn buscar_cjk_linux() -> Option<Vec<u8>> {
     None
 }
 
+/// Las fuentes de la interfaz: las de egui, con dos respaldos al final de la
+/// familia proporcional, que es con la que se pinta casi todo.
+///
+/// - **Hack**, la monoespaciada que egui ya trae, pone los símbolos que les
+///   faltan a Ubuntu-Light y a las de emoji: →, ▸, ●, ▲, ↑, ↓. Sin ella salían
+///   como un cuadrado salvo que la fuente CJK del sistema los tuviera, y ▸ no
+///   lo tiene casi ninguna. No ocupa nada: ya va dentro del ejecutable.
+/// - Una **CJK** del sistema, si la hay, para el chino y el japonés.
+fn fuentes_de_la_app(cjk: Option<Vec<u8>>) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("Hack".to_owned());
+    if let Some(data) = cjk {
+        fonts
+            .font_data
+            .insert("cjk".to_owned(), egui::FontData::from_owned(data));
+        // Como respaldo (al final): solo se usa para los glifos que falten
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("cjk".to_owned());
+        }
+    }
+    fonts
+}
+
 /// Carga una fuente del sistema con glifos CJK (chino/japonés/coreano).
 /// Sin esto, los títulos de Douyin/TikTok en chino se ven como cuadrados «□».
 fn load_cjk_font(ctx: &egui::Context) {
@@ -12255,19 +12282,8 @@ fn load_cjk_font(ctx: &egui::Context) {
         .find_map(|p| std::fs::read(p).ok())
         .or_else(buscar_cjk_linux);
 
-    let Some(data) = data else {
-        return; // sin fuente CJK: se mantiene la de por defecto
-    };
-
-    let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("cjk".to_owned(), egui::FontData::from_owned(data));
-    // Como respaldo (al final): solo se usa para los glifos que falten
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("cjk".to_owned());
-    }
-    ctx.set_fonts(fonts);
+    // Siempre, haya CJK o no: el respaldo de Hack no depende de ella.
+    ctx.set_fonts(fuentes_de_la_app(data));
 }
 
 /// Qué pinta detrás del panel principal.
@@ -12611,6 +12627,35 @@ fn status_pill(ui: &mut egui::Ui, status: &Status, lang: Lang, engine: Engine) {
         });
 }
 
+/// Un indicador de estado de la barra lateral: un punto y su texto.
+///
+/// El punto se pinta, no se escribe: «●» solo lo tiene Hack, que lo dibuja
+/// pequeño, y cada fuente CJK del sistema lo hace de un tamaño distinto, así
+/// que salía distinto en cada ordenador. `lleno: false` es un aro, para lo que
+/// está apagado.
+///
+/// Es UN solo widget a propósito: dentro de un `horizontal_wrapped`, un
+/// `ui.horizontal` anidado no salta de línea como una pieza, y el último motor
+/// de la fila quedaba fuera del panel, invisible.
+fn indicador(ui: &mut egui::Ui, texto: &str, color: Color32, lleno: bool) -> egui::Response {
+    const PUNTO: f32 = 8.0;
+    const HUECO: f32 = 5.0;
+    let galley = ui.painter().layout_no_wrap(texto.to_owned(), egui::FontId::proportional(11.5), color);
+    let tam = egui::vec2(PUNTO + HUECO + galley.size().x, galley.size().y.max(PUNTO));
+    let (rect, resp) = ui.allocate_exact_size(tam, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let centro = egui::pos2(rect.left() + PUNTO / 2.0, rect.center().y);
+        if lleno {
+            ui.painter().circle_filled(centro, 4.0, color);
+        } else {
+            ui.painter().circle_stroke(centro, 3.5, egui::Stroke::new(1.2f32, color));
+        }
+        let texto_en = egui::pos2(rect.left() + PUNTO + HUECO, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(texto_en, galley, color);
+    }
+    resp
+}
+
 fn nav_item(ui: &mut egui::Ui, selected: bool, icon: &str, label: &str, badge: usize) -> bool {
     let text = if badge > 0 {
         format!("{icon}   {label}   ·{badge}")
@@ -12773,11 +12818,10 @@ impl eframe::App for App {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
                             let motor = |ui: &mut egui::Ui, nombre: &str, color: Color32, tip: &str| {
-                                ui.label(RichText::new(format!("● {nombre}")).size(11.5).color(color))
-                                    .on_hover_ui(|ui| {
-                                        ui.set_max_width(360.0);
-                                        ui.label(tip);
-                                    });
+                                indicador(ui, nombre, color, true).on_hover_ui(|ui| {
+                                    ui.set_max_width(360.0);
+                                    ui.label(tip);
+                                });
                             };
                             match self.ytdlp_ok {
                                 Some(true) => motor(ui, "yt-dlp", GREEN(), t(lang, "side.ytdlp_active")),
@@ -12802,15 +12846,15 @@ impl eframe::App for App {
                             }
                         });
                         if self.settings.clipboard_watch {
-                            ui.label(RichText::new(t(lang, "side.grabber_active")).size(11.5).color(CYAN()));
+                            indicador(ui, t(lang, "side.grabber_active"), CYAN(), true);
                         }
                         // Estado real de las cookies: la app las desactiva sola si
                         // resultan ilegibles, y sin este aviso no había forma de
                         // saber que se estaba descargando sin sesión.
                         if !cookie_args(&self.settings).is_empty() {
-                            ui.label(RichText::new(t(lang, "side.cookies_on")).size(11.5).color(GREEN()));
+                            indicador(ui, t(lang, "side.cookies_on"), GREEN(), true);
                         } else {
-                            ui.label(RichText::new(t(lang, "side.cookies_off")).size(11.5).color(MUTED()))
+                            indicador(ui, t(lang, "side.cookies_off"), MUTED(), false)
                                 .on_hover_ui(|ui| {
                                     // Sin `set_max_width` el tooltip sale en una
                                     // columna de una palabra, igual que el toast.
@@ -16527,10 +16571,15 @@ mod tests {
     #[test]
     fn los_simbolos_de_la_interfaz_existen_en_las_fuentes_de_egui() {
         use ab_glyph::Font as _;
-        let defs = egui::FontDefinitions::default();
-        let fuentes: Vec<ab_glyph::FontRef<'_>> = defs
-            .font_data
-            .values()
+        // Las fuentes que la aplicación usa de verdad, sin la CJK del sistema
+        // (no está en todos), y solo las de la familia PROPORCIONAL, que es
+        // con la que se pinta la interfaz. Antes se miraban todas las de egui,
+        // Hack incluida, que entonces solo estaba en la monoespaciada: así
+        // pasaron ▸ y → sin glifo en un texto normal.
+        let defs = fuentes_de_la_app(None);
+        let fuentes: Vec<ab_glyph::FontRef<'_>> = defs.families[&egui::FontFamily::Proportional]
+            .iter()
+            .filter_map(|nombre| defs.font_data.get(nombre))
             .filter_map(|d| ab_glyph::FontRef::try_from_slice_and_index(&d.font, d.index).ok())
             .collect();
         assert!(fuentes.len() >= 3, "egui trae sus fuentes");

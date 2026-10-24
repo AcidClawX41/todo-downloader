@@ -544,8 +544,8 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
              Settings (Firefox, or a cookies.txt file) and press Retry"
         ),
 
-        "side.cookies_on" => entry!("● cookies activas", "● cookies enabled"),
-        "side.cookies_off" => entry!("○ sin cookies", "○ no cookies"),
+        "side.cookies_on" => entry!("cookies activas", "cookies enabled"),
+        "side.cookies_off" => entry!("sin cookies", "no cookies"),
         "side.cookies_off_tip" => entry!(
             "Sin sesión del navegador solo funcionan con garantía los enlaces directos y \
              YouTube público.\n\nInstagram, Weibo, Douyin, TikTok privado, V2PH y la mayoría \
@@ -972,7 +972,7 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
         "side.ytdlp_missing" => entry!("● yt-dlp ausente", "● yt-dlp missing"),
         "side.galdl_active" => entry!("● gallery-dl activo", "● gallery-dl active"),
         "side.galdl_missing" => entry!("● gallery-dl ausente", "● gallery-dl missing"),
-        "side.grabber_active" => entry!("● LinkGrabber activo", "● LinkGrabber active"),
+        "side.grabber_active" => entry!("LinkGrabber activo", "LinkGrabber active"),
         "side.ytdlp_tip" => entry!(
             "Instálalo con un clic en Ajustes — necesario para enlaces de página y CDN caducados",
             "Install it with one click in Settings — required for page links and expired CDN links"
