@@ -846,6 +846,9 @@ fn is_gallery_site(url: &str) -> bool {
 /// navegador al abrir un post) no la reconoce gallery-dl, pero `weibo.com/u/123` sí.
 fn normalize_profile_url(url: &str) -> String {
     let u = url.trim();
+    if let Some(limpia) = facebook_por_numero(u) {
+        return limpia;
+    }
     let low = u.to_ascii_lowercase();
     if (low.contains("weibo.com") || low.contains("weibo.cn")) && low.contains("/u/") {
         if let Some(base) = u.split('?').next() {
@@ -853,6 +856,31 @@ fn normalize_profile_url(url: &str) -> String {
         }
     }
     u.to_string()
+}
+
+/// Un perfil de Facebook por número (`profile.php?id=…`), con SOLO su `id`.
+///
+/// Lo que cuelga detrás —el `&locale=es_ES` que Facebook añade a quien lo usa
+/// en español, `&sk=photos`, el `&mibextid=` de lo compartido desde el móvil—
+/// rompe el extractor de gallery-dl: su patrón de perfil deja de casar con el
+/// número, retrocede y toma «profile.php» por nombre de usuario, y reparte la
+/// pestaña de fotos a `facebook.com/profile.php/photos`, que no es de nadie.
+/// Resultado: `[]` y código 0, sin un error, y «comprueba tu sesión» a quien
+/// la tiene bien. Comprobado con gallery-dl 1.33.0-dev (24/10/2026): con el
+/// `id` solo, reparte a `facebook.com/<id>/photos`, que es lo correcto.
+fn facebook_por_numero(url: &str) -> Option<String> {
+    let host = host_of(url)?;
+    if !host_matches(&host, "facebook.com") {
+        return None;
+    }
+    let resto = url.split_once("://")?.1;
+    let (ruta, query) = resto.split_once('/')?.1.split_once('?')?;
+    if !ruta.trim_end_matches('/').eq_ignore_ascii_case("profile.php") {
+        return None;
+    }
+    let id = query.split('#').next()?.split('&').find_map(|par| par.strip_prefix("id="))?;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("https://www.facebook.com/profile.php?id={id}"))
 }
 
 /// Fuerza UTF-8 en la entrada/salida de los ayudantes escritos en Python.
@@ -3993,6 +4021,14 @@ impl App {
         let hf_url;
         let url: &str = match normalizar_huggingface(url) {
             Some(u) => { hf_url = u; &hf_url }
+            None => url,
+        };
+        // Un perfil de Facebook por número, con solo su `id`, o gallery-dl
+        // no baja nada: ver `facebook_por_numero`. Con y sin `&locale=` es
+        // el mismo perfil, así que también va antes de deduplicar.
+        let fb_url;
+        let url: &str = match facebook_por_numero(url) {
+            Some(u) => { fb_url = u; &fb_url }
             None => url,
         };
         // Un repositorio no es un archivo: son shards, configuración y
@@ -17071,6 +17107,32 @@ mod tests {
         // Sin esquema no es una URL absoluta
         assert_eq!(host_of("weibo.com/tv/show/1"), None);
         assert_eq!(host_of(""), None);
+    }
+
+    /// Un perfil de Facebook por número llega a gallery-dl con solo su `id`.
+    /// Con `&locale=es_ES` detrás —lo que copia de la barra quien usa Facebook
+    /// en español—, gallery-dl repartía a `facebook.com/profile.php/photos` y
+    /// devolvía `[]` sin error (ver `facebook_por_numero`).
+    #[test]
+    fn un_perfil_de_facebook_por_numero_va_solo_con_su_id() {
+        let limpio = "https://www.facebook.com/profile.php?id=61576447853539";
+        for u in [
+            "https://www.facebook.com/profile.php?id=61576447853539&locale=es_ES",
+            "https://m.facebook.com/profile.php?id=61576447853539&mibextid=ZbWKwL",
+            "https://web.facebook.com/profile.php?sk=photos&id=61576447853539#fotos",
+            "https://www.facebook.com/profile.php/?id=61576447853539",
+            " https://www.facebook.com/profile.php?id=61576447853539 ",
+        ] {
+            assert_eq!(normalize_profile_url(u), limpio, "{u}");
+        }
+        // Un perfil con nombre ya lo reparte bien gallery-dl: no se toca.
+        assert_eq!(
+            normalize_profile_url("https://www.facebook.com/zuck?locale=es_ES"),
+            "https://www.facebook.com/zuck?locale=es_ES"
+        );
+        assert_eq!(facebook_por_numero("https://www.facebook.com/profile.php?id=abc"), None);
+        assert_eq!(facebook_por_numero("https://www.facebook.com/photo.php?fbid=1&id=2"), None);
+        assert_eq!(facebook_por_numero("https://facebook.com.atacante.example/profile.php?id=1"), None);
     }
 
     /// X no se podía añadir mientras el enrutado comparaba subcadenas: hay

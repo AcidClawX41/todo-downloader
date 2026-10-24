@@ -142,6 +142,11 @@ Everything below went into v1.9.0 itself rather than a v1.9.1.
   posts, 139 files) in one batch. Profiles Threads hides from visitors, or private
   ones you follow, are read with **your threads.com session** (browser cookies or
   a `cookies.txt`), and only then. The capturer stays as an alternative.
+- **Facebook profiles by number listed nothing.** A `profile.php?id=…` address
+  that carried anything else, such as the `&locale=es_ES` Facebook adds when you
+  use it in Spanish, made gallery-dl take `profile.php` for the user name: it asked
+  for `facebook.com/profile.php/photos`, which belongs to nobody, and answered an
+  empty list with no error. Such addresses now reach gallery-dl with only their `id`.
 - **Pasted links keep their real names.** A Hugging Face file pasted into
   Downloads, caught by the LinkGrabber or imported from a TXT used to be saved
   under a hash (`78ac96db.gguf`), which no loader looks for. It is now saved
