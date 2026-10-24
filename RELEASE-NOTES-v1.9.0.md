@@ -379,9 +379,9 @@ threads and sent you to the capturer for the rest. Measured on 24 October
 - **Visitors get it too**, with the header the site itself sends when you are
   not signed in (`X-LOGGED-OUT-THREADS-MIGRATED-REQUEST`). Without it, the
   same request answers "User not found": the server takes it for a signed-in
-  one. Measured without an account: @zuck's whole history, back to July
+  one. Measured without an account: `@zuck`'s whole history, back to July
   2023, in 12 pages of 15, with a 2.5–4 s pause between pages and not a
-  single block; @nasa's 149 threads in 10 pages.
+  single block; `@nasa`'s 149 threads in 10 pages.
 - **The first page repeats what the profile page already showed**, so posts
   are de-duplicated by their code across pages, and against the grid when
   *Load more* resumes after *Stop*. A partial error next to good data
@@ -395,10 +395,10 @@ threads and sent you to the capturer for the rest. Measured on 24 October
   background…", where the one at the top is no longer drawn. The notice
   above the grid says how many posts and files have been read and whether
   the profile is complete. Tested end to end against threads.com with the
-  application's own code: @zuck, 231 posts and 139 files in one batch, no
+  application's own code: `@zuck`, 231 posts and 139 files in one batch, no
   duplicates.
 - **Your threads.com session, only when it is needed.** Some profiles are not
-  shown to visitors at all (@nasawebb, @nasahubble), and private accounts
+  shown to visitors at all (`@nasawebb`, `@nasahubble`), and private accounts
   only to their followers. For those, and only when the visitor view shows
   nothing or Threads stops serving pages to it, the app reads the profile
   with your session: the cookies of the browser chosen in Settings, or your

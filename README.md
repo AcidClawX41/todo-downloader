@@ -138,7 +138,7 @@ Everything below went into v1.9.0 itself rather than a v1.9.1.
   into the grid as they arrive, with *Stop* and *Load more* (about 300 posts per
   batch). It repeats the query the profile page itself used, field by field as
   Threads' own site sends it, and needs no account as far as Threads shows the
-  profile to visitors: measured, @zuck's entire history back to July 2023 (231
+  profile to visitors: measured, `@zuck`'s entire history back to July 2023 (231
   posts, 139 files) in one batch. Profiles Threads hides from visitors, or private
   ones you follow, are read with **your threads.com session** (browser cookies or
   a `cookies.txt`), and only then. The capturer stays as an alternative.
