@@ -16,11 +16,132 @@ A Windows installer is published alongside it for anyone who prefers one.
 
 ---
 
+## See it in action
+
+**A Threads profile, analysed without signing in.** Every photo at its original
+resolution, carousels marked `1/4…4/4`, pick what you want and it lands in a
+folder named after the account.
+
+![Analyse a Threads profile, pick, download](docs/media/demo-threads.gif)
+
+**A Hugging Face model repository.** The files are listed with their size;
+quantisations are alternatives, so none comes ticked. Pick one and watch the
+counter add up its size, then download it over several connections.
+
+![Pick a GGUF quantisation from a Hugging Face repository and download it](docs/media/demo-huggingface.gif)
+
+**Kemono, through its public API.** Search a creator, open them with the site's
+own thumbnails, choose, download. No account and no cookies.
+
+| Search a creator | Preview and pick | Downloaded |
+|:---:|:---:|:---:|
+| ![Kemono creator search](docs/media/kemono-search.png) | ![Kemono preview grid](docs/media/kemono-preview.png) | ![Kemono downloads completed](docs/media/kemono-downloads.png) |
+
+<sub>Content shown: NASA's public Threads account, the Apache-2.0 Qwen2.5 model
+and Godot Engine's public Patreon posts.</sub>
+
+---
+
 ## What is this?
 
-A download manager in the spirit of JDownloader2 — but **without Java, without an installer, without adware and without telemetry**. A single ~9 MB executable that starts instantly.
+A download manager in the spirit of JDownloader2 — but **without Java, without an
+installer, without adware and without telemetry**. A single executable (about
+14 MB on Windows) that starts instantly. A Windows installer is published
+alongside it for anyone who prefers one.
 
-It started as a tool to grab full TikTok and Douyin profiles in maximum quality, and grew into something that handles 1000+ sites.
+It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
+and grew into something that handles 1000+ sites:
+
+- **Profiles with previews** — Instagram, X, Facebook, Bluesky, Weibo, TikTok,
+  Bilibili, Threads, V2PH, Patreon, Fanbox, Kemono and Coomer: analyse, see each
+  file's resolution and type, and queue only what you want.
+- **Video from 1000+ sites** through yt-dlp, with ffmpeg joining separate video
+  and audio tracks, at the best quality on offer.
+- **Hugging Face model repositories** — the complete model ticked, alternatives
+  not, gated models caught before anything is queued, several connections per
+  file and resume.
+- **Booru browser and artist discovery** — search by tags at original quality,
+  or type a character and get the profiles that draw them.
+- **Native engines** for MEGA (decrypted on your machine), BitTorrent (magnet and
+  `.torrent`) and file hosts such as Pixeldrain, GoFile and MediaFire.
+- **LinkGrabber and browser capture** — copy a link and it is queued; a
+  userscript or bookmarklet sends what the page itself loaded.
+- **Spanish and English**, everywhere, including every warning and error.
+- **Windows, Linux and macOS** from the same code.
+
+---
+
+## What's new in v1.9.0
+
+### New
+
+- **Kemono and Coomer** — a **Kemono** tab that searches the sites' public creator
+  list by name (filtered by service, ranked by favourites), and native listing of
+  any creator or post pasted into **Profile**: through the site's API, no account
+  or cookies, with the site's own thumbnails, 50 posts per batch and *Load more*.
+  File links are content hashes and never expire. A whole creator pasted into
+  Downloads still goes through gallery-dl.
+- **Threads without a browser.** A post pasted into *Profile* (or *Downloads*) is
+  listed natively, whole, at original resolution and without an account: with the
+  four `Sec-Fetch-*` headers of a real navigation, threads.com serves the post's
+  media in the page itself. Of a profile, Threads shows visitors only its first
+  posts, so those are listed and the grid points to the capturer for the rest;
+  when a profile is not shown to visitors at all, the app says so.
+- **Threads videos at maximum quality.** Meta's ready-made MP4 stops at 720p; the
+  same video's DASH manifest goes up to 1080p. The app takes the best DASH video
+  track and joins its separate audio with ffmpeg, without re-encoding. Without
+  ffmpeg it keeps the 1080p video without audio and says so.
+- **Patreon creators resolved through the API**, now that Patreon's pages sit
+  behind a Cloudflare challenge; the Patreon listers read your browser session;
+  and **Chromium cookies work on Linux and macOS** for the native engines.
+- **Instagram errors that mean "update gallery-dl"** say so, and *Settings →
+  Engines* shows how old the bundled gallery-dl is.
+
+### Hotfix
+
+Everything below went into v1.9.0 itself rather than a v1.9.1.
+
+- **Kemono and Coomer downloads.** Their original-file servers have been down
+  since June 2026. The app tries the original twice, remembers the outage for ten
+  minutes per site, and saves the preview as `<name>_preview.jpg` (about 533×800)
+  when *Settings → Kemono / Coomer* allows it, which is the default. The grid warns
+  before you queue. A batch of text-only posts now says so and keeps its *Load
+  more*, instead of looking like a failed listing with no way forward.
+- **Bilibili works again.** Since 22 October 2026 its video pages are an empty
+  shell and yt-dlp, even its nightly, fails every video. The app ships a tiny
+  yt-dlp plugin, loaded only for Bilibili, that asks for the right page: tested
+  at 1080p. **NicoNico** was checked end to end and now asks for ffmpeg up front.
+  Known Bilibili and NicoNico errors (anti-bot 412, region lock, premium-only,
+  sign-in) say what to do, and a sign-in error from any site retries with your
+  cookies.
+- **Weibo and Threads tiles** carry their post, author and carousel position
+  (`3/9`), Weibo thumbnails are its 360-px variant instead of the original, an
+  expired Weibo video is retried from its post fetching only that file, a Live
+  Photo's `.mov` downloads, Threads videos are `.mp4` rather than `.jpg`, and
+  Weibo with your account falls back to visitor mode when your cookies cannot be
+  read.
+- **Instagram and X listings** are no longer cut at five minutes, rate-limit waits
+  are shown instead of looking like a hang, Instagram videos come as direct MP4s,
+  and an empty Instagram list says to update gallery-dl before it blames your
+  session.
+- **Pause on Linux stops the download.** gallery-dl's Python process kept going
+  after Pause on Ubuntu 24.04 and later, whose `kill` ignored the process-group
+  form the app used; the group is now signalled with the system call, and
+  stopping a listing stops its child too.
+- **Symbols that drew as empty boxes** — the Capture and Kemono tabs, the
+  carousel marker, arrows such as `→` and `▸` in a hundred texts — now draw on
+  every system, checked by a test against the fonts the interface really uses.
+- **Smaller things:** the Hugging Face counter shows the size of what you have
+  ticked as you tick it; counts of one read "1 link", not "1 links", in both
+  languages; English captions no longer carry a Spanish word; the sidebar's
+  status no longer overlaps the navigation in a short window; security updates
+  of the TLS stack (rustls, rustls-webpki, webpki-roots) and tokio.
+
+The full list, with the reasoning behind each change, is in
+[`RELEASE-NOTES-v1.9.0.md`](RELEASE-NOTES-v1.9.0.md).
+
+<details>
+<summary><b>Earlier releases</b> (v1.6.0 – v1.8.8)</summary>
 
 **New in v1.8.5:**
 
@@ -60,30 +181,11 @@ It started as a tool to grab full TikTok and Douyin profiles in maximum quality,
 - **Native V2PH extractor** — full albums and whole model profiles, in original quality, with no external engine, plus a browser-side script for when the site pushes back.
 - **Sign-in from Settings, native Firefox cookie reading and a User-Agent field** — three ways to give the application a session, and honest documentation of what each one cannot do.
 
-## What's new in v1.9.0
-
-- **Kemono and Coomer** — a new **Kemono** tab that searches the sites' public creator list by name (filtered by service, ranked by favourites), and native listing of any creator or post pasted into **Profile**: through the site's API, no account or cookies, with the site's own thumbnails, 50 posts per batch and *Load more*. File links are content hashes and never expire. A whole creator pasted into Downloads still goes through gallery-dl. The API's `Accept: text/css` requirement is honoured; without it the site answers 403.
-- **Patreon creators resolved through the API.** Patreon's pages now sit behind a Cloudflare challenge (`403 Just a moment…`), which is where gallery-dl looked up a creator's campaign id. Creators are resolved with `/api/campaigns?filter[vanity]=`, listed natively, handed to gallery-dl as `id:<campaign>` for whole downloads, and an expired post link is refreshed through the API instead of the page.
-- **Patreon listers read your browser session.** They only knew `cookies.txt`; with *Use browser cookies* selected they ran without a session and a paid post came back as "locked by tier".
-- **Chromium cookies on Linux and macOS** for the native engines (Patreon, V2PH): exported through gallery-dl, limited to the one domain, with yt-dlp as fallback; kept in memory for half an hour, never on disk beyond a single read.
-- **Instagram errors that mean "update gallery-dl"** (`KeyError`, `TypeError`, GraphQL `400`) now say so, and *Settings → Engines* shows how old the bundled binary is. Full notes in `RELEASE-NOTES-v1.9.0.md`.
-- **Hotfix: Kemono and Coomer.** Their original-file servers have been down since June 2026 (`503` or a reset connection; gallery-dl documents it in mikf/gallery-dl#9442 and now downloads thumbnails by default). The app tries the original twice, remembers the outage for ten minutes per site so the rest of the queue does not wait, and saves the preview as `<name>_preview.jpg` (about 533×800) when *Settings → Kemono / Coomer* allows it, which is the default. The grid warns before you queue. It never falls back to re-downloading the whole post with gallery-dl.
-- **Hotfix: Instagram's empty list.** `[]` with exit code 0 is what gallery-dl did before 1.32.17 when Instagram rejected its query. *Settings → Engines* now shows the version in use and the latest one, and an empty Instagram listing says to update before it says to check the session.
-- **Hotfix: Instagram and X.** Listings were cut at five minutes from start-up, silently, even while results were arriving; the limit is now inactivity, a timeout is reported, and rate-limit waits («Waiting for 15 minutes…») are shown instead of looking like a hang. A list cut short by an error says it may be incomplete. Instagram videos are listed as direct MP4s instead of gallery-dl's internal `ytdl:` token, which could not be downloaded from the grid. X errors get specific advice (session cookie of `.x.com`, protected or locked account, outdated gallery-dl), now in listings too, and X videos show the resolution of the file actually downloaded.
-- **Hotfix: Weibo and Threads.** Weibo listings carry the whole post nested in `status`, and every tile came out without post, author or carousel position, with the CDN link as its "page": a video whose signed link had expired (they last about an hour) was retried with the same dead link. Tiles now group by post (`3/9`), use Weibo's own 360-px thumbnail instead of the multi-megabyte original, show a cover for videos and Live Photos, and an expired link is retried from the post, fetching only that file (`--range`) on Weibo and Instagram. A Live Photo's `.mov` was routed to gallery-dl, which has no extractor for it; it now downloads directly. Threads videos served from extensionless Meta URLs were saved as `.jpg`; they are `.mp4`, and carousels show their position. A Douyin or TikTok video post sent to the grid (the default) was saved as its HTML page with a `.jpg` name; it goes to yt-dlp again.
-- **Threads without a browser.** A post pasted into *Profile* (or *Downloads*) is now listed natively, whole, at original resolution and without an account: with the four `Sec-Fetch-*` headers of a real navigation, threads.com serves the post's media in the page itself (without them it serves an error shell with nothing in it). Of a profile, Threads shows visitors only its first posts, so those are listed and the grid points to the capturer for the rest. An expired Threads link is refreshed by reading its post again. The userscript also listens to `/api/graphql`, where Threads sends media when nobody is signed in.
-- **Threads videos at maximum quality.** Meta's progressive MP4 stops at 1280 px on the long side (H.264 720p, 1.09 Mbps in the sample); the same video's DASH manifest goes up to 1080p (VP9, 1.38 Mbps). Videos are now listed and captured from the manifest when it is better, as two tracks: the app downloads the video, then the audio, and ffmpeg joins them without re-encoding. Without ffmpeg the video is kept at full quality without audio, and the app says so once.
-- **Bilibili works again.** Since 22 October 2026 `bilibili.com/video/<BV>/` answers with a 10 KB shell and the data lives under `/zh-Hans/video/<BV>/`; yt-dlp (2026.10.21 and the nightly of the 23rd) fails every video with *Unable to extract initial state*. The app ships a tiny yt-dlp plugin, loaded only for Bilibili, that requests the right page and leaves everything else to yt-dlp: tested at 1080p AVC + AAC with both the zipapp and the standalone yt-dlp. Known Bilibili and NicoNico errors (anti-bot 412, region lock, premium-only, sign-in) now say what to do, and a sign-in error from any site retries with your cookies.
-- **NicoNico checked end to end**: its videos come as separate encrypted HLS video and audio, so without ffmpeg the app now says so up front instead of yt-dlp's *Requested format is not available*.
-- **Weibo with your account:** valid cookies see everything, expired ones fall back to visitor mode inside gallery-dl, and if the browser's cookies cannot be read at all, the grid listing now retries without them — downloads already did.
-- **Review fixes:** Patreon collections and creators with more than 100 posts now show every batch, not only the last; `?filters[…]` on a creator URL is honoured; an expired Patreon link can no longer be refreshed with another file's URL; pausing a Kemono row pauses it; a `%` before a non-ASCII character in a Kemono URL no longer closes the app.
-- **Hotfix: the Chromium cookie bridge** now uses a reserved `.invalid` URL: the previous one was claimed by gallery-dl's Patreon extractor, which hit Cloudflare and exported nothing. A 60-second read timeout also stops rows from waiting forever on a server that accepts the connection and sends nothing.
-
 **Also in v1.8.8:** a release about **telling the truth when something fails**. Every fix below started
 as a silent symptom — a blank grid, an empty list, a green "all good" next to a 403
 — and the work was as much about making the failure legible as about repairing it.
 
-### Booru sites: identify, don't impersonate
+#### Booru sites: identify, don't impersonate
 
 Danbooru's API help asks clients to send an identifying `User-Agent` and says, in
 as many words, *don't impersonate browsers*. Until now they were sent a Chrome
@@ -99,7 +201,7 @@ no cookies were configured there.
 The same rule applies to their CDNs. `cdn.donmai.us` was returning **403 on every
 thumbnail** — on Windows and Linux alike — for exactly this reason.
 
-### Per-site API keys
+#### Per-site API keys
 
 *Settings → Booru accounts* now holds one credential pair **per site** instead of
 one global pair, with a direct link to each site's key page. Danbooru, AIBooru and
@@ -111,7 +213,7 @@ afterwards — never to the command line, where any process listing would expose
 them. `BooruCred`'s `Debug` prints `<hidden>` in place of the value, and a unit
 test asserts it.
 
-### Layered diagnostics
+#### Layered diagnostics
 
 Two buttons that turn "it didn't work" into evidence:
 
@@ -127,14 +229,14 @@ Both read the subprocess **as it writes**. An earlier attempt used `output()`,
 which waits for the process to exit — and so discarded the very log it existed to
 collect whenever the thing hung.
 
-### Force IPv4
+#### Force IPv4
 
 *Settings → Network*, off by default. Cloudflare-fronted sites publish IPv6 and
 Windows tries it first; with no IPv6 route the connection times out **without ever
 reaching the site**, which is why the failure carried no error at all. Browsers
 hide this by racing both families (RFC 8305); `requests` and `reqwest` do not.
 
-### Patreon collections
+#### Patreon collections
 
 `patreon.com/collection/<id>` returned an empty list with exit code 0. gallery-dl
 derives the campaign id from the collection's *thumbnail URL* and sends
@@ -146,7 +248,7 @@ back to any `/campaign/<n>/` in the body — and the request is reissued as
 `patreon.com/id:<campaign>?filters[collection_id]=<id>`, which carries the filter
 gallery-dl left blank.
 
-### Thumbnails
+#### Thumbnails
 
 - **Previews no longer download the original.** `thumbnail_url` was missing from
   the candidate keys, and Patreon nests its cover inside a `thumbnail` object — so
@@ -159,7 +261,7 @@ gallery-dl left blank.
 - A failed thumbnail **says why** — host and reason — instead of leaving a blank
   cell. Each request has its own 8 s deadline.
 
-### Artist discovery now reads four boorus
+#### Artist discovery now reads four boorus
 
 The artist base was two hard-written blocks — one for yande.re, one for the
 Danbooru pair. It is now **two tables**, `BOORUS_MOEBOORU` and `BOORUS_DANBOORU`,
@@ -173,7 +275,7 @@ came back with a name and no links at all. Ordinary artists cost no extra reques
 The Moebooru pair are deliberately not queried for profiles: they expose a
 `source` per image, not a record per artist.
 
-### Smaller things
+#### Smaller things
 
 - A Weibo or Bilibili **search** URL pasted into *Profile* now explains that a
   search is not a profile, instead of `Unsupported URL`. No extractor can
@@ -186,6 +288,8 @@ The Moebooru pair are deliberately not queried for profiles: they expose a
   *correct* is not necessarily the one people type — Alya's full transliterated
   name returns nothing on Weibo, and that measurement is recorded next to the
   entry so nobody re-adds it from an encyclopedia.
+
+</details>
 
 ---
 
@@ -243,8 +347,9 @@ the classic mistake of sixty gigabytes of weights with no index to load them.
 
 The tree comes from Hugging Face's own open API, which needs no token:
 `api/models/<repo>/tree/main?recursive=true`. Above the grid you get
-`29 of 32 files ticked: 51.8 GB of 51.8 GB`, because thirty-two file names do
-not tell you whether what you marked is four gigabytes or sixty.
+`32 files, 51.8 GB in total; 29 come ticked (51.8 GB)`, and the grid's counter
+reads `29 / 32 · 51.8 GB` and follows every tick, because thirty-two file names
+do not tell you whether what you marked is four gigabytes or sixty.
 
 - **The complete model comes ticked**: weights plus config, tokenizer and index.
   Out go the README, the licence and the card images. The rule works by
