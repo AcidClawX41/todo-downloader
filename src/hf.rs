@@ -31,7 +31,7 @@ pub enum Repo {
 }
 
 impl Repo {
-    fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         match self {
             Repo::Modelo(s) | Repo::Dataset(s) => s,
         }
@@ -110,6 +110,48 @@ pub fn clasificar_ruta(url: &str) -> Destino {
         0..=1 => Destino::Otro,
         _ => repo_o_archivo(Repo::Modelo(format!("{}/{}", seg[0], seg[1])), &seg[2..]),
     }
+}
+
+/// De la URL de UN archivo (`/resolve/` o `/blob/`), su repositorio y su ruta
+/// dentro de él, ya descodificada (`%20` es un espacio del nombre real).
+///
+/// Es lo que deja guardar un archivo pegado suelto —en Descargas, por el
+/// LinkGrabber, en un TXT— igual que si se hubiera elegido en el listado: en la
+/// carpeta de su repositorio y con su nombre exacto. `None` si no es un archivo.
+pub fn archivo_de_url(url: &str) -> Option<(Repo, String)> {
+    let seg = segmentos(url);
+    let (repo, resto): (Repo, &[&str]) = match seg.first() {
+        Some(&"datasets") if seg.len() >= 3 => (Repo::Dataset(format!("{}/{}", seg[1], seg[2])), &seg[3..]),
+        Some(s) if seg.len() >= 2 && !RESERVADOS.contains(s) => {
+            (Repo::Modelo(format!("{}/{}", seg[0], seg[1])), &seg[2..])
+        }
+        _ => return None,
+    };
+    match resto {
+        [modo, _revision, ruta @ ..] if (*modo == "resolve" || *modo == "blob") && !ruta.is_empty() => {
+            Some((repo, descodificar(&ruta.join("/"))))
+        }
+        _ => None,
+    }
+}
+
+/// `%XX` → el byte que es. Una secuencia que no lo sea se deja tal cual.
+pub fn descodificar(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Lo que va después de `owner/nombre` decide si es el repo o un archivo.
@@ -473,6 +515,32 @@ pub fn tam_legible(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un archivo pegado suelto da su repositorio y su ruta exacta.
+    #[test]
+    fn archivo_de_url_saca_repo_y_ruta() {
+        let m = |id: &str| Repo::Modelo(id.into());
+        assert_eq!(
+            archivo_de_url("https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"),
+            Some((m("Qwen/Qwen2.5-0.5B-Instruct-GGUF"), "qwen2.5-0.5b-instruct-q4_k_m.gguf".into()))
+        );
+        // La página del archivo (`/blob/`) y una ruta con carpetas
+        assert_eq!(
+            archivo_de_url("https://huggingface.co/Comfy-Org/HunyuanImage_2.1_ComfyUI/blob/main/split_files/vae/hunyuan_image_2.1_vae_fp16.safetensors"),
+            Some((m("Comfy-Org/HunyuanImage_2.1_ComfyUI"), "split_files/vae/hunyuan_image_2.1_vae_fp16.safetensors".into()))
+        );
+        // Datasets, y nombres con espacios codificados
+        assert_eq!(
+            archivo_de_url("https://huggingface.co/datasets/o/d/resolve/main/data/train%20set.parquet"),
+            Some((Repo::Dataset("o/d".into()), "data/train set.parquet".into()))
+        );
+        // Lo que no es un archivo
+        assert_eq!(archivo_de_url("https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"), None);
+        assert_eq!(archivo_de_url("https://huggingface.co/Qwen/X/tree/main"), None);
+        assert_eq!(archivo_de_url("https://huggingface.co/Qwen/X/resolve/main"), None);
+        assert_eq!(archivo_de_url("https://huggingface.co/spaces/a/b/resolve/main/app.py"), None);
+        assert_eq!(descodificar("a%2Fb%zz%4"), "a/b%zz%4");
+    }
 
     #[test]
     fn se_distingue_un_repo_de_lo_que_no_lo_es() {

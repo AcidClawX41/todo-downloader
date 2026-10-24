@@ -2433,6 +2433,57 @@ fn dirs_download() -> PathBuf {
     }
 }
 
+/// Saneado de un nombre de archivo que CONSERVA su extensión. `sanitize`
+/// recorta por el final, y un nombre largo perdía el `.gguf`: un modelo sin su
+/// extensión no lo reconoce quien lo carga.
+fn sanitize_conservando_ext(nombre: &str, max: usize) -> String {
+    match nombre.rsplit_once('.') {
+        Some((tronco, ext)) if !tronco.trim().is_empty() && (1..=12).contains(&ext.len()) => {
+            let ext = sanitize(ext, 12);
+            let tronco = sanitize(tronco, max.saturating_sub(ext.chars().count() + 1).max(1));
+            format!("{tronco}.{ext}")
+        }
+        _ => sanitize(nombre, max),
+    }
+}
+
+/// El nombre que trae el propio enlace —el último tramo de la ruta,
+/// descodificado—, cuando lo es: con extensión, y no la de un script de
+/// servidor (`download.php?id=…` no se llama así). `None` para las rutas de
+/// CDN que no son un nombre (`…/oQx3…/`, `…/media/GbX1?format=jpg`), que
+/// siguen con su hash corto.
+fn nombre_de_url(url: &str) -> Option<String> {
+    const SCRIPTS: &[&str] = &["php", "asp", "aspx", "jsp", "cgi", "html", "htm", "shtml", "do", "action"];
+    let sin_esquema = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let camino = sin_esquema.split_once('/').map(|(_, c)| c).unwrap_or("");
+    let ultimo = camino.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    let nombre = hf::descodificar(ultimo);
+    let (tronco, ext) = nombre.rsplit_once('.')?;
+    if tronco.trim().is_empty()
+        || !(1..=12).contains(&ext.len())
+        || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+        || SCRIPTS.contains(&ext.to_ascii_lowercase().as_str())
+    {
+        return None;
+    }
+    Some(sanitize_conservando_ext(&nombre, 150))
+}
+
+/// `nombre` si está libre; si no, `nombre (2).ext`, `(3)`…, como un navegador.
+fn numerar(nombre: &str, ocupado: impl Fn(&str) -> bool) -> String {
+    if !ocupado(nombre) {
+        return nombre.to_string();
+    }
+    let (tronco, ext) = match nombre.rsplit_once('.') {
+        Some((t, e)) if !t.is_empty() => (t, format!(".{e}")),
+        _ => (nombre, String::new()),
+    };
+    (2..10_000)
+        .map(|n| format!("{tronco} ({n}){ext}"))
+        .find(|c| !ocupado(c))
+        .unwrap_or_else(|| nombre.to_string())
+}
+
 fn sanitize(name: &str, maxlen: usize) -> String {
     let re = Regex::new(r#"[<>:"/\\|?*\x00-\x1f]"#).unwrap();
     let s = re.replace_all(name, "").trim().to_string();
@@ -3931,12 +3982,35 @@ impl App {
             otro => otro,
         };
 
+        // Un archivo de Hugging Face pegado suelto —en Descargas, por el
+        // LinkGrabber, en un TXT— se guarda igual que si se hubiera elegido en
+        // el listado: en la carpeta de su repositorio y con su nombre EXACTO.
+        // Con el nombre de siempre, un hash corto de la URL, salía
+        // `78ac96db.gguf`, y un modelo con otro nombre no lo encuentra quien
+        // lo carga: ComfyUI busca en su carpeta el nombre que publica el repo.
+        let hf_archivo = if nombre_exacto.is_empty() && es_huggingface(url) {
+            hf::archivo_de_url(url)
+        } else {
+            None
+        };
+        // Un enlace pegado a mano, sin nada que lo describa: ni autor, ni
+        // título, ni identificador, ni la extensión que publica un listado.
+        let sin_contexto = matches!(engine, Engine::Http)
+            && author.is_empty()
+            && title.trim().is_empty()
+            && vid_id.is_empty()
+            && ext_hint.is_empty();
+
         // Autor para agrupar en subcarpeta. Si quien llama no lo aporta
         // (LinkGrabber, pegar enlaces, importar TXT/JSON, reintento) se deduce
         // de la URL. A propósito NO entra en el nombre del archivo: así los
         // enlaces pegados conservan exactamente el nombre de siempre y el
         // cambio se limita a dónde se guardan.
-        let derived = if author.is_empty() { author_from_url(url) } else { String::new() };
+        let derived = match (&hf_archivo, author.is_empty()) {
+            (Some((repo, _)), true) => repo.id().to_string(),
+            (None, true) => author_from_url(url),
+            (_, false) => String::new(),
+        };
         let folder_author: &str = if author.is_empty() { &derived } else { author };
 
         // Identificador del post: el que envía el capturador, el de la URL,
@@ -3981,6 +4055,27 @@ impl App {
         // `:` ni `?` en un nombre de archivo— pero no se le añade nada.
         let filename = if !nombre_exacto.is_empty() {
             sanitize(nombre_exacto, 150)
+        } else if let Some((_, ruta)) = &hf_archivo {
+            // Como el listado (`hf::nombres`): el nombre tal cual, y la carpeta
+            // que lo contiene delante solo si otra fila de la cola ya lo usa
+            // en esa carpeta (`vae_config.json`). Contra el DISCO no se mira:
+            // un archivo con ese nombre en la carpeta del repo es este mismo,
+            // y volver a bajarlo lo repara en vez de dejar una copia `(2)` que
+            // ningún cargador busca.
+            let carpeta = self.dest_dir(folder_author);
+            let base = sanitize_conservando_ext(ruta.rsplit('/').next().unwrap_or(ruta), 150);
+            let con_padre = ruta.rsplit('/').nth(1).map(|p| sanitize_conservando_ext(&format!("{p}_{base}"), 150));
+            match con_padre {
+                Some(c) if self.nombre_en_cola(&carpeta, &base) => numerar(&c, |n| self.nombre_en_cola(&carpeta, n)),
+                _ => numerar(&base, |n| self.nombre_en_cola(&carpeta, n)),
+            }
+        } else if let Some(propio) = sin_contexto.then(|| nombre_de_url(url)).flatten() {
+            // Un enlace directo pegado a mano conserva el nombre que trae, como
+            // en un navegador, y se numera si otra fila o un archivo de esa
+            // carpeta ya lo tiene (`foto (2).jpg`). Las rutas de CDN sin nombre
+            // siguen con el hash corto de siempre.
+            let carpeta = self.dest_dir(folder_author);
+            numerar(&propio, |n| self.nombre_en_cola(&carpeta, n) || carpeta.join(n).exists())
         } else {
             match engine {
             // Enlace directo: conservamos la extensión real (.jpeg, .webp, .mp4…)
@@ -4124,6 +4219,15 @@ impl App {
             self.sem = Arc::new(Semaphore::new(want));
             self.sem_permits = want;
         }
+    }
+
+    /// ¿Va otra fila de la cola a escribir `nombre` en esa carpeta? Se compara
+    /// la CARPETA y no el autor: con «una carpeta por autor» apagado, todas
+    /// comparten la de destino. Sin distinguir mayúsculas, como Windows.
+    fn nombre_en_cola(&self, carpeta: &std::path::Path, nombre: &str) -> bool {
+        self.rows
+            .iter()
+            .any(|r| r.filename.eq_ignore_ascii_case(nombre) && self.dest_dir(&r.author) == carpeta)
     }
 
     fn dest_dir(&self, author: &str) -> PathBuf {
@@ -18391,6 +18495,36 @@ Set-Cookie: sesion=SECRETO_CUATRO; Path=/";
         assert_eq!(author_from_url("https://instagram.com/a b c/"), "");
         let largo = "x".repeat(60);
         assert_eq!(author_from_url(&format!("https://instagram.com/{largo}/")), "");
+    }
+
+    /// Un enlace pegado a mano conserva el nombre que trae; uno de CDN sin
+    /// nombre sigue con su hash, y nada pierde la extensión.
+    #[test]
+    fn los_enlaces_pegados_conservan_su_nombre() {
+        assert_eq!(
+            nombre_de_url("https://images-assets.nasa.gov/image/as17-148-22727/as17-148-22727~orig.jpg").as_deref(),
+            Some("as17-148-22727~orig.jpg")
+        );
+        assert_eq!(
+            nombre_de_url("https://example.com/files/Informe%20final.pdf?dl=1#p2").as_deref(),
+            Some("Informe final.pdf")
+        );
+        // Rutas de CDN que no son un nombre, carpetas y scripts de servidor
+        assert_eq!(nombre_de_url("https://v16m.tiktokcdn.com/abc/oQx3pL0/?a=1988"), None);
+        assert_eq!(nombre_de_url("https://pbs.twimg.com/media/GbX1abc?format=jpg&name=orig"), None);
+        assert_eq!(nombre_de_url("https://example.com/download.php?id=7"), None);
+        assert_eq!(nombre_de_url("https://example.com/.htaccess"), None);
+        // Nada sale con `/` ni sin extensión, por largo que sea
+        let largo = format!("https://e.com/{}.safetensors", "x".repeat(300));
+        let n = nombre_de_url(&largo).unwrap();
+        assert!(n.ends_with(".safetensors") && n.chars().count() <= 150, "{n}");
+        assert_eq!(nombre_de_url("https://e.com/a%2Fb.jpg").as_deref(), Some("ab.jpg"));
+        // Numerar como un navegador
+        let ocupados = ["a.gguf", "a (2).gguf", "LEEME"];
+        let libre = |n: &str| ocupados.contains(&n);
+        assert_eq!(numerar("b.gguf", libre), "b.gguf");
+        assert_eq!(numerar("a.gguf", libre), "a (3).gguf");
+        assert_eq!(numerar("LEEME", libre), "LEEME (2)");
     }
 
     #[test]
