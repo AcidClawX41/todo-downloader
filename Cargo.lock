@@ -5196,6 +5196,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "image",
+ "libc",
  "librqbit",
  "open",
  "regex",

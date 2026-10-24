@@ -440,6 +440,27 @@ does not.
   the application**, and `&`, `#` and `+` in the tab's filter fields were
   mangled. Both fixed, with tests.
 
+### Pause on Linux did not stop gallery-dl
+
+gallery-dl ships as a PyInstaller binary: a small loader that runs Python as
+a child process. Pause killed the loader's whole process group by running
+`kill -9 -<group>`, and the `kill` of procps-ng 4 — Ubuntu 24.04 and later —
+does not read `-<group>` as a group unless a `--` comes first: it killed
+nothing and still exited with 0. Only the loader died. Python went on
+downloading the whole profile in the background, and the row stayed on
+«Downloading» forever, because that orphan kept its output pipe open. Found
+while recording the demos for this release.
+
+- **The group is now signalled with the `kill(2)` system call**, with no
+  external program in between: nothing left for each system's `kill` to read
+  differently.
+- **Stopping a profile listing or a booru search had the same hole** for a
+  second reason: those processes were not given their own group, so there
+  was no group to kill. They are now, as are the 60-second detailed retries
+  of the Booru tab.
+- Two tests reproduce both cases with a real grandchild process; they fail
+  with the old code and pass with the new one.
+
 ## Smaller things
 
 - **Icons that could not be drawn.** egui's bundled fonts have no glyph for 🧲, 🗂, 🧹, ❏ or ✓, and the CJK fallback the app loads from the system does not reliably cover them (WenQuanYi Zen Hei covers none of the five, and emoji like 🧲 are in no CJK font), so the Capture and Kemono tabs, the carousel marker of the grid, two buttons and the «installed ✓» texts could show an empty box. They now use 📡, 📂, 🗑, 🗐 and ✔, which egui draws itself, and a test checks every symbol of the interface texts against egui's own fonts.

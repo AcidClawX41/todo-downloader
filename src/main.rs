@@ -5192,6 +5192,12 @@ where
 
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Unix: grupo de procesos propio, o `kill_tree` no alcanza al nieto (ver
+    // ytdlp_exec): sin él, el grupo que mata no existe y solo moría el cargador.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn()?;
     let salida = child.stdout.take();
     let errores = child.stderr.take();
@@ -5302,6 +5308,12 @@ async fn run_capture_timeout(
 
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Unix: grupo de procesos propio, o `kill_tree` no alcanza al nieto (ver
+    // ytdlp_exec), que además mantendría abierta la tubería que se espera abajo.
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn()?;
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
@@ -5440,6 +5452,11 @@ async fn galdl_verbose(
     // su versión, su configuración y CADA reintento de conexión antes de
     // colgarse, y ahí estaba la respuesta.
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    // Unix: grupo propio, para que el plazo mate también al nieto (ver kill_tree).
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     let mut hijo = match cmd.spawn() {
         Ok(h) => h,
         Err(e) => {
@@ -5497,7 +5514,7 @@ async fn galdl_verbose(
             }
         }
     }
-    let _ = hijo.start_kill();
+    kill_tree(&mut hijo).await;
     if let Some(p) = &cfg_path {
         let _ = tokio::fs::remove_file(p).await;
     }
@@ -8660,7 +8677,7 @@ struct ExecOutcome {
 /// descargando huérfano — exactamente el síntoma de «pulso Pausa y no para».
 ///
 /// En Windows se delega en `taskkill /T`, que recorre el árbol. En Unix basta
-/// con la señal al hijo, que se propaga por el grupo de procesos.
+/// con la señal al grupo de procesos, que el hijo lidera.
 async fn kill_tree(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     {
@@ -8675,14 +8692,24 @@ async fn kill_tree(child: &mut tokio::process::Child) {
     // un PID negativo envía SIGKILL a TODO el grupo, alcanzando también al
     // intérprete de Python que PyInstaller ejecuta como proceso nieto. Sin
     // esto, matar solo al bootloader dejaba al nieto descargando huérfano.
+    //
+    // Se llama a kill(2) directamente. Antes se lanzaba el programa
+    // `kill -9 -pid`, y el de procps-ng 4 (Ubuntu 24.04 y posteriores) no toma
+    // «-pid» como grupo: no mataba nada y aun así salía con 0, así que Pausa
+    // dejaba al nieto descargando. Sin programa externo no hay forma distinta
+    // de leer los argumentos en cada sistema, ni dependencia del PATH.
     #[cfg(unix)]
     {
-        if let Some(pid) = child.id() {
-            // -9 (SIGKILL) a «-pid» = a todo el grupo. Más portable que -KILL.
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", &format!("-{pid}")])
-                .status()
-                .await;
+        if let Some(pgid) = child.id().and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // Nunca 0 ni 1: kill(0) es el grupo de esta aplicación y kill(-1),
+            // todos los procesos del usuario.
+            if pgid > 1 {
+                // SAFETY: kill(2) no lee ni escribe memoria de este proceso; con
+                // un grupo que ya no existe solo devuelve ESRCH, que aquí sobra.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
         }
     }
     // Respaldo directo al proceso
@@ -17328,6 +17355,46 @@ mod tests {
         });
     }
 
+    /// Detener un listado, o agotar su plazo, mata también al NIETO. gallery-dl
+    /// de PyInstaller corre Python como hijo del cargador: si solo muere el
+    /// cargador, el nieto sigue pidiendo páginas —con las cookies de quien lo
+    /// usa— sin que nadie lea la respuesta.
+    #[cfg(unix)]
+    #[test]
+    fn detener_un_listado_mata_tambien_al_nieto() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("td-nieto-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            // El nieto deja una marca al cabo de 1,5 s si sigue vivo.
+            let sh = |marca: &std::path::Path| {
+                let mut c = tokio::process::Command::new("sh");
+                c.args(["-c", &format!("(sleep 1.5; touch '{}') & wait", marca.display())]);
+                c
+            };
+            let corto = Duration::from_millis(400);
+
+            let m1 = dir.join("lineas");
+            let r = run_lineas_timeout(sh(&m1), corto, corto, None, |_| {}, |_| {}).await;
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+
+            let m2 = dir.join("captura");
+            let parar = Arc::new(AtomicBool::new(false));
+            let p2 = parar.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                p2.store(true, Ordering::Relaxed);
+            });
+            let r = run_capture_timeout(sh(&m2), Duration::from_secs(10), Some(parar)).await;
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let vivos: Vec<_> = [&m1, &m2].into_iter().filter(|m| m.exists()).collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(vivos.is_empty(), "el nieto siguió vivo tras la parada: {vivos:?}");
+        });
+    }
+
     /// Las esperas que gallery-dl anuncia no son inactividad, y su hora se
     /// enseña tal cual. Formato de `extractor/common.py:wait`.
     #[test]
@@ -18261,5 +18328,32 @@ Set-Cookie: sesion=SECRETO_CUATRO; Path=/";
         assert_eq!(sanitize("nul.txt", 60), "_nul.txt");
         assert_eq!(sanitize("   ", 60), "video");
         assert_eq!(sanitize("nombre.", 60), "nombre");
+    }
+
+    /// Pausa tiene que matar también a los NIETOS. gallery-dl de PyInstaller es
+    /// un cargador que lanza a Python como hijo: si solo muere el cargador, el
+    /// nieto sigue descargando el perfil entero y con la tubería de stdout
+    /// abierta, así que la fila se queda en «Descargando» para siempre.
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_mata_tambien_a_los_nietos() {
+        use tokio::io::AsyncReadExt;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut cmd = tokio::process::Command::new("sh");
+            // El `sleep` en segundo plano es el nieto: hereda la tubería.
+            cmd.args(["-c", "sleep 30 & wait"])
+                .stdout(std::process::Stdio::piped())
+                .process_group(0);
+            let mut hijo = cmd.spawn().unwrap();
+            let mut salida = hijo.stdout.take().unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            kill_tree(&mut hijo).await;
+            let _ = hijo.wait().await;
+            // La tubería solo se cierra cuando muere TODO el grupo.
+            let mut resto = Vec::new();
+            let cerrada = tokio::time::timeout(Duration::from_secs(5), salida.read_to_end(&mut resto)).await;
+            assert!(cerrada.is_ok(), "el nieto sigue vivo: kill_tree no ha matado al grupo de procesos");
+        });
     }
 }

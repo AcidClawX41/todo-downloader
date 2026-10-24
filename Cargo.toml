@@ -38,6 +38,11 @@ aes = "0.8"
 # TLS ni OpenSSL, de modo que no interfiere con reqwest ni con librqbit.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Pausa mata al grupo de procesos del motor con kill(2) (ver `kill_tree`). Ya
+# venía en el árbol a través de tokio y winit: no añade nada que compilar.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Solo para las pruebas: lee las fuentes que trae egui para comprobar que todo
 # símbolo de la interfaz tiene glifo. Ya venía en el árbol a través de epaint.
 [dev-dependencies]
