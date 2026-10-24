@@ -1014,28 +1014,36 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
 
 pub fn imported_json(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "Importado 1 vídeo desde JSON".into(),
         Lang::Es => format!("Importados {n} vídeos desde JSON"),
+        Lang::En if n == 1 => "Imported 1 video from JSON".into(),
         Lang::En => format!("Imported {n} videos from JSON"),
     }
 }
 
 pub fn imported_txt(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "Importado 1 enlace desde TXT".into(),
         Lang::Es => format!("Importados {n} enlaces desde TXT"),
+        Lang::En if n == 1 => "Imported 1 link from TXT".into(),
         Lang::En => format!("Imported {n} links from TXT"),
     }
 }
 
 pub fn cleared(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "🗑 1 elemento quitado de la cola".into(),
         Lang::Es => format!("🗑 {n} elementos quitados de la cola"),
+        Lang::En if n == 1 => "🗑 1 item removed from the queue".into(),
         Lang::En => format!("🗑 {n} items removed from the queue"),
     }
 }
 
 pub fn received(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "📡 1 enlace recibido del navegador".into(),
         Lang::Es => format!("📡 {n} enlaces recibidos del navegador"),
+        Lang::En if n == 1 => "📡 1 link received from the browser".into(),
         Lang::En => format!("📡 {n} links received from the browser"),
     }
 }
@@ -1056,21 +1064,27 @@ pub fn v2ph_signed_in(lang: Lang, usuario: &str) -> String {
 
 pub fn added_links(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "Añadido 1 enlace".into(),
         Lang::Es => format!("Añadidos {n} enlaces"),
+        Lang::En if n == 1 => "Added 1 link".into(),
         Lang::En => format!("Added {n} links"),
     }
 }
 
 pub fn starting(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "Iniciando 1 descarga".into(),
         Lang::Es => format!("Iniciando {n} descargas"),
+        Lang::En if n == 1 => "Starting 1 download".into(),
         Lang::En => format!("Starting {n} downloads"),
     }
 }
 
 pub fn clip_captured(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "📋 1 enlace capturado del portapapeles".into(),
         Lang::Es => format!("📋 {n} enlaces capturados del portapapeles"),
+        Lang::En if n == 1 => "📋 1 link captured from the clipboard".into(),
         Lang::En => format!("📋 {n} links captured from the clipboard"),
     }
 }
@@ -1079,22 +1093,28 @@ pub fn clip_captured(lang: Lang, n: usize) -> String {
 /// gallery-dl no lo sabe hasta terminar.
 pub fn files_done(lang: Lang, n: u64) -> String {
     match lang {
+        Lang::Es if n == 1 => "1 archivo".into(),
         Lang::Es => format!("{n} archivos"),
+        Lang::En if n == 1 => "1 file".into(),
         Lang::En => format!("{n} files"),
     }
 }
 
 pub fn list_cleared(lang: Lang, n: usize) -> String {
     match lang {
-        Lang::Es => format!("🗑 {n} elemento(s) quitados de la lista"),
-        Lang::En => format!("🗑 {n} item(s) removed from the list"),
+        Lang::Es if n == 1 => "🗑 1 elemento quitado de la lista".into(),
+        Lang::Es => format!("🗑 {n} elementos quitados de la lista"),
+        Lang::En if n == 1 => "🗑 1 item removed from the list".into(),
+        Lang::En => format!("🗑 {n} items removed from the list"),
     }
 }
 
 pub fn host_resolved(lang: Lang, n: usize) -> String {
     match lang {
-        Lang::Es => format!("🔗 {n} archivo(s) resueltos del hoster"),
-        Lang::En => format!("🔗 {n} file(s) resolved from the host"),
+        Lang::Es if n == 1 => "🔗 1 archivo resuelto del hoster".into(),
+        Lang::Es => format!("🔗 {n} archivos resueltos del hoster"),
+        Lang::En if n == 1 => "🔗 1 file resolved from the host".into(),
+        Lang::En => format!("🔗 {n} files resolved from the host"),
     }
 }
 
@@ -1149,10 +1169,16 @@ pub fn galdl_edad(lang: Lang, dias: u64, viejo: bool) -> String {
         (Lang::Es, true) => format!(
             "⚠ Descargado hace {dias} días. gallery-dl publica una versión por semana y Instagram cambia a ese ritmo: si Instagram falla, actualiza antes de tocar nada más."
         ),
+        // Días enteros transcurridos, no de calendario: 0 es «menos de un
+        // día», no «hoy», que podría ser mentira a las nueve de la mañana.
+        (Lang::Es, false) if dias == 0 => "Descargado hace menos de un día.".into(),
+        (Lang::Es, false) if dias == 1 => "Descargado hace 1 día.".into(),
         (Lang::Es, false) => format!("Descargado hace {dias} días."),
         (Lang::En, true) => format!(
             "⚠ Downloaded {dias} days ago. gallery-dl ships a release every week and Instagram changes at that pace: if Instagram fails, update before touching anything else."
         ),
+        (Lang::En, false) if dias == 0 => "Downloaded less than a day ago.".into(),
+        (Lang::En, false) if dias == 1 => "Downloaded 1 day ago.".into(),
         (Lang::En, false) => format!("Downloaded {dias} days ago."),
     }
 }
@@ -1195,15 +1221,27 @@ pub fn video_sin_audio(lang: Lang, nombre: &str, motivo: SinAudio) -> String {
 
 /// Resumen de un perfil de Threads leído sin sesión.
 pub fn threads_perfil(lang: Lang, usuario: &str, publicaciones: usize, archivos: usize, hay_mas: bool) -> String {
+    let (pubs, arch) = match lang {
+        Lang::Es => (segun(publicaciones, "publicación", "publicaciones"), segun(archivos, "archivo", "archivos")),
+        Lang::En => (segun(publicaciones, "post", "posts"), segun(archivos, "file", "files")),
+    };
     match (lang, hay_mas) {
         (Lang::Es, true) => format!(
-            "ℹ @{usuario}: sin sesión, Threads solo enseña las primeras publicaciones de un perfil (aquí {publicaciones}, con {archivos} archivos). Para el perfil entero usa el capturador (pestaña Capturar → Threads): lee con tu sesión en el navegador y lo trae a esta misma rejilla."
+            "ℹ @{usuario}: sin sesión, Threads solo enseña las primeras publicaciones de un perfil (aquí {publicaciones}, con {archivos} {arch}). Para el perfil entero usa el capturador (pestaña Capturar → Threads): lee con tu sesión en el navegador y lo trae a esta misma rejilla."
         ),
         (Lang::En, true) => format!(
-            "ℹ @{usuario}: without signing in, Threads only shows the first posts of a profile (here {publicaciones}, with {archivos} files). For the whole profile use the capturer (Capture tab → Threads): it reads with your browser session and brings it to this same grid."
+            "ℹ @{usuario}: without signing in, Threads only shows the first posts of a profile (here {publicaciones}, with {archivos} {arch}). For the whole profile use the capturer (Capture tab → Threads): it reads with your browser session and brings it to this same grid."
         ),
-        (Lang::Es, false) => format!("ℹ @{usuario}: {publicaciones} publicaciones, {archivos} archivos."),
-        (Lang::En, false) => format!("ℹ @{usuario}: {publicaciones} posts, {archivos} files."),
+        (_, false) => format!("ℹ @{usuario}: {publicaciones} {pubs}, {archivos} {arch}."),
+    }
+}
+
+/// El sustantivo en singular o en plural según la cuenta: «1 archivo», «2 archivos».
+fn segun(n: usize, uno: &'static str, varios: &'static str) -> &'static str {
+    if n == 1 {
+        uno
+    } else {
+        varios
     }
 }
 
@@ -1377,7 +1415,9 @@ pub fn kemono_favoritos(lang: Lang, n: u64) -> String {
 
 pub fn booru_found(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "🔍 1 resultado".into(),
         Lang::Es => format!("🔍 {n} resultados"),
+        Lang::En if n == 1 => "🔍 1 result".into(),
         Lang::En => format!("🔍 {n} results"),
     }
 }
@@ -1529,7 +1569,9 @@ pub fn torrent_error(lang: Lang, e: &str) -> String {
 
 pub fn profile_analyzed(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "Perfil analizado: 1 publicación encontrada".into(),
         Lang::Es => format!("Perfil analizado: {n} publicaciones encontradas"),
+        Lang::En if n == 1 => "Profile analyzed: 1 post found".into(),
         Lang::En => format!("Profile analyzed: {n} posts found"),
     }
 }
@@ -1550,7 +1592,9 @@ pub fn install_error(lang: Lang, tool: &str, e: &str) -> String {
 
 pub fn added_to_queue(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "1 publicación añadida a la cola".into(),
         Lang::Es => format!("{n} publicaciones añadidas a la cola"),
+        Lang::En if n == 1 => "1 post added to the queue".into(),
         Lang::En => format!("{n} posts added to the queue"),
     }
 }
@@ -1564,8 +1608,17 @@ pub fn add_selected(lang: Lang, n: usize) -> String {
 
 pub fn posts_summary(lang: Lang, total: usize, vids: usize, imgs: usize) -> String {
     match lang {
-        Lang::Es => format!("{total} publicaciones · 🎬 {vids} vídeos · 🖼 {imgs} de imágenes"),
-        Lang::En => format!("{total} posts · 🎬 {vids} videos · 🖼 {imgs} image posts"),
+        Lang::Es => format!(
+            "{total} {} · 🎬 {vids} {} · 🖼 {imgs} de imágenes",
+            segun(total, "publicación", "publicaciones"),
+            segun(vids, "vídeo", "vídeos")
+        ),
+        Lang::En => format!(
+            "{total} {} · 🎬 {vids} {} · 🖼 {imgs} {}",
+            segun(total, "post", "posts"),
+            segun(vids, "video", "videos"),
+            segun(imgs, "image post", "image posts")
+        ),
     }
 }
 
@@ -1586,7 +1639,41 @@ pub fn invalid_json(lang: Lang, e: &str) -> String {
 /// Cuántos elementos esconde el filtro de imágenes/vídeos.
 pub fn hidden_by_filter(lang: Lang, n: usize) -> String {
     match lang {
+        Lang::Es if n == 1 => "(1 oculto por el filtro)".into(),
         Lang::Es => format!("({n} ocultos por el filtro)"),
         _ => format!("({n} hidden by the filter)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// «Added 1 links» y «Iniciando 1 descargas» salían en cada descarga
+    /// suelta. Un recuento de uno va en singular, y concordado en español.
+    #[test]
+    fn los_recuentos_de_uno_van_en_singular() {
+        assert_eq!(added_links(Lang::En, 1), "Added 1 link");
+        assert_eq!(added_links(Lang::Es, 1), "Añadido 1 enlace");
+        assert_eq!(added_links(Lang::En, 3), "Added 3 links");
+        assert_eq!(starting(Lang::En, 1), "Starting 1 download");
+        assert_eq!(starting(Lang::Es, 1), "Iniciando 1 descarga");
+        assert_eq!(starting(Lang::Es, 2), "Iniciando 2 descargas");
+        assert_eq!(files_done(Lang::En, 1), "1 file");
+        assert_eq!(added_to_queue(Lang::Es, 1), "1 publicación añadida a la cola");
+        assert_eq!(hidden_by_filter(Lang::Es, 1), "(1 oculto por el filtro)");
+        assert_eq!(posts_summary(Lang::En, 1, 1, 0), "1 post · 🎬 1 video · 🖼 0 image posts");
+        assert_eq!(posts_summary(Lang::Es, 2, 1, 1), "2 publicaciones · 🎬 1 vídeo · 🖼 1 de imágenes");
+        assert_eq!(threads_perfil(Lang::En, "nasa", 1, 1, false), "ℹ @nasa: 1 post, 1 file.");
+        assert_eq!(threads_perfil(Lang::Es, "nasa", 5, 6, false), "ℹ @nasa: 5 publicaciones, 6 archivos.");
+        assert_eq!(galdl_edad(Lang::En, 0, false), "Downloaded less than a day ago.");
+        assert_eq!(galdl_edad(Lang::Es, 1, false), "Descargado hace 1 día.");
+        // Ni un «(s)» de compromiso
+        for l in [Lang::Es, Lang::En] {
+            for n in [1, 2] {
+                assert!(!list_cleared(l, n).contains("(s)"), "{}", list_cleared(l, n));
+                assert!(!host_resolved(l, n).contains("(s)"), "{}", host_resolved(l, n));
+            }
+        }
     }
 }

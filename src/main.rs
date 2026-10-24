@@ -10715,20 +10715,21 @@ async fn browse_hf(
 
     // El resumen va SIEMPRE, no solo cuando hay avisos: veintidós nombres de
     // archivo no dicen si lo que has marcado son cuatro gigas o sesenta.
+    //
+    // Dice lo que VIENE marcado, que no deja de ser cierto. Antes decía
+    // «Marcados 0 de 12» como si fuera el estado, y al marcar uno seguía
+    // diciéndolo; lo que llevas marcado y su peso los cuenta, al momento, el
+    // contador de la rejilla.
     let (n_marc, b_marc) = listado.marcado();
     let (n_tot, b_tot) = listado.total();
-    let mut texto = vec![if i18n::lang() == i18n::Lang::Es {
-        format!(
-            "Marcados {n_marc} de {n_tot} archivos: {} de {}.",
-            hf::tam_legible(b_marc),
-            hf::tam_legible(b_tot)
-        )
-    } else {
-        format!(
-            "{n_marc} of {n_tot} files ticked: {} of {}.",
-            hf::tam_legible(b_marc),
-            hf::tam_legible(b_tot)
-        )
+    let (marc, tot) = (hf::tam_legible(b_marc), hf::tam_legible(b_tot));
+    let mut texto = vec![match (i18n::lang(), n_marc) {
+        (i18n::Lang::Es, 0) => format!("{n_tot} archivos, {tot} en total; ninguno viene marcado."),
+        (i18n::Lang::Es, 1) => format!("{n_tot} archivos, {tot} en total; viene marcado 1 ({marc})."),
+        (i18n::Lang::Es, _) => format!("{n_tot} archivos, {tot} en total; vienen marcados {n_marc} ({marc})."),
+        (_, 0) => format!("{n_tot} files, {tot} in total; none comes ticked."),
+        (_, 1) => format!("{n_tot} files, {tot} in total; 1 comes ticked ({marc})."),
+        (_, _) => format!("{n_tot} files, {tot} in total; {n_marc} come ticked ({marc})."),
     }];
     texto.extend(listado.avisos.iter().map(i18n::hf_aviso));
     let _ = tx.send(Ev::GalleryNotice(texto.join("\n"), epoch));
@@ -13892,11 +13893,17 @@ impl App {
                     }
                     ui.separator();
                     let ocultos = self.gallery_items.len() - visibles.len();
-                    ui.label(
-                        RichText::new(format!("{} / {}", marcados, visibles.len()))
-                            .size(12.0)
-                            .color(MUTED()),
-                    );
+                    // Y cuánto pesa lo marcado, al momento, cuando se sabe de
+                    // TODO lo marcado: en un modelo de Hugging Face es la
+                    // diferencia entre cuatro gigas y sesenta. Si de alguno no
+                    // se sabe, no se enseña: una suma parcial engañaría.
+                    let pesos: Vec<u64> = self.gallery_items.iter().filter(|i| i.selected).map(|i| i.filesize).collect();
+                    let contador = if !pesos.is_empty() && pesos.iter().all(|&b| b > 0) {
+                        format!("{} / {}  ·  {}", marcados, visibles.len(), hf::tam_legible(pesos.iter().sum()))
+                    } else {
+                        format!("{} / {}", marcados, visibles.len())
+                    };
+                    ui.label(RichText::new(contador).size(12.0).color(MUTED()));
                     // Cuántos hay de cada clase, contando SOBRE EL TOTAL y no
                     // sobre lo visible: al filtrar por vídeos, saber cuántas
                     // imágenes hay detrás es justo lo que se quiere ver.

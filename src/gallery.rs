@@ -108,7 +108,8 @@ impl GalleryItem {
         }
         let pos = self.position();
         if !pos.is_empty() {
-            s.push_str(&format!("  ·  {pos} del post"));
+            let del = if crate::i18n::lang() == crate::i18n::Lang::Es { "del post" } else { "in post" };
+            s.push_str(&format!("  ·  {pos} {del}"));
         }
         if !self.date.is_empty() {
             // Solo la parte de fecha: la hora no ayuda a decidir qué bajar
