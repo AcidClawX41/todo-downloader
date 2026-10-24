@@ -11,9 +11,9 @@
 //!
 //! POR QUÉ EL PARSEO ES TAN TOLERANTE: cada extractor de gallery-dl nombra los
 //! campos a su manera, y algunos devuelven los números como cadena. Instagram
-//! usa `post_shortcode`/`num`/`count`, Weibo usa `pid` y anida el texto en
-//! `status`. Exigir un esquema concreto haría que el explorador se quedara en
-//! blanco en cuanto un extractor cambie una clave.
+//! usa `post_shortcode`/`num`/`count`; Weibo anida la publicación entera en
+//! `status` (ver `de_weibo`). Exigir un esquema concreto haría que el
+//! explorador se quedara en blanco en cuanto un extractor cambie una clave.
 
 use serde_json::Value;
 
@@ -374,7 +374,7 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
         let count = num(meta, &["count", "num_total", "total"]) as u32;
         let index = num(meta, &["num", "index"]) as u32;
 
-        out.push(GalleryItem {
+        let mut item = GalleryItem {
             url: url.to_string(),
             filename: text(meta, &["filename", "name"]),
             ext,
@@ -486,10 +486,251 @@ pub fn parse_listing(json: &str) -> Result<Listing, String> {
                 }
             },
             selected: false,
-        });
+        };
+
+        // Weibo deja la publicación entera dentro de `status`: lo genérico de
+        // arriba no la ve. Ver `de_weibo`.
+        if text(meta, &["category"]) == "weibo" {
+            if let Some(w) = de_weibo(meta, url, is_video) {
+                if !w.post_id.is_empty() {
+                    item.post_id = w.post_id;
+                }
+                if w.count > 0 {
+                    item.count_in_post = w.count;
+                }
+                if !w.author.is_empty() {
+                    item.author = w.author;
+                }
+                if !w.post_url.is_empty() {
+                    item.post_url = w.post_url;
+                }
+                if !w.texto.is_empty() {
+                    item.description = w.texto.chars().take(160).collect();
+                }
+                if !w.portada.is_empty() {
+                    item.thumb_url = w.portada;
+                }
+            }
+        }
+
+        out.push(item);
     }
 
     Ok(Listing { items: out, queued })
+}
+
+// ----------------------------------- Weibo -----------------------------------
+
+/// Lo que la rejilla necesita de una publicación de Weibo y que su extractor
+/// deja DENTRO de `status`, no en la raíz de cada archivo.
+///
+/// Medido en volcados reales (24 de octubre de 2026, gallery-dl 1.32.17: un
+/// álbum de 25 fotos, la pestaña de vídeos de un perfil y dos álbumes con Live
+/// Photos). La raíz solo trae `url`, `width`, `height`, `num`, `type`,
+/// `filename` y `extension`. Con las claves genéricas, todas las fichas salían:
+///
+///  - sin publicación: el id es `status.id`, un NÚMERO de dieciséis cifras que
+///    `text` no lee, o `status.mid` como cadena;
+///  - sin carrusel: el total es `status.count`, así que los nueve archivos de
+///    un post se veían como nueve sueltos;
+///  - sin autor: está a dos niveles, en `status.user`;
+///  - con el enlace del CDN como «página»: el reintento de un vídeo caducado
+///    —llevan `Expires=` de unas horas— volvía a pedir el mismo enlace muerto;
+///  - con el texto en HTML: `status.text` trae los hashtags como `<a href=…>`;
+///  - y los vídeos, sin portada, aunque `page_info.page_pic` la tiene.
+#[derive(Debug, Default)]
+struct DeWeibo {
+    post_id: String,
+    count: u32,
+    author: String,
+    post_url: String,
+    texto: String,
+    portada: String,
+}
+
+fn de_weibo(meta: &Value, url: &str, es_video: bool) -> Option<DeWeibo> {
+    let st = meta.get("status")?;
+    let solo_digitos = |s: &String| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let post_id = cadena(st, "mid")
+        .or_else(|| cadena(st, "idstr"))
+        .or_else(|| entero(st, "id"))
+        .filter(solo_digitos)
+        .unwrap_or_default();
+    let uid = st
+        .get("user")
+        .and_then(|u| cadena(u, "idstr").or_else(|| entero(u, "id")))
+        .filter(solo_digitos)
+        .unwrap_or_default();
+    // `weibo.com/<uid>/<mblogid>` es la dirección que da el propio sitio y la
+    // que el extractor de post de gallery-dl acepta. Sin `mblogid`, la forma
+    // móvil por id numérico vale para los dos.
+    let mblogid = cadena(st, "mblogid").filter(|m| m.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let post_url = match mblogid {
+        Some(m) if !uid.is_empty() => format!("https://weibo.com/{uid}/{m}"),
+        _ if !post_id.is_empty() => format!("https://m.weibo.cn/detail/{post_id}"),
+        _ => String::new(),
+    };
+    Some(DeWeibo {
+        count: num(st, &["count"]).min(u32::MAX as u64) as u32,
+        // El mismo formato que `author_from_url` da a `weibo.com/u/<uid>`: un
+        // post suelto y el perfil entero acaban en la misma carpeta.
+        author: if uid.is_empty() { String::new() } else { format!("weibo_{uid}") },
+        texto: cadena(st, "text_raw").unwrap_or_default(),
+        portada: portada_weibo(st, url, es_video),
+        post_id,
+        post_url,
+    })
+}
+
+/// Cadena no vacía de una clave, recortada.
+fn cadena(v: &Value, clave: &str) -> Option<String> {
+    v.get(clave)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Número distinto de cero, como texto (venga como número o como cadena).
+fn entero(v: &Value, clave: &str) -> Option<String> {
+    match num(v, &[clave]) {
+        0 => None,
+        n => Some(n.to_string()),
+    }
+}
+
+/// La misma URL con o sin `https:`. gallery-dl pasa a `https:` el enlace que
+/// emite, pero no el que deja dentro de `status`.
+fn sin_esquema(u: &str) -> &str {
+    u.strip_prefix("https:").or_else(|| u.strip_prefix("http:")).unwrap_or(u)
+}
+
+/// Portada de un archivo de Weibo para la rejilla.
+///
+/// Primero, la de la propia API: cada foto de `pic_infos` publica sus
+/// variantes, y `bmiddle` (`/wap360/`, 360 px por el lado largo) es la que el
+/// muro de Weibo usa para lo mismo. Se encuentra la foto por la URL que se va
+/// a descargar —`largest`— o por su `video`: así la imagen fija de un Live
+/// Photo es la portada de su `.mov`, que sin esto salía con un triángulo.
+///
+/// Un vídeo normal trae la suya en `page_info`. Y si nada de eso aparece, una
+/// imagen de `sinaimg.cn` sin firmar admite cambiar el tamaño en la ruta.
+fn portada_weibo(st: &Value, url: &str, es_video: bool) -> String {
+    if let Some(foto) = foto_weibo(st, url) {
+        for variante in ["bmiddle", "thumbnail", "large"] {
+            if let Some(u) = foto.get(variante).and_then(|v| v.get("url")).and_then(|v| v.as_str()) {
+                if u.starts_with("http") {
+                    return u.to_string();
+                }
+            }
+        }
+    }
+    if es_video {
+        let objetivo = sin_esquema(url);
+        // Un post que mezcla fotos y vídeos los lista en `mix_media_info`, y
+        // cada vídeo lleva su página dentro del elemento.
+        let mezclado = st
+            .get("mix_media_info")
+            .and_then(|m| m.get("items"))
+            .and_then(|i| i.as_array())
+            .and_then(|items| {
+                items
+                    .iter()
+                    .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("video"))
+                    .filter_map(|i| i.get("data"))
+                    .find(|d| contiene_url(d, objetivo, 0))
+            });
+        return mezclado
+            .or_else(|| st.get("page_info"))
+            .and_then(portada_de_pagina)
+            .unwrap_or_default();
+    }
+    miniatura_sinaimg(url).unwrap_or_default()
+}
+
+/// La foto de `status` a la que pertenece `url`: por su versión `largest` (la
+/// que se descarga) o por su `video` (Live Photo, o GIF servido como vídeo).
+fn foto_weibo<'a>(st: &'a Value, url: &str) -> Option<&'a Value> {
+    let objetivo = sin_esquema(url);
+    let es_esta = |foto: &&Value| {
+        ["largest", "mw2000", "original", "large"].iter().any(|k| {
+            foto.get(*k)
+                .and_then(|v| v.get("url"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|u| sin_esquema(u) == objetivo)
+        }) || ["video", "video_hd"]
+            .iter()
+            .any(|k| foto.get(*k).and_then(|v| v.as_str()).is_some_and(|u| sin_esquema(u) == objetivo))
+    };
+    // Con `retweets=original` el `status` YA es el original, pero en otro
+    // modo las fotos de un reenvío viven en `retweeted_status`.
+    [Some(st), st.get("retweeted_status")].into_iter().flatten().find_map(|raiz| {
+        let sueltas = raiz.get("pic_infos").and_then(|p| p.as_object()).into_iter().flat_map(|m| m.values());
+        let mezcladas = raiz
+            .get("mix_media_info")
+            .and_then(|m| m.get("items"))
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i.get("data"));
+        sueltas.chain(mezcladas).find(es_esta)
+    })
+}
+
+/// Portada de la «página» de un vídeo: `page_pic` (cadena u objeto con
+/// `url`) o, si no, las variantes de `media_info.big_pic_info`.
+fn portada_de_pagina(info: &Value) -> Option<String> {
+    let pp = info.get("page_pic");
+    let directa = pp.and_then(|v| v.as_str()).or_else(|| pp.and_then(|v| v.get("url")).and_then(|v| v.as_str()));
+    let grande = || {
+        let b = info.get("media_info")?.get("big_pic_info")?;
+        ["pic_middle", "pic_small", "pic_big"]
+            .iter()
+            .find_map(|k| b.get(*k).and_then(|p| p.get("url")).and_then(|v| v.as_str()))
+    };
+    directa
+        .filter(|u| u.starts_with("http"))
+        .or_else(|| grande().filter(|u| u.starts_with("http")))
+        .map(String::from)
+}
+
+/// ¿Aparece `objetivo` (sin esquema) como valor de texto en algún punto de `v`?
+fn contiene_url(v: &Value, objetivo: &str, prof: u8) -> bool {
+    if prof > 6 {
+        return false;
+    }
+    match v {
+        Value::String(s) => sin_esquema(s) == objetivo,
+        Value::Array(a) => a.iter().any(|x| contiene_url(x, objetivo, prof + 1)),
+        Value::Object(o) => o.values().any(|x| contiene_url(x, objetivo, prof + 1)),
+        _ => false,
+    }
+}
+
+/// `https://wx2.sinaimg.cn/large/<archivo>.jpg` → `…/orj360/<archivo>.jpg`, el
+/// tamaño de las miniaturas del muro de Weibo: 59 KB frente a varios megas del
+/// original, medido en una imagen de 1100×5609.
+///
+/// Solo sin firma: con query (`?KID=…&ssig=…`), tocar la ruta invalidaría la
+/// firma y la miniatura daría 403.
+fn miniatura_sinaimg(url: &str) -> Option<String> {
+    let resto = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    if resto.contains(['?', '#']) {
+        return None;
+    }
+    let (host, ruta) = resto.split_once('/')?;
+    if !host.ends_with(".sinaimg.cn") {
+        return None;
+    }
+    let (_tamano, archivo) = ruta.split_once('/')?;
+    if archivo.is_empty() || archivo.contains('/') {
+        return None;
+    }
+    let ext = archivo.rsplit_once('.')?.1.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+        return None;
+    }
+    Some(format!("https://{host}/orj360/{archivo}"))
 }
 
 /// Resolución de un vídeo de X sacada de SU URL: `…/vid/avc1/1920x1080/….mp4`.
@@ -635,12 +876,33 @@ mod tests {
         let sin_dims = l.items.iter().filter(|i| i.width == 0 || i.height == 0).count();
         let sin_post = l.items.iter().filter(|i| i.post_id.is_empty()).count();
         let ytdl = l.items.iter().filter(|i| !i.url.starts_with("http")).count();
+        let sin_autor = l.items.iter().filter(|i| i.author.is_empty()).count();
+        let carrusel = l.items.iter().filter(|i| i.is_carousel()).count();
         eprintln!(
-            "líneas {} → fichas {} (vídeos {videos}, sin portada {sin_portada}), sin dimensiones {sin_dims}, sin publicación {sin_post}, URLs no http {ytdl}, colas {:?}",
+            "líneas {} → fichas {} (vídeos {videos}, sin portada {sin_portada}), sin dimensiones {sin_dims}, sin publicación {sin_post}, sin autor {sin_autor}, en carrusel {carrusel}, URLs no http {ytdl}, colas {:?}",
             lineas.len(),
             l.items.len(),
             l.queued
         );
+        // `TD_MUESTRA=n` enseña las n primeras fichas tal como las vería la
+        // rejilla: es lo que dice si un campo se está leyendo de donde toca.
+        let muestra = std::env::var("TD_MUESTRA").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        for i in l.items.iter().take(muestra) {
+            let corta = |s: &str| s.chars().take(90).collect::<String>();
+            eprintln!(
+                "· {} {}×{} {}\n    post {:?} {} · autor {:?} · {:?}\n    página {}\n    miniatura {}",
+                if i.is_video { "VÍDEO" } else { "imagen" },
+                i.width,
+                i.height,
+                corta(&i.url),
+                i.post_id,
+                i.position(),
+                i.author,
+                corta(&i.description),
+                corta(&i.post_url),
+                corta(&i.thumb_url)
+            );
+        }
         assert_eq!(ytdl, 0, "ninguna ficha puede llevar una URL que no sea http");
     }
 
@@ -791,11 +1053,124 @@ mod tests {
 
     #[test]
     fn lee_campos_anidados_de_weibo() {
-        // Weibo mete parte de los metadatos dentro de `status`
+        // La búsqueda genérica también entra en `status`. Sin `category` no es
+        // el camino de Weibo (`de_weibo`), que tiene su propia prueba.
         let j = r#"[[3,"https://wx.sinaimg/x.jpg",{"pid":"999","status":{"text":"hola mundo"}}]]"#;
         let v = parse_listing(j).unwrap().items;
         assert_eq!(v[0].post_id, "999");
         assert_eq!(v[0].description, "hola mundo");
+    }
+
+    /// Weibo con datos REALES de gallery-dl 1.32.17 (24 de octubre de 2026),
+    /// recortados: dos fotos de un post de nueve, un vídeo de la pestaña de
+    /// vídeos y un Live Photo (la foto fija y su `.mov`). Antes, las cinco
+    /// fichas salían sin publicación, sin autor, sin carrusel y con el enlace
+    /// del CDN como página; el vídeo y el `.mov`, además, sin portada.
+    #[test]
+    fn weibo_lee_la_publicacion_anidada_en_status() {
+        let l = parse_listing(include_str!("testdata/weibo_listado.json")).unwrap();
+        assert_eq!(l.items.len(), 5);
+
+        let (a, b) = (&l.items[0], &l.items[1]);
+        assert_eq!(a.post_id, "4676818931548338");
+        assert_eq!(b.post_id, a.post_id, "los archivos de un post se agrupan");
+        assert_eq!((a.index_in_post, a.count_in_post), (1, 9));
+        assert!(a.is_carousel());
+        assert_eq!(b.position(), "2/9");
+        assert_eq!(a.author, "weibo_5366453585", "mismo formato que author_from_url");
+        assert_eq!(a.post_url, "https://weibo.com/5366453585/Kwepv6uNc");
+        assert_eq!((a.width, a.height), (1100, 5609), "la resolución del original");
+        assert!(!a.is_video);
+        // La variante de 360 px que publica la API, no el JPEG original.
+        assert_eq!(a.thumb_url, "https://wx2.sinaimg.cn/wap360/005Rb5IZgy1gu1qcevnegj30uk4bthdt.jpg");
+        assert_eq!(b.thumb_url, "https://wx2.sinaimg.cn/wap360/005Rb5IZgy1gu1qcfllo2j31h0340b29.jpg");
+
+        let v = &l.items[2];
+        assert!(v.is_video);
+        assert_eq!(v.thumb_url, "https://wx4.sinaimg.cn/orj480/0033ImPzly1ihhxh4gh9ij60u01404qg02.jpg");
+        assert_eq!(v.description, "texto de prueba", "`text_raw`, no el HTML de `text`");
+        assert_eq!(v.post_url, "https://weibo.com/2803301701/Rk0q6vfib", "lo que reintenta un enlace caducado");
+        assert_eq!(v.author, "weibo_2803301701");
+        assert_eq!((v.width, v.height, v.filesize), (1080, 1440, 32407365));
+        assert!(!v.is_carousel());
+
+        let (foto, mov) = (&l.items[3], &l.items[4]);
+        assert!(!foto.is_video, "la foto fija de un Live Photo es una imagen");
+        assert!(mov.is_video);
+        assert_eq!(mov.ext, "mov");
+        assert_eq!(foto.thumb_url, "https://wx4.sinaimg.cn/wap360/001P0DUIgy1ihf13aweumj62c0340x6p02.jpg");
+        assert_eq!(mov.thumb_url, foto.thumb_url, "el .mov toma de portada su foto");
+        assert_eq!(mov.post_id, foto.post_id);
+        assert_eq!((foto.index_in_post, mov.index_in_post), (4, 5));
+        assert!(mov.post_url.starts_with("https://weibo.com/1669879400/"));
+    }
+
+    /// Sin `pic_infos` la miniatura se deriva de la URL; sin `mblogid`, la
+    /// página es la forma móvil; y sin `status`, todo queda como siempre.
+    #[test]
+    fn weibo_sin_datos_de_la_api_no_inventa_nada() {
+        let j = r#"[
+            [3,"https://wx1.sinaimg.cn/large/x1.jpg",{"category":"weibo","num":1,"width":10,"height":10,
+              "status":{"id":5000000000000001,"count":2,"user":{"id":42}}}],
+            [3,"https://wx1.sinaimg.cn/large/x2.jpg",{"category":"weibo","num":2}]
+        ]"#;
+        let l = parse_listing(j).unwrap();
+        let a = &l.items[0];
+        assert_eq!(a.post_id, "5000000000000001", "el id numérico también vale");
+        assert_eq!(a.count_in_post, 2);
+        assert_eq!(a.author, "weibo_42");
+        assert_eq!(a.post_url, "https://m.weibo.cn/detail/5000000000000001");
+        assert_eq!(a.thumb_url, "https://wx1.sinaimg.cn/orj360/x1.jpg");
+        let b = &l.items[1];
+        assert_eq!(b.post_id, "");
+        assert_eq!(b.thumb_url, "https://wx1.sinaimg.cn/large/x2.jpg");
+    }
+
+    /// Un post que mezcla fotos y vídeo (`mix_media_info`): cada archivo toma
+    /// la portada de SU elemento, aunque el enlace emitido sea `https:` y el
+    /// que queda en `status` sea `http:`.
+    #[test]
+    fn weibo_mezclado_saca_cada_portada_de_su_elemento() {
+        let status = serde_json::json!({"mid": "1", "count": 2, "mix_media_info": {"items": [
+            {"type": "pic", "data": {
+                "largest": {"url": "https://wx3.sinaimg.cn/large/foto.jpg"},
+                "bmiddle": {"url": "https://wx3.sinaimg.cn/wap360/foto.jpg"}}},
+            {"type": "video", "data": {
+                "page_pic": {"url": "https://wx3.sinaimg.cn/orj480/portada.jpg"},
+                "media_info": {"playback_list": [
+                    {"play_info": {"url": "http://f.video.weibocdn.com/o0/v.mp4?Expires=1"}}]}}}
+        ]}});
+        let j = serde_json::json!([
+            [3, "https://wx3.sinaimg.cn/large/foto.jpg",
+             {"category": "weibo", "num": 1, "type": "pic", "status": status}],
+            [3, "https://f.video.weibocdn.com/o0/v.mp4?Expires=1",
+             {"category": "weibo", "num": 2, "type": "video", "extension": "mp4", "status": status}]
+        ])
+        .to_string();
+        let l = parse_listing(&j).unwrap();
+        assert_eq!(l.items[0].thumb_url, "https://wx3.sinaimg.cn/wap360/foto.jpg");
+        assert!(l.items[1].is_video);
+        assert_eq!(l.items[1].thumb_url, "https://wx3.sinaimg.cn/orj480/portada.jpg");
+        assert_eq!(l.items[1].position(), "2/2");
+    }
+
+    #[test]
+    fn la_miniatura_de_sinaimg_solo_se_deriva_sin_firma() {
+        assert_eq!(
+            miniatura_sinaimg("https://wx2.sinaimg.cn/large/abc.jpg").as_deref(),
+            Some("https://wx2.sinaimg.cn/orj360/abc.jpg")
+        );
+        assert_eq!(
+            miniatura_sinaimg("http://wx2.sinaimg.cn/mw2000/abc.gif").as_deref(),
+            Some("https://wx2.sinaimg.cn/orj360/abc.gif")
+        );
+        // Firmada: cambiar la ruta rompería la firma.
+        assert_eq!(miniatura_sinaimg("https://wx2.sinaimg.cn/large/abc.jpg?KID=imgbed,tva&ssig=x"), None);
+        // Ni otros hosts, ni vídeos, ni rutas sin tamaño.
+        assert_eq!(miniatura_sinaimg("https://sinaimg.cn.atacante.example/large/abc.jpg"), None);
+        assert_eq!(miniatura_sinaimg("https://evilsinaimg.cn/large/abc.jpg"), None);
+        assert_eq!(miniatura_sinaimg("https://f.video.weibocdn.com/o0/abc.mp4"), None);
+        assert_eq!(miniatura_sinaimg("https://wx2.sinaimg.cn/abc.jpg"), None);
     }
 
     /// REGRESIÓN: el perfil de Instagram que parecía vacío.

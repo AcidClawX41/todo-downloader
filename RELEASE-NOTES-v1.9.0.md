@@ -265,6 +265,57 @@ Reviewed against gallery-dl's current extractors and a real X listing
 - An empty X listing explains its three possible causes (no media of its own,
   outdated gallery-dl, no x.com session) with the version numbers.
 
+### Weibo and Threads: what the grid recognised
+
+Checked against real gallery-dl listings from Weibo (24 October 2026: an
+artist's photo album, a news account's video tab and two albums with Live
+Photos, 167 files) and against the Threads capturer.
+
+- **Weibo tiles knew nothing about their post.** gallery-dl puts the whole
+  post inside `status`, and the generic parser only looked one level down and
+  only for text. Every tile came out without post id (`status.id` is a
+  16-digit number), without author (`status.user`), without carousel position
+  (`status.count`), with the post text in HTML (`status.text` carries hashtags
+  as links; `text_raw` is plain) and with the CDN link as its "page". The five
+  measured listings now have no tile without post or author, and multi-image
+  posts show `3/9`.
+- **An expired Weibo video was retried with the same dead link.** Weibo signs
+  video and Live Photo links for about an hour (`Expires=`, measured). The
+  retry used the "page", which was that link. It now uses the post,
+  `weibo.com/<uid>/<mblogid>`.
+- **And the retry fetches only that file.** On Instagram and Weibo, where the
+  listing and the retry come from the same gallery-dl extractor and number
+  files the same way, the retry passes `--range N`: an expired file of a
+  nine-photo post no longer downloads the other eight, once per expired file.
+  If the range writes nothing, it repeats with the whole post rather than
+  reporting an empty success. Kemono, Patreon and Facebook keep the whole-post
+  retry, because their numbering does not match.
+- **Weibo thumbnails were the originals.** The grid downloaded the full
+  `large` JPEG (several MB for a 1100×5609 image) to draw a tile; it now uses
+  the 360-px variant Weibo's API publishes for each photo. Videos take their
+  cover from `page_info`, and a Live Photo's `.mov` takes its still photo;
+  both used to be a ▶ with no image.
+- **A Live Photo's video could not be downloaded.** It is listed as
+  `video.weibo.com/media/play?livephoto=…`, which redirects to the `.mov`.
+  Being a subdomain of weibo.com, it was routed to gallery-dl, which has no
+  extractor for that path. It now goes to the HTTP engine, which follows the
+  redirect.
+- **Threads videos were saved as `.jpg`.** Meta serves many videos from paths
+  without an extension (`/o1/v/t16/f2/m69/AQ…`). The capturer already said
+  they were videos, but the extension stored for the grid fell back to `jpg`,
+  and the grid passes it on as the real one when queueing. They are `.mp4`
+  now, and Threads carousels show their position like Instagram's.
+- **The same fallback broke Douyin and TikTok video posts sent to the grid.**
+  The capturer sends a video post as its page (`…/video/<id>`) for yt-dlp to
+  resolve; with `jpg` as its "real" extension it went to the HTTP engine
+  instead, which saved the HTML page as a photo. Single posts go to the grid by
+  default (*Single posts go to the selection grid*), so this was the common
+  case. The page now has no extension and goes to yt-dlp.
+- A single Weibo post pasted in Downloads goes to its author's folder
+  (`weibo_<uid>`), as a profile already did, and the grid names the folder
+  after the author with the most tiles rather than the first one: a profile
+  that started with a retweet was filed under the retweeted account.
+
 ### Found in an independent review of all the new code
 
 - **Patreon collections and creators with more than 100 posts showed only the

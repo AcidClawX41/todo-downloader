@@ -571,6 +571,9 @@ struct Row {
     thumb_url: String,
     /// Cookie de descarga (GoFile la exige); vacía si no aplica
     dl_cookie: String,
+    /// Posición del archivo dentro de su publicación, cuando viene de la
+    /// rejilla de un listado. 0 = desconocida. Ver `rango_respaldo`.
+    num_en_post: u32,
 }
 
 /// Un archivo resuelto por un hoster, para expandir la fila origen en varias
@@ -961,6 +964,29 @@ fn fallback_engine(page_url: &str) -> Option<Engine> {
     Some(Engine::YtDlp)
 }
 
+/// `--range` para el respaldo por página: baja SOLO el archivo que falló, no
+/// la publicación entera.
+///
+/// Un carrusel de Instagram, o un post de Weibo con nueve Live Photos, tiene
+/// muchos archivos. Cuando caducaba el enlace de UNO, reintentar la página sin
+/// más los bajaba todos, y otra vez por cada enlace caducado del mismo post,
+/// con el nombre de gallery-dl al lado de los que ya había bajado la rejilla.
+/// En Weibo pasa siempre que se encola más de una hora después de listar: es
+/// lo que duran sus enlaces firmados de vídeo (medido, `Expires=` a 60 min).
+///
+/// Solo donde la numeración del listado es la misma que dará gallery-dl al
+/// reintentar, porque las dos salen del MISMO extractor: Instagram y Weibo.
+/// Kemono y Patreon numeran en su lector nativo, con otro orden; y en Facebook
+/// el número es la posición en el álbum, no en la página de la foto. Si aun así
+/// el rango no encaja y no escribe nada, `run_gallerydl` repite sin él.
+fn rango_respaldo(page_url: &str, num: u32) -> Option<String> {
+    if num == 0 {
+        return None;
+    }
+    let host = host_of(page_url)?;
+    (host_matches(&host, "instagram.com") || es_weibo(&host)).then(|| num.to_string())
+}
+
 /// URL de PERFIL de Douyin. Ni yt-dlp ni gallery-dl tienen extractor de perfiles
 /// para Douyin (solo vídeos sueltos), así que no se puede enumerar: hay que usar
 /// el script de consola del navegador.
@@ -1056,6 +1082,11 @@ fn engine_for_url(url: &str) -> Engine {
     // dominio con las páginas, pero es un enlace directo (el hash del
     // contenido) y lo baja el motor nativo, con reanudación.
     if kemono::es_archivo(url) {
+        return Engine::Http;
+    }
+    // El `.mov` de un Live Photo de Weibo, por el mismo motivo: ver
+    // `es_medio_weibo`.
+    if es_medio_weibo(url) {
         return Engine::Http;
     }
     if is_gallery_site(url) {
@@ -1210,6 +1241,57 @@ fn url_extension(url: &str) -> Option<String> {
         .map(|(_, v)| v)
         .filter(|v| plausible_query(v))
         .map(|v| v.to_ascii_lowercase())
+}
+
+/// Extensión y tipo de un archivo que llega del script del navegador a la
+/// rejilla de selección: `(extensión, es_vídeo)`.
+///
+/// La extensión NO es decorativa: al encolar, la rejilla la pasa como la real,
+/// y eso decide el motor y el nombre del archivo. Por eso no puede ser una
+/// suposición cualquiera, que es lo que era —`jpg` para todo lo que no la
+/// llevara en la URL—:
+///
+///  - Un vídeo de Threads servido desde una ruta SIN extensión (los CDN de
+///    Meta usan `/o1/v/t16/f2/m69/AQ…` para muchos) se guardaba como `.jpg`,
+///    aunque el script ya había dicho que era vídeo. Ahora es `mp4`.
+///  - Una PÁGINA de vídeo de Douyin o TikTok (`…/video/<id>`) no tiene
+///    extensión que dar: se queda vacía, así que encolarla la manda a yt-dlp,
+///    que es quien la resuelve. Con el `jpg`, el motor HTTP bajaba el HTML de
+///    la página y lo guardaba como una foto.
+///
+/// `dice_video` va primero porque es el único dato que NO es una deducción:
+/// el script lo leyó de la API del sitio.
+fn tipo_capturado(url: &str, dice_video: bool) -> (String, bool) {
+    let u = url.to_ascii_lowercase();
+    let es_pagina_video =
+        u.contains("/video/") && (u.contains("douyin.com") || u.contains("tiktok.com"));
+    let ext_url = url_extension(url);
+    let es_video = dice_video
+        || es_pagina_video
+        || ext_url.as_deref().is_some_and(gallery::es_extension_de_video);
+    let ext = match ext_url {
+        Some(e) => e,
+        None if es_pagina_video => String::new(),
+        None if es_video => "mp4".into(),
+        None => "jpg".into(),
+    };
+    (ext, es_video)
+}
+
+/// ¿Es un enlace de medios de Weibo que redirige al archivo?
+///
+/// El vídeo de un Live Photo llega como
+/// `video.weibo.com/media/play?livephoto=…`, que responde con un 302 al `.mov`
+/// de `livephoto.us.sinaimg.cn`. Ese host cuelga de `weibo.com`, así que caía
+/// en gallery-dl, y gallery-dl no tiene extractor para esa ruta («Unsupported
+/// URL»): el `.mov` de cada Live Photo de la rejilla fallaba. Es un archivo
+/// directo, y lo baja el motor HTTP siguiendo la redirección.
+fn es_medio_weibo(url: &str) -> bool {
+    host_of(url).is_some_and(|h| h == "video.weibo.com")
+        && url
+            .split_once("://")
+            .and_then(|(_, r)| r.split_once('/'))
+            .is_some_and(|(_, ruta)| ruta.starts_with("media/play"))
 }
 
 /// Decodifica %XX y '+' (espacios) de un valor de query, para el `dn=` del magnet
@@ -2200,6 +2282,28 @@ fn needs_auth_error(msg: &str) -> bool {
         || m.contains("fresh cookies")
 }
 
+/// Autor de la carpeta para lo que se encola desde la rejilla: el MÁS
+/// FRECUENTE entre las fichas, no el primero.
+///
+/// Todo lo que se encola de una vez va a una sola carpeta, y antes mandaba la
+/// primera ficha con autor. En Weibo el listado trae los reenvíos con su autor
+/// ORIGINAL (`retweets=original`), igual que X trae los retuits: si el perfil
+/// empezaba por un reenvío, el perfil entero acababa en la carpeta de otra
+/// persona. El dueño del perfil es, con diferencia, quien más fichas tiene.
+/// En empate gana el que apareció antes, que es lo que se hacía.
+fn autor_mayoritario<'a>(autores: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut cuenta: Vec<(&str, usize)> = Vec::new();
+    for a in autores.filter(|a| !a.is_empty()) {
+        match cuenta.iter_mut().find(|(b, _)| *b == a) {
+            Some((_, n)) => *n += 1,
+            None => cuenta.push((a, 1)),
+        }
+    }
+    // `max_by_key` devuelve el ÚLTIMO de los empatados; recorrer al revés
+    // hace que gane el primero.
+    cuenta.into_iter().rev().max_by_key(|(_, n)| *n).map(|(a, _)| a.to_string())
+}
+
 /// Nombre del autor/perfil deducido de la propia URL.
 ///
 /// Hasta ahora el autor solo lo aportaban la vista Perfil y el capturador del
@@ -2239,14 +2343,17 @@ fn author_from_url(url: &str) -> String {
 
     // Weibo identifica al autor con un número: weibo.com/u/1234567.
     // Se prefija para que la carpeta no sea un número suelto sin contexto.
+    //
+    // Un post lleva el mismo número delante: `weibo.com/1234567/QvRHJ0FYJ`,
+    // como `x.com/alguien/status/1` en X. Antes caía en la raíz mientras el
+    // perfil del mismo autor iba a su carpeta.
     if host_matches(&host, "weibo.com") || host_matches(&host, "weibo.cn") {
-        if first == "u" {
-            if let Some(id) = segs.get(1) {
-                let id = as_user(id);
-                if !id.is_empty() {
-                    return format!("weibo_{id}");
-                }
-            }
+        let id = match first {
+            "u" | "profile" => segs.get(1).copied().unwrap_or(""),
+            _ => first,
+        };
+        if id.len() >= 5 && id.bytes().all(|b| b.is_ascii_digit()) {
+            return format!("weibo_{id}");
         }
         return String::new();
     }
@@ -2992,23 +3099,7 @@ impl App {
             if it.url.is_empty() || ya.contains(&it.url) {
                 continue;
             }
-            let ext = url_extension(&it.url).unwrap_or_else(|| "jpg".into());
-            // Por extensión para los archivos directos, y por FORMA DE LA URL
-            // para las páginas: un post de vídeo de Douyin o TikTok llega como
-            // `…/video/<id>`, sin extensión, y lo resuelve yt-dlp al
-            // descargarlo. Sin esto se contaba como imagen y la rejilla lo
-            // mezclaba con las fotos.
-            //
-            // `it.is_video` va primero porque es el único dato que NO es una
-            // deducción: el script lo leyó de la API. Los CDN de Meta sirven
-            // los vídeos desde rutas sin extensión reconocible, así que sin
-            // esto un .mp4 de Threads aparecía en la rejilla como imagen.
-            let u = it.url.to_ascii_lowercase();
-            let es_pagina_video = u.contains("/video/")
-                && (u.contains("douyin.com") || u.contains("tiktok.com"));
-            let es_video = it.is_video
-                || es_pagina_video
-                || matches!(ext.as_str(), "mp4" | "mov" | "webm" | "mkv" | "m4v");
+            let (ext, es_video) = tipo_capturado(&it.url, it.is_video);
             self.gallery_items.push(gallery::GalleryItem {
                 url: it.url,
                 filename: it.title.clone(),
@@ -3020,8 +3111,10 @@ impl App {
                 filesize: 0,
                 is_video: es_video,
                 post_id: it.id.clone(),
-                index_in_post: 0,
-                count_in_post: 0,
+                // El capturador de Threads manda la posición dentro del
+                // carrusel; los demás, cero, que es «archivo suelto».
+                index_in_post: it.num,
+                count_in_post: it.count,
                 author: it.author,
                 description: it.title,
                 date: String::new(),
@@ -3899,6 +3992,7 @@ impl App {
             cancel: Arc::new(AtomicBool::new(false)),
             thumb_url: if thumb.starts_with("http") { thumb.to_string() } else { String::new() },
             dl_cookie: cookie.to_string(),
+            num_en_post: 0,
         });
     }
 
@@ -4031,6 +4125,7 @@ impl App {
             },
             conexiones: self.settings.http_conexiones,
             kemono_preview: self.settings.kemono_preview,
+            num_en_post: row.num_en_post,
         };
         let client = self.client.clone();
         let sem = self.sem.clone();
@@ -4646,6 +4741,8 @@ struct DlSpec {
     /// Ver `Settings::kemono_preview`. Viaja en el spec por el mismo motivo
     /// que `conexiones`: una descarga en marcha no cambia de criterio a mitad.
     kemono_preview: bool,
+    /// Ver `Row::num_en_post`.
+    num_en_post: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4688,7 +4785,7 @@ async fn download_task(
             return;
         }
         Engine::GalleryDl => {
-            run_gallerydl(&spec, &spec.url.clone(), &tx, galdl.as_deref()).await;
+            run_gallerydl(&spec, &spec.url.clone(), &tx, galdl.as_deref(), None).await;
             return;
         }
         Engine::FileHost => {
@@ -4786,7 +4883,8 @@ async fn download_task(
                 return;
             }
             Some(Engine::GalleryDl) if galdl.is_some() => {
-                run_gallerydl(&spec, &spec.page_url.clone(), &tx, galdl.as_deref()).await;
+                let rango = rango_respaldo(&spec.page_url, spec.num_en_post);
+                run_gallerydl(&spec, &spec.page_url.clone(), &tx, galdl.as_deref(), rango).await;
                 return;
             }
             _ => {} // ningún motor la soporta: se informa del error original
@@ -8324,6 +8422,9 @@ struct ExecOutcome {
     stderr: String,
     /// El usuario pulsó Pausa y se mató el subproceso
     killed: bool,
+    /// Archivos que gallery-dl dice haber escrito (o saltado por existir ya):
+    /// una línea de stdout por archivo. yt-dlp no informa así y deja cero.
+    archivos: u64,
 }
 
 /// Mata el proceso **y toda su descendencia**.
@@ -8461,7 +8562,7 @@ async fn ytdlp_exec(
     let (status, killed) = wait_or_kill(&mut child, cancel).await?;
     let _ = progress_task.await;
     let stderr = err_task.await.unwrap_or_default();
-    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed })
+    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed, archivos: 0 })
 }
 
 /// ¿La URL pertenece a Bilibili? (incluye el acortador b23.tv)
@@ -10305,7 +10406,7 @@ async fn galdl_exec(
 
     let tx_files = tx.clone();
     let counter = tokio::spawn(async move {
-        let Some(out) = stdout else { return };
+        let Some(out) = stdout else { return 0 };
         let mut lines = BufReader::new(out).lines();
         let mut n: u64 = 0;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -10325,6 +10426,7 @@ async fn galdl_exec(
                 .collect::<String>();
             let _ = tx_files.send(Ev::GalFiles(id, n, name));
         }
+        n
     });
 
     // stderr en su propia tarea: hay que drenar la tubería mientras esperamos
@@ -10341,9 +10443,9 @@ async fn galdl_exec(
     });
 
     let (status, killed) = wait_or_kill(&mut child, cancel).await?;
-    let _ = counter.await;
+    let archivos = counter.await.unwrap_or(0);
     let stderr = err_task.await.unwrap_or_default();
-    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed })
+    Ok(ExecOutcome { ok: status.success() && !killed, stderr, killed, archivos })
 }
 
 /// Historial de archivos ya descargados por gallery-dl.
@@ -10686,7 +10788,15 @@ fn galdl_hint(lang: Lang, url: &str, err: &str) -> Option<&'static str> {
 }
 
 /// Descarga un post de imágenes (TikTok /photo/, Douyin /note/) con gallery-dl
-async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, program: Option<&str>) {
+/// `rango`: solo ese archivo de la publicación (`--range`), para el respaldo
+/// de un enlace caducado. Ver `rango_respaldo`.
+async fn run_gallerydl(
+    spec: &DlSpec,
+    url: &str,
+    tx: &UnboundedSender<Ev>,
+    program: Option<&str>,
+    rango: Option<String>,
+) {
     let Some(program) = program else {
         let _ = tx.send(Ev::Status(
             spec.id,
@@ -10757,6 +10867,10 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
     // para dar progreso en vivo.
     let mut args = galdl_base_args(&dir, url);
     args.extend(spec.extra_args.iter().cloned());
+    if let Some(n) = &rango {
+        args.push("--range".into());
+        args.push(n.clone());
+    }
     args.push("--".into());
     args.push(url.to_string());
 
@@ -10765,6 +10879,13 @@ async fn run_gallerydl(spec: &DlSpec, url: &str, tx: &UnboundedSender<Ev>, progr
         // queda anotado en el historial, así que Reanudar continúa desde ahí.
         Ok(r) if r.killed => {
             let _ = tx.send(Ev::Status(spec.id, Status::Paused));
+        }
+        // Un `--range` que no ha escrito NADA no es un éxito: la numeración no
+        // encajaba con la del listado. Se repite sin él —la publicación
+        // entera, lo que se hacía siempre— antes que dar por hecha una
+        // descarga vacía.
+        Ok(r) if r.ok && r.archivos == 0 && rango.is_some() => {
+            Box::pin(run_gallerydl(spec, url, tx, Some(program), None)).await;
         }
         Ok(r) if r.ok => {
             let _ = tx.send(Ev::Status(spec.id, Status::Done));
@@ -13482,14 +13603,8 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     if primary_button(ui, t(lang, "gal.queue_selected")).clicked() {
-                        let autor = self
-                            .gallery_items
-                            .iter()
-                            .map(|i| i.author.clone())
-                            .find(|a| !a.is_empty())
-                            .unwrap_or_else(|| {
-                                author_from_url(&self.gallery_url)
-                            });
+                        let autor = autor_mayoritario(self.gallery_items.iter().map(|i| i.author.as_str()))
+                            .unwrap_or_else(|| author_from_url(&self.gallery_url));
                         // Copiada antes del bucle: dentro se llama a
                         // `&mut self` y no se puede seguir prestando el campo.
                         let url_galeria = self.gallery_url.clone();
@@ -13509,6 +13624,7 @@ impl App {
                             // no un nombre único dentro de una carpeta.
                             let exacto: &str =
                                 if es_huggingface(&url_galeria) { &it.filename } else { "" };
+                            let antes = self.rows.len();
                             self.add_url_ext(
                                 &it.url,
                                 &autor,
@@ -13519,6 +13635,13 @@ impl App {
                                 &it.ext,
                                 exacto,
                             );
+                            // Su posición en la publicación: si el enlace
+                            // caduca, el respaldo baja solo este archivo.
+                            if self.rows.len() > antes {
+                                if let Some(r) = self.rows.last_mut() {
+                                    r.num_en_post = it.index_in_post;
+                                }
+                            }
                         }
                         self.toast(i18n::added_links(lang, n));
                         if n > 0 {
@@ -16479,6 +16602,7 @@ mod tests {
                 auth: String::new(),
                 conexiones: 1,
                 kemono_preview: true,
+                num_en_post: 0,
             };
             kemono::marcar_originales_vivos(kemono::Sitio::Kemono);
 
@@ -17406,6 +17530,102 @@ Set-Cookie: sesion=SECRETO_CUATRO; Path=/";
         assert_eq!(author_from_url("https://x.com/alguien/status/1"), "alguien");
         assert_eq!(author_from_url("https://weibo.com/u/1234567"), "weibo_1234567");
         assert_eq!(author_from_url("https://www.youtube.com/@canal/videos"), "canal");
+    }
+
+    /// Un post de Weibo lleva delante el número de su autor, como un tuit
+    /// lleva el usuario: va a la misma carpeta que el perfil.
+    #[test]
+    fn author_from_url_reconoce_los_posts_de_weibo() {
+        assert_eq!(author_from_url("https://weibo.com/7187265342/QvRHJ0FYJ"), "weibo_7187265342");
+        assert_eq!(author_from_url("https://weibo.com/2803301701?tabtype=album"), "weibo_2803301701");
+        assert_eq!(author_from_url("https://m.weibo.cn/profile/2803301701"), "weibo_2803301701");
+        // Sin el número del autor en la URL no se inventa carpeta.
+        assert_eq!(author_from_url("https://m.weibo.cn/detail/5347681787446955"), "");
+        assert_eq!(author_from_url("https://m.weibo.cn/status/QvRHJ0FYJ"), "");
+        assert_eq!(author_from_url("https://weibo.com/n/DarkAnglicanQpQ"), "");
+        assert_eq!(author_from_url("https://s.weibo.com/weibo?q=%23tag%23"), "");
+        assert_eq!(author_from_url("https://weibo.com/u/../../etc"), "");
+    }
+
+    /// La carpeta es la del autor que más fichas tiene, no la del primero: un
+    /// perfil de Weibo que empieza por un reenvío no se va a otra carpeta.
+    #[test]
+    fn la_carpeta_de_la_rejilla_es_la_del_autor_mayoritario() {
+        let a = |v: &[&str]| autor_mayoritario(v.iter().copied());
+        assert_eq!(a(&["weibo_9", "weibo_1", "weibo_1", "", "weibo_1"]).as_deref(), Some("weibo_1"));
+        // Empate: el primero, como antes.
+        assert_eq!(a(&["ana", "luis", "luis", "ana"]).as_deref(), Some("ana"));
+        assert_eq!(a(&["", "solo"]).as_deref(), Some("solo"));
+        assert_eq!(a(&["", ""]), None);
+        assert_eq!(a(&[]), None);
+    }
+
+    /// Lo que la rejilla guarda de un archivo capturado decide el motor y el
+    /// nombre al encolarlo.
+    #[test]
+    fn un_archivo_capturado_lleva_la_extension_que_toca() {
+        // Vídeo de Threads sin extensión en la ruta: mp4, no jpg.
+        assert_eq!(
+            tipo_capturado("https://scontent.cdninstagram.com/o1/v/t16/f2/m69/AQOabc?efg=x&oe=1", true),
+            ("mp4".to_string(), true)
+        );
+        // La extensión de la URL manda cuando la hay.
+        assert_eq!(
+            tipo_capturado("https://scontent.cdninstagram.com/v/t51.29350-15/1_n.jpg?stp=dst-jpg", false),
+            ("jpg".to_string(), false)
+        );
+        assert_eq!(tipo_capturado("https://e.com/v/clip.webm", false), ("webm".to_string(), true));
+        // Una PÁGINA de vídeo no tiene extensión: así la resuelve yt-dlp.
+        let (ext, video) = tipo_capturado("https://www.douyin.com/video/7350000000000000000", false);
+        assert_eq!((ext.as_str(), video), ("", true));
+        assert_eq!(engine_for_url("https://www.douyin.com/video/7350000000000000000"), Engine::YtDlp);
+        // Una imagen sin extensión sigue siendo jpg.
+        assert_eq!(tipo_capturado("https://cdn.example/img/abc", false), ("jpg".to_string(), false));
+    }
+
+    /// El respaldo de un enlace caducado baja solo ESE archivo donde la
+    /// numeración del listado y la del reintento salen del mismo extractor.
+    #[test]
+    fn el_respaldo_acota_al_archivo_solo_donde_la_numeracion_encaja() {
+        assert_eq!(rango_respaldo("https://www.instagram.com/p/ABC/", 3).as_deref(), Some("3"));
+        assert_eq!(rango_respaldo("https://weibo.com/5366453585/Kwepv6uNc", 5).as_deref(), Some("5"));
+        assert_eq!(rango_respaldo("https://m.weibo.cn/detail/4676818931548338", 1).as_deref(), Some("1"));
+        // Posición desconocida: la publicación entera, como siempre.
+        assert_eq!(rango_respaldo("https://weibo.com/5366453585/Kwepv6uNc", 0), None);
+        // Numeración propia (Kemono, Patreon) o de otra cosa (Facebook).
+        assert_eq!(rango_respaldo("https://kemono.cr/patreon/user/1/post/2", 2), None);
+        assert_eq!(rango_respaldo("https://www.patreon.com/posts/x-166592250", 2), None);
+        assert_eq!(rango_respaldo("https://www.facebook.com/photo/?fbid=1", 57), None);
+        assert_eq!(rango_respaldo("https://weibo.com.atacante.example/1/abc", 2), None);
+    }
+
+    /// El `.mov` de un Live Photo de Weibo es un archivo directo, aunque su
+    /// host cuelgue de weibo.com. El resto de Weibo sigue yendo a gallery-dl.
+    #[test]
+    fn el_mov_de_un_live_photo_de_weibo_lo_baja_el_motor_http() {
+        let mov = "https://video.weibo.com/media/play?livephoto=https%3A%2F%2Fus.sinaimg.cn%2F0015RD.mov&Expires=1&ssig=x";
+        assert!(es_medio_weibo(mov));
+        assert_eq!(engine_for_url(mov), Engine::Http);
+        assert_eq!(engine_for_url("https://weibo.com/7187265342/QvRHJ0FYJ"), Engine::GalleryDl);
+        assert_eq!(engine_for_url("https://weibo.com/u/7187265342"), Engine::GalleryDl);
+        assert!(!es_medio_weibo("https://video.weibo.com/show?fid=1034:5347678176083988"));
+        assert!(!es_medio_weibo("https://video.weibo.com.atacante.example/media/play?x=1"));
+    }
+
+    /// El respaldo de un enlace caducado baja solo ESE archivo donde la
+    /// numeración del listado y la del reintento salen del mismo extractor.
+    #[test]
+    fn el_respaldo_por_pagina_pide_solo_el_archivo_que_fallo() {
+        assert_eq!(rango_respaldo("https://weibo.com/1669879400/Rk0q6vfib", 5).as_deref(), Some("5"));
+        assert_eq!(rango_respaldo("https://m.weibo.cn/detail/5347681787446955", 2).as_deref(), Some("2"));
+        assert_eq!(rango_respaldo("https://www.instagram.com/p/ABC/", 3).as_deref(), Some("3"));
+        // Posición desconocida: la publicación entera, como siempre.
+        assert_eq!(rango_respaldo("https://www.instagram.com/p/ABC/", 0), None);
+        // Numeración propia (Kemono, Patreon) o de otra cosa (Facebook): no.
+        assert_eq!(rango_respaldo("https://kemono.cr/patreon/user/1/post/2", 3), None);
+        assert_eq!(rango_respaldo("https://www.patreon.com/posts/titulo-166592250", 3), None);
+        assert_eq!(rango_respaldo("https://www.facebook.com/photo/?fbid=1", 57), None);
+        assert_eq!(rango_respaldo("https://instagram.com.atacante.example/p/ABC/", 3), None);
     }
 
     #[test]

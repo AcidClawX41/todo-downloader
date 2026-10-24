@@ -842,6 +842,10 @@ function tdThAdd(n, code, autor, texto, idx, total) {
         w: mejor.width || n.original_width || 0,
         h: mejor.height || n.original_height || 0,
         video: !!vid,
+        // Posición dentro del carrusel (1-based) y total: la rejilla lo pinta
+        // como «2/5». En una publicación de un solo archivo, cero.
+        num: total > 1 ? idx + 1 : 0,
+        count: total > 1 ? total : 0,
         pageUrl: code ? 'https://www.threads.com/@' + autor + '/post/' + code : location.href
     });
 }
@@ -1322,6 +1326,9 @@ mod tests {
         // Y manda el tamaño real, que es lo que la rejilla no puede medir.
         assert!(s.contains("w: mejor.width"));
         assert!(s.contains("video: !!vid"));
+        // Y la posición dentro del carrusel, que el receptor lee como num/count.
+        assert!(s.contains("num: total > 1 ? idx + 1 : 0"));
+        assert!(s.contains("count: total > 1 ? total : 0"));
     }
 
     /// El filtro por cuenta no es cosmético: en una sola respuesta de un perfil

@@ -39,6 +39,10 @@ pub struct Incoming {
     /// El script ya sabe si el archivo es un vídeo. Deducirlo de la extensión
     /// falla en los CDN que no la llevan en la ruta.
     pub is_video: bool,
+    /// Posición (1-based) y total dentro de un carrusel, si el script los
+    /// manda. Cero = archivo suelto o script antiguo.
+    pub num: u32,
+    pub count: u32,
 }
 
 /// A dónde quiere el script que vayan los enlaces que manda.
@@ -281,6 +285,8 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                     w: n("w"),
                     h: n("h"),
                     is_video: it.get("video").and_then(|x| x.as_bool()).unwrap_or(false),
+                    num: n("num"),
+                    count: n("count"),
                 });
             }
             return (out, destino);
@@ -301,6 +307,8 @@ fn parse_body(body: &str) -> (Vec<Incoming>, Destino) {
                 w: 0,
                 h: 0,
                 is_video: false,
+                num: 0,
+                count: 0,
             });
         }
     }
@@ -364,6 +372,19 @@ mod tests {
         // dato bueno es el que manda el script, no el que deduce la aplicación.
         assert!(v[1].is_video);
         assert_eq!((v[1].w, v[1].h), (1080, 1920));
+        // Sin num/count: archivo suelto.
+        assert_eq!((v[0].num, v[0].count), (0, 0));
+    }
+
+    #[test]
+    fn lee_la_posicion_dentro_del_carrusel() {
+        let body = r#"{"mode":"select","items":[
+            {"url":"https://scontent.cdninstagram.com/v/a.jpg","id":"9_0","num":1,"count":3},
+            {"url":"https://scontent.cdninstagram.com/o1/v/t16/f2/m69/AQabc","id":"9_1","num":2,"count":3,"video":true}
+        ]}"#;
+        let (v, _) = parse_body(body);
+        assert_eq!((v[0].num, v[0].count), (1, 3));
+        assert_eq!((v[1].num, v[1].count), (2, 3));
     }
 
     #[test]
