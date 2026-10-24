@@ -656,6 +656,10 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
             "La publicación existe y tu sesión la ve, pero no lleva ningún archivo adjunto: puede ser solo texto, o un enlace externo a MEGA o Drive que Patreon no aloja.",
             "The post exists and your session can see it, but it carries no files: it may be text only, or an external MEGA/Drive link that Patreon does not host."
         ),
+        "kemono.lote_vacio" => entry!(
+            "Ninguna de estas publicaciones trae archivos ni imágenes: son de solo texto. «Cargar más» trae las siguientes.",
+            "None of these posts has files or images: they are text only. «Load more» fetches the next ones."
+        ),
         "gal.empty" => entry!("gallery-dl no devolvió nada. Suele ser falta de sesión: comprueba que la tienes abierta en el navegador elegido en Ajustes, o usa un cookies.txt.",
                                "gallery-dl returned nothing. This is usually a missing session: check that you are logged in on the browser selected in Settings, or use a cookies.txt file."),
         "gal.reason" => entry!("Lo que dijo gallery-dl:", "What gallery-dl said:"),
@@ -1145,7 +1149,9 @@ pub fn kemono_resumen(
 ) -> String {
     let por_pagina = crate::kemono::POR_PAGINA as u64;
     let desde = (pagina as u64 - 1) * por_pagina + 1;
-    let hasta = desde + en_pagina as u64 - 1;
+    // El lote son las publicaciones que se pidieron, tengan archivos o no. Se
+    // contaban las que traían alguno, y un lote de solo texto decía «1–0».
+    let hasta = (pagina as u64 * por_pagina).min(total).max(desde);
     let paginas = total.div_ceil(por_pagina).max(1);
     match lang {
         Lang::Es if filtrado => format!(
@@ -1668,6 +1674,11 @@ mod tests {
         assert_eq!(threads_perfil(Lang::Es, "nasa", 5, 6, false), "ℹ @nasa: 5 publicaciones, 6 archivos.");
         assert_eq!(galdl_edad(Lang::En, 0, false), "Downloaded less than a day ago.");
         assert_eq!(galdl_edad(Lang::Es, 1, false), "Descargado hace 1 día.");
+        // Un lote de Kemono son las publicaciones pedidas, tengan archivos o no
+        let r = kemono_resumen(Lang::En, "Kemono", "godotengine", 102, 1, 0, false);
+        assert!(r.contains("(posts 1–50,"), "{r}");
+        let r = kemono_resumen(Lang::En, "Kemono", "godotengine", 102, 3, 2, false);
+        assert!(r.contains("(posts 101–102,"), "{r}");
         // Ni un «(s)» de compromiso
         for l in [Lang::Es, Lang::En] {
             for n in [1, 2] {

@@ -4550,7 +4550,9 @@ impl App {
                         // en silencio: el usuario ve la pantalla igual que antes
                         // y no sabe si falló, si está cargando o si no hay nada.
                         // En Instagram la causa casi siempre es la sesión.
-                        if items.is_empty() {
+                        // Kemono no pasa por gallery-dl ni pide sesión: su
+                        // tarjeta de lista vacía ya dice lo que pasa.
+                        if items.is_empty() && !kemono::es_kemono(&self.gallery_url) {
                             self.toast(t(self.settings.lang, "gal.empty"));
                         }
                         self.gallery_items = items;
@@ -13768,6 +13770,19 @@ impl App {
                         self.galdl_desfasado(),
                     );
                     ui.label(RichText::new(texto).size(12.0).color(AMBER()));
+                } else if kemono::es_kemono(&self.gallery_url) {
+                    // Un lote de Kemono puede venir entero de solo texto. No es
+                    // gallery-dl ni la sesión, y sin «Cargar más» aquí —el de la
+                    // rejilla no se pinta con la rejilla vacía— no había forma
+                    // de llegar a las publicaciones siguientes.
+                    ui.label(RichText::new(t(lang, "kemono.lote_vacio")).size(12.0).color(AMBER()));
+                    if matches!(kemono::clasificar(&self.gallery_url), Some(kemono::Destino::Creador { .. }))
+                        && soft_button(ui, t(lang, "gal.more")).clicked()
+                    {
+                        let url = self.gallery_url.clone();
+                        self.gallery_prefetch_left = paginas_encadenadas(&url);
+                        self.explorar_kemono(url, self.gallery_page + 1);
+                    }
                 } else {
                     let clave = if es_patreon(&self.profile_url) {
                         "gal.empty_patreon_col"
@@ -13781,7 +13796,9 @@ impl App {
                 // y luego `return ()` cuando la página no trae la clave que
                 // espera. Ese `debug` SOLO se ve con `-v`. Sin él, el fallo es
                 // una lista vacía y nada más.
-                ui.horizontal(|ui| {
+                //
+                // Kemono no: se lista con su API, sin gallery-dl.
+                if !kemono::es_kemono(&self.gallery_url) { ui.horizontal(|ui| {
                     if self.galdl_verbose_corriendo {
                         ui.label(
                             RichText::new(t(lang, "booru.verbose_corriendo")).size(11.5).color(MUTED()),
@@ -13804,7 +13821,7 @@ impl App {
                             ));
                         }
                     }
-                });
+                }); }
                 if !self.galdl_verbose.is_empty() {
                     ui.add_space(4.0);
                     ui.label(RichText::new(t(lang, "booru.verbose_hint")).size(11.0).color(MUTED()));
